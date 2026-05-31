@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🎬 Video Roulette | Premium Random Video Picker</title>
+  
+  <!-- Font Integration -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+  
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Custom Styling -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- Ambient Glow Background -->
+  <div class="ambient-glow bg-glow-1"></div>
+  <div class="ambient-glow bg-glow-2"></div>
+  <div class="ambient-glow bg-glow-3"></div>
+
+  <!-- Main Container -->
+  <div class="app-container">
+    
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo">
+          <i class="fa-solid fa-wand-magic-sparkles logo-icon"></i>
+        </div>
+        <div class="brand-text">
+          <h1>VIDEO ROULETTE</h1>
+          <p>외장하드 영상 파일 무작위 뽑기 프로그램</p>
+        </div>
+      </div>
+      <div class="settings-bar">
+        <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
+          <i class="fa-solid fa-volume-high"></i>
+        </button>
+        <span class="system-status">
+          <span class="status-dot online"></span> SYSTEM READY
+        </span>
+      </div>
+    </header>
+
+    <main class="app-content">
+      
+      <!-- Left Panel: Configuration & Stats -->
+      <section class="panel-left">
+        
+        <!-- Drive Select & Scan Card -->
+        <div class="glass-card panel-card">
+          <div class="card-header">
+            <i class="fa-solid fa-hard-drive card-icon"></i>
+            <h2>디스크 및 디렉터리 지정</h2>
+          </div>
+          
+          <div class="card-body">
+            <!-- Detected Drives Quick Select -->
+            <div class="form-group">
+              <label>감지된 드라이브 선택</label>
+              <div class="drives-grid" id="drivesGrid">
+                <div class="drive-loading">
+                  <i class="fa-solid fa-spinner fa-spin"></i> 드라이브 감지 중...
+                </div>
+              </div>
+            </div>
+
+            <!-- Path Input -->
+            <div class="form-group">
+              <label for="directoryInput">직접 경로 입력</label>
+              <div class="input-with-button">
+                <input type="text" id="directoryInput" placeholder="예: E:\Videos 또는 D:\" autocomplete="off">
+                <button id="scanBtn" class="btn btn-primary">
+                  <i class="fa-solid fa-magnifying-glass"></i> 스캔 시작
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Scan Progress Card (Hidden initially, shown when scanning) -->
+        <div class="glass-card panel-card hidden" id="scanProgressCard">
+          <div class="card-body progress-body">
+            <div class="radar-container">
+              <div class="radar-circle"></div>
+              <div class="radar-sweep"></div>
+              <i class="fa-solid fa-compact-disc radar-icon fa-spin"></i>
+            </div>
+            <div class="progress-details">
+              <h3>디렉터리 실시간 스캔 중...</h3>
+              <p class="scanning-path" id="scanningPathText">스캔 경로 확인 중...</p>
+              
+              <div class="stats-mini-grid">
+                <div class="stat-mini-item">
+                  <span class="stat-label">폴더 수</span>
+                  <span class="stat-value" id="progressFolders">0</span>
+                </div>
+                <div class="stat-mini-item">
+                  <span class="stat-label">영상 파일 수</span>
+                  <span class="stat-value color-accent" id="progressFiles">0</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Scan Result Stats Card (Hidden initially) -->
+        <div class="glass-card panel-card hidden" id="scanResultCard">
+          <div class="card-header">
+            <i class="fa-solid fa-chart-simple card-icon"></i>
+            <h2>스캔 완료 통계</h2>
+          </div>
+          <div class="card-body">
+            <div class="stats-overview">
+              <div class="stat-large">
+                <span class="number" id="totalVideosCount">0</span>
+                <span class="label">총 영상 개수</span>
+              </div>
+              <div class="stat-small">
+                <div>스캔 시간: <span id="scanDurationText">0초</span></div>
+                <div>스캔 폴더: <span id="scannedFoldersText">0</span>개</div>
+              </div>
+            </div>
+            
+            <div class="format-distribution">
+              <label>포맷 분포</label>
+              <div class="tags-container" id="formatStatsTags">
+                <!-- Dynamically filled with pills -->
+              </div>
+            </div>
+
+            <!-- Filters Section -->
+            <div class="filter-section">
+              <label><i class="fa-solid fa-filter"></i> 뽑기 필터</label>
+              <div class="filter-inputs">
+                <input type="text" id="filterKeyword" placeholder="파일명 키워드 필터 (선택)">
+                <div class="filter-format-select">
+                  <select id="filterFormat">
+                    <option value="">모든 포맷</option>
+                    <!-- Dynamically filled options -->
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- Right Panel: Roulette & Winner -->
+      <section class="panel-right">
+        
+        <!-- Roulette Core Machine -->
+        <div class="glass-card roulette-card empty-state" id="rouletteContainer">
+          
+          <!-- Empty State (Shown before scan) -->
+          <div class="roulette-state-init" id="stateInit">
+            <div class="glow-sphere"></div>
+            <i class="fa-solid fa-clapperboard big-icon"></i>
+            <h2>준비 완료</h2>
+            <p>좌측 패널에서 외장하드 드라이브 또는 폴더를 선택하고 스캔해 주세요.</p>
+          </div>
+
+          <!-- Ready State (Shown after scan, before picking) -->
+          <div class="roulette-state-ready hidden" id="stateReady">
+            <div class="ready-title">
+              <span class="badge badge-pulse">READY</span>
+              <h2>뽑기 준비 완료</h2>
+              <p>총 <strong class="color-accent" id="readyCount">0</strong>개의 비디오 필터링됨</p>
+            </div>
+            
+            <!-- Shuffler Screen -->
+            <div class="shuffler-screen">
+              <div class="shuffler-track" id="shufflerTrack">
+                <div class="shuffler-slot">행운의 비디오를 뽑아보세요!</div>
+              </div>
+              <div class="screen-scan-line"></div>
+              <div class="screen-corner-decoration top-left"></div>
+              <div class="screen-corner-decoration top-right"></div>
+              <div class="screen-corner-decoration bottom-left"></div>
+              <div class="screen-corner-decoration bottom-right"></div>
+            </div>
+
+            <button id="pickBtn" class="btn btn-giant">
+              <span class="glow-effect"></span>
+              <i class="fa-solid fa-play"></i> 무작위 영상 뽑기!
+            </button>
+          </div>
+
+          <!-- Picking Shuffle Animation State -->
+          <div class="roulette-state-picking hidden" id="statePicking">
+            <div class="ready-title">
+              <span class="badge badge-picking">SHUFFLING</span>
+              <h2>당첨 영상 선별 중...</h2>
+            </div>
+            <div class="shuffler-screen picking-active">
+              <div class="shuffler-track" id="pickingTrack">
+                <!-- Names will rotate vertically at warp speed -->
+              </div>
+              <div class="screen-scan-line"></div>
+              <div class="screen-pointer"></div>
+            </div>
+            <button class="btn btn-giant btn-disabled" disabled>
+              <i class="fa-solid fa-spinner fa-spin"></i> 로딩 중...
+            </button>
+          </div>
+
+          <!-- Success Winner Reveal State -->
+          <div class="roulette-state-winner hidden" id="stateWinner">
+            
+            <div class="confetti-holder" id="confettiHolder"></div>
+            
+            <div class="winner-header">
+              <span class="badge badge-success"><i class="fa-solid fa-crown"></i> SELECTED</span>
+              <h2>🎉 오늘의 픽 영상 당첨! 🎉</h2>
+            </div>
+
+            <!-- Big Winner Card -->
+            <div class="winner-card">
+              <div class="winner-icon-wrap">
+                <i class="fa-solid fa-film film-reel-animation"></i>
+                <span class="winner-ext-badge" id="winnerExt">MKV</span>
+              </div>
+              <div class="winner-details">
+                <h3 id="winnerName" title="파일명">비디오_파일명.mp4</h3>
+                <div class="winner-meta">
+                  <span><i class="fa-regular fa-folder-open"></i> 크기: <strong id="winnerSize">250 MB</strong></span>
+                  <span><i class="fa-regular fa-clock"></i> 확장자: <strong id="winnerExtLabel">MKV</strong></span>
+                </div>
+                <div class="winner-path-wrap">
+                  <i class="fa-solid fa-location-dot"></i>
+                  <span id="winnerPath" title="클릭 시 전체 경로 복사">C:\Videos\MyVideo.mkv</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Winner Actions -->
+            <div class="winner-actions">
+              <button id="playWinnerBtn" class="btn btn-action btn-play">
+                <i class="fa-solid fa-play"></i> 즉시 재생하기
+              </button>
+              <button id="openFolderBtn" class="btn btn-action btn-folder">
+                <i class="fa-solid fa-folder-open"></i> 폴더 위치 열기 (선택됨)
+              </button>
+              <button id="repickBtn" class="btn btn-action btn-repick">
+                <i class="fa-solid fa-rotate"></i> 다시 뽑기 (Re-roll)
+              </button>
+            </div>
+
+          </div>
+
+        </div>
+
+        <!-- History Card -->
+        <div class="glass-card panel-card history-card hidden" id="historyCard">
+          <div class="card-header">
+            <i class="fa-solid fa-clock-rotate-left card-icon"></i>
+            <h2>최근 뽑은 영상 히스토리</h2>
+          </div>
+          <div class="card-body">
+            <div class="history-list" id="historyList">
+              <!-- Dynamically populated rows -->
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+    </main>
+    
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>&copy; 2026 Video Roulette. Crafted by Antigravity. Windows Native Automation enabled.</p>
+    </footer>
+
+  </div>
+
+</body>
+</html>
