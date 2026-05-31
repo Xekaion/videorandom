@@ -62,7 +62,10 @@
           <div class="card-body">
             <!-- Detected Drives Quick Select -->
             <div class="form-group">
-              <label>감지된 드라이브 선택</label>
+              <div class="label-with-progress">
+                <label>감지된 드라이브 선택</label>
+                <span id="driveDetectProgress" class="progress-percent">0%</span>
+              </div>
               <div class="drives-grid" id="drivesGrid">
                 <div class="drive-loading">
                   <i class="fa-solid fa-spinner fa-spin"></i> 드라이브 감지 중...
@@ -72,9 +75,12 @@
 
             <!-- Path Input -->
             <div class="form-group">
-              <label for="directoryInput">직접 경로 입력</label>
+              <label for="directoryInput">직접 경로 또는 폴더 선택</label>
               <div class="input-with-button">
                 <input type="text" id="directoryInput" placeholder="예: E:\Videos 또는 D:\" autocomplete="off">
+                <button id="browseBtn" class="btn btn-secondary" title="폴더 직접 찾아보기">
+                  <i class="fa-regular fa-folder-open"></i> 찾아보기
+                </button>
                 <button id="scanBtn" class="btn btn-primary">
                   <i class="fa-solid fa-magnifying-glass"></i> 스캔 시작
                 </button>

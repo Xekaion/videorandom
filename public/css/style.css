@@ -407,6 +407,40 @@ input[type="text"]::placeholder {
   filter: brightness(1.1);
   box-shadow: 0 0 25px rgba(139, 92, 246, 0.6);
 }
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-light);
+  color: var(--color-text-main);
+  transition: var(--transition-smooth);
+}
+.btn-secondary:hover {
+  background: rgba(6, 182, 212, 0.08);
+  border-color: var(--color-accent);
+  color: white;
+  box-shadow: var(--glow-cyan);
+  transform: translateY(-1px);
+}
+
+.label-with-progress {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.progress-percent {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-accent);
+  background: rgba(6, 182, 212, 0.1);
+  padding: 2px 8px;
+  border-radius: 20px;
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  text-shadow: 0 0 5px var(--color-accent);
+  transition: var(--transition-smooth);
+}
+
 .btn-icon {
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border-light);

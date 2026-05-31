@@ -118,6 +118,33 @@ app.get('/api/drives', async (req, res) => {
 });
 
 /**
+ * POST /api/browse
+ * Opens native Windows folder browser dialog via PowerShell and returns the selected path
+ */
+app.post('/api/browse', async (req, res) => {
+  console.log('Opening native folder browser dialog...');
+  
+  // Script uses [System.Windows.Forms.FolderBrowserDialog] in STA mode
+  const psCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '스캔할 드라이브 또는 폴더를 선택하세요'; $dialog.ShowNewFolderButton = $false; if ($dialog.ShowDialog() -eq 'OK') { Write-Output $dialog.SelectedPath }"`;
+
+  try {
+    // 60 seconds timeout so user has plenty of time to choose a folder
+    const output = await runCommandWithTimeout(psCommand, 60000);
+    const selectedPath = output.trim();
+    
+    if (selectedPath) {
+      console.log('Selected folder path:', selectedPath);
+      return res.json({ selectedPath });
+    }
+    
+    return res.json({ selectedPath: null });
+  } catch (err) {
+    console.warn('Folder dialog cancelled or failed:', err.message);
+    return res.json({ selectedPath: null });
+  }
+});
+
+/**
  * POST /api/scan
  * Recursively scans the given directory asynchronously for video files without blocking the server
  */

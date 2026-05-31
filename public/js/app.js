@@ -117,6 +117,7 @@ document.addEventListener('DOMContentLoaded', () => {
   detectDrives();
 
   // DOM Elements Event Listeners
+  document.getElementById('browseBtn').addEventListener('click', openFolderBrowser);
   document.getElementById('scanBtn').addEventListener('click', startScan);
   document.getElementById('directoryInput').addEventListener('keypress', (e) => {
     if (e.key === 'Enter') startScan();
@@ -235,14 +236,80 @@ function updateSoundButtonUI() {
   }
 }
 
-// Drive Detection
+// Native Windows Folder Browser dialog API call
+async function openFolderBrowser() {
+  const browseBtn = document.getElementById('browseBtn');
+  const directoryInput = document.getElementById('directoryInput');
+  
+  playTickSound(750, 0.04);
+  
+  // Visual loading state
+  const originalHTML = browseBtn.innerHTML;
+  browseBtn.disabled = true;
+  browseBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 열기 중...';
+  
+  try {
+    const response = await fetch('/api/browse', { method: 'POST' });
+    if (!response.ok) throw new Error();
+    const data = await response.json();
+    
+    if (data.selectedPath) {
+      directoryInput.value = data.selectedPath;
+      showToast('폴더가 선택되었습니다!');
+      playTickSound(900, 0.05);
+      
+      // Auto start scan when folder is selected
+      startScan();
+    }
+  } catch (err) {
+    console.error('Failed to open native folder browser:', err);
+    showToast('폴더 선택 창을 열지 못했습니다.');
+  } finally {
+    browseBtn.disabled = false;
+    browseBtn.innerHTML = originalHTML;
+  }
+}
+
+// Drive Detection with smooth cybernetic scanning percentage
 async function detectDrives() {
   const drivesGrid = document.getElementById('drivesGrid');
+  const progressEl = document.getElementById('driveDetectProgress');
+  
+  progressEl.classList.remove('hidden');
+  progressEl.textContent = '0%';
+  
+  // Start actual fetch in background
+  const fetchPromise = fetch('/api/drives').then(res => {
+    if (!res.ok) throw new Error();
+    return res.json();
+  });
+  
+  // Visual rapid sweep progress animation (simulates scanning drive letters)
+  let percent = 0;
+  const letters = 'CDEFGHIJKLMNO';
+  
+  const progressInterval = setInterval(() => {
+    percent += Math.floor(Math.random() * 15) + 8;
+    if (percent >= 100) {
+      percent = 99;
+    }
+    const currentLetter = letters[Math.floor((percent / 100) * letters.length)] || 'C';
+    progressEl.textContent = `${percent}% (${currentLetter}:\\)`;
+  }, 45);
+  
   try {
-    const response = await fetch('/api/drives');
-    if (!response.ok) throw new Error('Failed to fetch drives');
-    const drives = await response.json();
-
+    const drives = await fetchPromise;
+    clearInterval(progressInterval);
+    progressEl.textContent = '100%';
+    
+    setTimeout(() => {
+      progressEl.style.opacity = '0';
+      setTimeout(() => {
+        progressEl.classList.add('hidden');
+        progressEl.style.opacity = '1';
+      }, 300);
+    }, 800);
+    
     if (drives.length === 0) {
       drivesGrid.innerHTML = '<div class="drive-loading">연결된 외부 드라이브를 찾지 못했습니다.</div>';
       return;
@@ -251,6 +318,7 @@ async function detectDrives() {
     drivesGrid.innerHTML = '';
     drives.forEach((drive, index) => {
       const card = document.createElement('div');
+      // Auto-activate external drives, otherwise C:\
       card.className = `drive-card ${index === 0 && drive.letter !== 'C:\\' ? 'active' : ''}`;
       card.innerHTML = `
         <i class="fa-solid fa-hard-drive"></i>
@@ -279,6 +347,8 @@ async function detectDrives() {
     }
 
   } catch (err) {
+    clearInterval(progressInterval);
+    progressEl.textContent = '에러';
     console.error('Error listing drives:', err);
     drivesGrid.innerHTML = '<div class="drive-loading"><i class="fa-solid fa-triangle-exclamation color-accent"></i> 로딩 실패 (자동 감지 우회)</div>';
   }
