@@ -263,15 +263,19 @@ app.post('/api/open', async (req, res) => {
     return res.status(400).json({ error: '파일 경로가 누락되었습니다.' });
   }
 
+  // Standardize to Windows backslashes and normalize
+  const winPath = path.normalize(filePath).replace(/\//g, '\\');
+
   try {
-    await fsPromises.access(filePath, fs.constants.F_OK);
+    await fsPromises.access(winPath, fs.constants.F_OK);
   } catch (e) {
     return res.status(400).json({ error: '파일이 디스크에 존재하지 않습니다.' });
   }
 
-  console.log(`Opening folder for: ${filePath}`);
+  console.log(`Opening folder and highlighting: ${winPath}`);
   
-  const explorer = spawn('explorer.exe', [`/select,${filePath}`]);
+  // Wrap path in double quotes to safely handle spaces in directory names
+  const explorer = spawn('explorer.exe', [`/select,"${winPath}"`]);
 
   explorer.on('error', (err) => {
     console.error('Failed to open explorer:', err);
@@ -292,15 +296,19 @@ app.post('/api/play', async (req, res) => {
     return res.status(400).json({ error: '파일 경로가 누락되었습니다.' });
   }
 
+  // Standardize to Windows backslashes and normalize
+  const winPath = path.normalize(filePath).replace(/\//g, '\\');
+
   try {
-    await fsPromises.access(filePath, fs.constants.F_OK);
+    await fsPromises.access(winPath, fs.constants.F_OK);
   } catch (e) {
     return res.status(400).json({ error: '파일이 디스크에 존재하지 않습니다.' });
   }
 
-  console.log(`Playing file: ${filePath}`);
+  console.log(`Playing file: ${winPath}`);
 
-  const playProcess = spawn('cmd.exe', ['/c', 'start', '', filePath]);
+  // Use cmd start with double quotes around path to safely launch media files with spaces
+  const playProcess = spawn('cmd.exe', ['/c', 'start', '', winPath]);
 
   playProcess.on('error', (err) => {
     console.error('Failed to play file:', err);
