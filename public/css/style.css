@@ -421,6 +421,16 @@ input[type="text"]::placeholder {
   transform: translateY(-1px);
 }
 
+.btn-icon-only {
+  width: 45px;
+  height: 45px;
+  padding: 0 !important;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .label-with-progress {
   display: flex;
   justify-content: space-between;

@@ -435,8 +435,7 @@ async function startScan() {
 
     if (videoList.length > 0) {
       setRouletteState('ready');
-      document.getElementById('readyCount').textContent = videoList.length;
-      document.getElementById('shufflerTrack').innerHTML = `<div class="shuffler-slot">${videoList.length}개의 비디오 인덱싱 완료! 버튼을 클릭해 픽해보세요.</div>`;
+      applyFilters();
       playWinSound();
     } else {
       setRouletteState('init');
