@@ -1275,3 +1275,74 @@ input[type="text"]::placeholder {
 .color-accent {
   color: var(--color-accent) !important;
 }
+
+/* Filter Row & Exclude Cyber Checkbox */
+.filter-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+}
+
+.cyber-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 0 16px;
+  height: 45px;
+  transition: var(--transition-smooth);
+  flex-shrink: 0;
+}
+
+.cyber-checkbox-label:hover {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #ef4444;
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.2);
+}
+
+.cyber-checkbox-label input[type="checkbox"] {
+  display: none;
+}
+
+.cyber-checkbox-box {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-text-muted);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  transition: var(--transition-smooth);
+}
+
+.cyber-checkbox-label input[type="checkbox"]:checked + .cyber-checkbox-box {
+  border-color: #ef4444;
+  background: #ef4444;
+  box-shadow: 0 0 10px #ef4444;
+}
+
+.cyber-checkbox-label input[type="checkbox"]:checked + .cyber-checkbox-box::after {
+  content: '✓';
+  color: black;
+  font-size: 11px;
+  font-weight: 900;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.cyber-checkbox-label input[type="checkbox"]:checked ~ .checkbox-text {
+  color: #ef4444;
+  text-shadow: 0 0 5px rgba(239, 68, 68, 0.5);
+}

@@ -129,6 +129,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Filter Listeners
   document.getElementById('filterKeyword').addEventListener('input', applyFilters);
   document.getElementById('filterFormat').addEventListener('change', applyFilters);
+  document.getElementById('excludeFormat').addEventListener('change', applyFilters);
 
   // Winner Actions
   document.getElementById('playWinnerBtn').addEventListener('click', () => {
@@ -492,10 +493,20 @@ function populateFormatFilter(stats) {
 function applyFilters() {
   const keyword = document.getElementById('filterKeyword').value.trim().toLowerCase();
   const format = document.getElementById('filterFormat').value;
+  const excludeFormat = document.getElementById('excludeFormat').checked;
 
   filteredList = videoList.filter(video => {
     const matchesKeyword = !keyword || video.name.toLowerCase().includes(keyword);
-    const matchesFormat = !format || video.ext === format;
+    
+    let matchesFormat = true;
+    if (format) {
+      if (excludeFormat) {
+        matchesFormat = video.ext !== format;
+      } else {
+        matchesFormat = video.ext === format;
+      }
+    }
+    
     return matchesKeyword && matchesFormat;
   });
 

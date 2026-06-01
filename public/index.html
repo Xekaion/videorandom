@@ -145,11 +145,18 @@
               <label><i class="fa-solid fa-filter"></i> 뽑기 필터</label>
               <div class="filter-inputs">
                 <input type="text" id="filterKeyword" placeholder="파일명 키워드 필터 (선택)">
-                <div class="filter-format-select">
-                  <select id="filterFormat">
-                    <option value="">모든 포맷</option>
-                    <!-- Dynamically filled options -->
-                  </select>
+                <div class="filter-row">
+                  <div class="filter-format-select">
+                    <select id="filterFormat">
+                      <option value="">모든 포맷</option>
+                      <!-- Dynamically filled options -->
+                    </select>
+                  </div>
+                  <label class="cyber-checkbox-label" title="선택한 포맷을 제외하고 룰렛을 돌립니다.">
+                    <input type="checkbox" id="excludeFormat">
+                    <span class="cyber-checkbox-box"></span>
+                    <span class="checkbox-text">제외</span>
+                  </label>
                 </div>
               </div>
             </div>
