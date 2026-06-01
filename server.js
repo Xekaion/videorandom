@@ -274,12 +274,11 @@ app.post('/api/open', async (req, res) => {
 
   console.log(`Opening folder and highlighting: ${winPath}`);
   
-  // Wrap path in double quotes to safely handle spaces in directory names
-  const explorer = spawn('explorer.exe', [`/select,"${winPath}"`]);
-
-  explorer.on('error', (err) => {
-    console.error('Failed to open explorer:', err);
-    return res.status(500).json({ error: '폴더를 열지 못했습니다.' });
+  // Use exec to bypass Node's argument escaping and pass raw quotes to Explorer
+  exec(`explorer.exe /select,"${winPath}"`, (err) => {
+    if (err) {
+      console.error('Failed to execute explorer command:', err);
+    }
   });
 
   return res.json({ success: true });
@@ -307,12 +306,11 @@ app.post('/api/play', async (req, res) => {
 
   console.log(`Playing file: ${winPath}`);
 
-  // Use cmd start with double quotes around path to safely launch media files with spaces
-  const playProcess = spawn('cmd.exe', ['/c', 'start', '', winPath]);
-
-  playProcess.on('error', (err) => {
-    console.error('Failed to play file:', err);
-    return res.status(500).json({ error: '영상을 실행하지 못했습니다.' });
+  // Use exec to safely launch start command with unescaped double quotes
+  exec(`start "" "${winPath}"`, (err) => {
+    if (err) {
+      console.error('Failed to execute play command:', err);
+    }
   });
 
   return res.json({ success: true });
