@@ -663,7 +663,7 @@ async function playVideo(filePath) {
       body: JSON.stringify({ filePath })
     });
     if (!response.ok) throw new Error();
-    showToast('윈도우 미디어 플레이어로 영상을 재생합니다!');
+    showToast('기본으로 설정된 플레이어로 재생됩니다!');
     playTickSound(700, 0.05);
   } catch (e) {
     alert('영상을 실행하는 데 실패했습니다. 파일 경로 또는 시스템 연결을 확인하세요.');
