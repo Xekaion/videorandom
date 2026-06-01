@@ -326,12 +326,15 @@ async function detectDrives() {
         <span class="drive-name">${drive.label.replace(' 드라이브', '')}</span>
       `;
       
-      // Auto fill input on click
+      // Toggle active state for multi-drive selection on click
       card.addEventListener('click', () => {
-        document.querySelectorAll('.drive-card').forEach(c => c.classList.remove('active'));
-        card.classList.add('active');
-        document.getElementById('directoryInput').value = drive.letter;
+        card.classList.toggle('active');
         playTickSound(650, 0.03);
+        
+        const activeCards = drivesGrid.querySelectorAll('.drive-card.active');
+        const selectedLetters = Array.from(activeCards).map(c => c.querySelector('.drive-letter').textContent);
+        
+        document.getElementById('directoryInput').value = selectedLetters.join(', ');
       });
 
       drivesGrid.appendChild(card);

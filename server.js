@@ -155,21 +155,38 @@ app.post('/api/scan', async (req, res) => {
     return res.status(400).json({ error: '디렉터리 경로가 필요합니다.' });
   }
 
-  try {
-    // Asynchronous folder accessibility check
-    await fsPromises.access(directory, fs.constants.F_OK);
-  } catch (e) {
-    return res.status(400).json({ error: '존재하지 않거나 접근이 거부된 디렉터리 경로입니다.' });
+  // Parse comma-separated paths (e.g. "D:\, E:\")
+  const paths = typeof directory === 'string'
+    ? directory.split(',').map(d => d.trim()).filter(Boolean)
+    : [directory];
+
+  if (paths.length === 0) {
+    return res.status(400).json({ error: '유효한 디렉터리 경로가 없습니다.' });
   }
 
-  console.log(`Starting non-blocking async scan in: ${directory}`);
+  const validDirs = [];
+  for (const dir of paths) {
+    try {
+      // Check folder accessibility asynchronously
+      await fsPromises.access(dir, fs.constants.F_OK);
+      validDirs.push(dir);
+    } catch (e) {
+      console.warn(`Directory not accessible: ${dir}`);
+    }
+  }
+
+  if (validDirs.length === 0) {
+    return res.status(400).json({ error: '지정된 모든 디렉터리가 존재하지 않거나 접근이 거부되었습니다.' });
+  }
+
+  console.log(`Starting non-blocking async scan in: ${validDirs.join(', ')}`);
   
   const videoFiles = [];
   const formatStats = {}; 
   const errors = [];
   
-  // Asynchronous Breadth-First Search queue
-  const queue = [directory];
+  // Asynchronous Breadth-First Search queue initialized with multiple roots
+  const queue = [...validDirs];
   let scannedFoldersCount = 0;
   const startTime = Date.now();
 
