@@ -142,21 +142,20 @@
 
             <!-- Filters Section -->
             <div class="filter-section">
-              <label><i class="fa-solid fa-filter"></i> 뽑기 필터</label>
+              <div class="filter-header">
+                <label><i class="fa-solid fa-filter"></i> 뽑기 필터</label>
+                <div class="filter-mode-toggle">
+                  <span class="mode-label active" id="modeIncludeBtn">포함</span>
+                  <span class="mode-label" id="modeExcludeBtn">제외</span>
+                </div>
+              </div>
               <div class="filter-inputs">
                 <input type="text" id="filterKeyword" placeholder="파일명 키워드 필터 (선택)">
-                <div class="filter-row">
-                  <div class="filter-format-select">
-                    <select id="filterFormat">
-                      <option value="">모든 포맷</option>
-                      <!-- Dynamically filled options -->
-                    </select>
-                  </div>
-                  <label class="cyber-checkbox-label" title="선택한 포맷을 제외하고 룰렛을 돌립니다.">
-                    <input type="checkbox" id="excludeFormat">
-                    <span class="cyber-checkbox-box"></span>
-                    <span class="checkbox-text">제외</span>
-                  </label>
+              </div>
+              <div class="filter-formats-container">
+                <span class="filter-formats-label">대상 포맷 선택 (다중 선택 가능)</span>
+                <div class="filter-pills" id="filterFormatPills">
+                  <!-- Dynamically generated format pills -->
                 </div>
               </div>
             </div>

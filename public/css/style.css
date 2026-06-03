@@ -1276,73 +1276,155 @@ input[type="text"]::placeholder {
   color: var(--color-accent) !important;
 }
 
-/* Filter Row & Exclude Cyber Checkbox */
-.filter-row {
+/* Filter Section Layout & Header */
+.filter-section {
+  border-top: 1px solid var(--border-light);
+  padding-top: 16px;
   display: flex;
-  gap: 10px;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.filter-header {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
+}
+
+.filter-header label {
+  margin-bottom: 0;
+}
+
+/* Include / Exclude Mode Toggle Switch */
+.filter-mode-toggle {
+  display: inline-flex;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border-light);
+  border-radius: 20px;
+  padding: 2px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  font-weight: 700;
+  transition: var(--transition-smooth);
+}
+
+.filter-mode-toggle .mode-label {
+  padding: 4px 12px;
+  border-radius: 18px;
+  color: var(--color-text-muted);
+  transition: var(--transition-smooth);
+}
+
+.filter-mode-toggle .mode-label.active {
+  color: white;
+}
+
+/* When INCLUDE mode is active: Cyan theme */
+.filter-mode-toggle .mode-label#modeIncludeBtn.active {
+  background: var(--grad-cyan);
+  box-shadow: var(--glow-cyan);
+}
+
+/* When EXCLUDE mode is active: Red/Neon Red theme */
+.filter-mode-toggle .mode-label#modeExcludeBtn.active {
+  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+}
+
+.filter-inputs {
   width: 100%;
 }
 
-.cyber-checkbox-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
+.filter-inputs input {
+  width: 100%;
+  padding: 10px 14px;
   font-size: 13px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  color: white;
+  transition: var(--transition-smooth);
+}
+
+.filter-inputs input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.15);
+}
+
+.filter-formats-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.filter-formats-label {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Cyber Format Pills */
+.filter-pill {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
   font-weight: 600;
   color: var(--color-text-muted);
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border-light);
-  border-radius: 12px;
-  padding: 0 16px;
-  height: 45px;
+  cursor: pointer;
   transition: var(--transition-smooth);
-  flex-shrink: 0;
-}
-
-.cyber-checkbox-label:hover {
-  background: rgba(239, 68, 68, 0.08);
-  border-color: rgba(239, 68, 68, 0.4);
-  color: #ef4444;
-  box-shadow: 0 0 15px rgba(239, 68, 68, 0.2);
-}
-
-.cyber-checkbox-label input[type="checkbox"] {
-  display: none;
-}
-
-.cyber-checkbox-box {
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--color-text-muted);
-  border-radius: 4px;
+  user-select: none;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  position: relative;
-  transition: var(--transition-smooth);
+  gap: 4px;
 }
 
-.cyber-checkbox-label input[type="checkbox"]:checked + .cyber-checkbox-box {
-  border-color: #ef4444;
-  background: #ef4444;
-  box-shadow: 0 0 10px #ef4444;
+.filter-pill:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--color-text-main);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
-.cyber-checkbox-label input[type="checkbox"]:checked + .cyber-checkbox-box::after {
+/* Include Selection Style (Cyan) */
+.filter-pill.selected-include {
+  background: rgba(6, 182, 212, 0.1);
+  border-color: var(--color-accent);
+  color: white;
+  text-shadow: 0 0 5px var(--color-accent);
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+}
+
+.filter-pill.selected-include::before {
   content: '✓';
-  color: black;
-  font-size: 11px;
   font-weight: 900;
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
+  color: var(--color-accent);
 }
 
-.cyber-checkbox-label input[type="checkbox"]:checked ~ .checkbox-text {
+/* Exclude Selection Style (Red) */
+.filter-pill.selected-exclude {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: #ef4444;
   color: #ef4444;
-  text-shadow: 0 0 5px rgba(239, 68, 68, 0.5);
+  text-shadow: 0 0 5px rgba(239, 68, 68, 0.4);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.15);
+  text-decoration: line-through;
+}
+
+.filter-pill.selected-exclude::before {
+  content: '✕';
+  font-weight: 900;
+  color: #ef4444;
+  text-decoration: none;
+  display: inline-block;
 }
