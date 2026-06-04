@@ -6,8 +6,8 @@
 let videoList = [];        // All scanned videos
 let filteredList = [];     // Currently filtered videos (based on UI inputs)
 let pickHistory = [];      // History of picked videos
-let selectedFormats = new Set(); // Multi-select format filters
 let isSoundEnabled = true; // Web Audio API sound effects toggle
+let selectedFormats = new Set(); // Multi-selected formats for filtering
 
 // Web Audio API Context (Lazily initialized)
 let audioCtx = null;
@@ -129,14 +129,14 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // Filter Listeners
   document.getElementById('filterKeyword').addEventListener('input', applyFilters);
-  
-  const excludeFormatCheckbox = document.getElementById('excludeFormat');
-  excludeFormatCheckbox.addEventListener('change', (e) => {
-    const pillsContainer = document.getElementById('filterFormatPills');
-    if (e.target.checked) {
-      pillsContainer.classList.add('exclude-active');
+  document.getElementById('excludeFormat').addEventListener('change', () => {
+    // Toggle active tags visual mode (Include vs Exclude)
+    const excludeFormat = document.getElementById('excludeFormat').checked;
+    const tagsContainer = document.getElementById('filterFormatTags');
+    if (excludeFormat) {
+      tagsContainer.classList.add('exclude-mode');
     } else {
-      pillsContainer.classList.remove('exclude-active');
+      tagsContainer.classList.remove('exclude-mode');
     }
     applyFilters();
   });
@@ -484,44 +484,38 @@ function renderFormatStats(stats) {
   });
 }
 
-// Populate Format toggle pills
+// Populate interactive Format toggle tags
 function populateFormatFilter(stats) {
-  const container = document.getElementById('filterFormatPills');
+  const container = document.getElementById('filterFormatTags');
   container.innerHTML = '';
-  
-  selectedFormats.clear(); // Reset selection on new scan
-  
+  selectedFormats.clear(); // Reset selections on new scan
+
   const sortedFormats = Object.keys(stats).sort();
   
   if (sortedFormats.length === 0) {
-    container.innerHTML = '<span class="text-muted" style="font-size: 11px;">포맷 없음</span>';
+    container.innerHTML = '<span class="tag-badge-disabled" style="font-size: 11px; color: var(--color-text-muted);">포맷 없음</span>';
     return;
   }
-  
-  // Uncheck exclude on new scan to keep state clean
-  const excludeFormatCheckbox = document.getElementById('excludeFormat');
-  excludeFormatCheckbox.checked = false;
-  container.classList.remove('exclude-active');
-  
+
   sortedFormats.forEach(format => {
-    const pill = document.createElement('span');
-    pill.className = 'format-pill';
-    pill.textContent = `${format} (${stats[format]})`;
-    pill.dataset.format = format;
+    const pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'filter-tag-pill';
+    pill.innerHTML = `${format} <span class="pill-count">${stats[format]}</span>`;
     
+    // Toggle active state on click
     pill.addEventListener('click', () => {
-      pill.classList.toggle('active');
-      playTickSound(650, 0.03);
-      
       if (selectedFormats.has(format)) {
         selectedFormats.delete(format);
+        pill.classList.remove('active');
       } else {
         selectedFormats.add(format);
+        pill.classList.add('active');
       }
-      
+      playTickSound(650, 0.03);
       applyFilters();
     });
-    
+
     container.appendChild(pill);
   });
 }
