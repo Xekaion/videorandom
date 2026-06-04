@@ -673,10 +673,15 @@ input[type="text"]::placeholder {
   border-color: var(--color-primary);
   box-shadow: var(--glow-primary);
 }
-.filter-format-tags-wrapper {
+.filter-exclude-row {
   display: flex;
-  gap: 12px;
-  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+}
+#filterFormatTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   width: 100%;
 }
 .filter-tag-pill {
@@ -1312,19 +1317,22 @@ input[type="text"]::placeholder {
 
 /* Exclude Cyber Checkbox */
 .cyber-checkbox-label {
-  display: inline-flex;
-  align-items: center;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin-bottom: 0 !important;
+  text-transform: none !important;
   gap: 8px;
   cursor: pointer;
   user-select: none;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--color-text-muted);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--border-light);
-  border-radius: 12px;
-  padding: 0 16px;
-  height: 45px;
+  border-radius: 8px;
+  padding: 8px 14px;
+  height: 34px;
   transition: var(--transition-smooth);
   flex-shrink: 0;
   white-space: nowrap;
