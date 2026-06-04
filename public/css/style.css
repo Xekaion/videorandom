@@ -655,44 +655,13 @@ input[type="text"]::placeholder {
 }
 .filter-inputs {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 12px;
 }
 .filter-inputs input {
-  padding: 8px 12px;
-  font-size: 12px;
-}
-.filter-format-select {
-  width: 120px;
-  position: relative;
-}
-.filter-format-select select {
+  padding: 12px 16px;
+  font-size: 13px;
   width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--border-light);
-  border-radius: 10px;
-  color: white;
-  padding: 0 12px;
-  font-size: 12px;
-  font-family: var(--font-sans);
-  cursor: pointer;
-  appearance: none;
-}
-.filter-format-select select:focus {
-  outline: none;
-  border-color: var(--color-primary);
-}
-.filter-format-select::after {
-  content: '\f078';
-  font-family: 'Font Awesome 6 Free';
-  font-weight: 900;
-  font-size: 10px;
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  pointer-events: none;
-  color: var(--color-text-muted);
 }
 
 /* --- Roulette Core Machine (Right) --- */
@@ -1276,155 +1245,117 @@ input[type="text"]::placeholder {
   color: var(--color-accent) !important;
 }
 
-/* Filter Section Layout & Header */
-.filter-section {
-  border-top: 1px solid var(--border-light);
-  padding-top: 16px;
+/* Filter Row & Exclude Cyber Checkbox */
+/* Filter Row & Exclude Cyber Checkbox */
+.filter-row {
   display: flex;
-  flex-direction: column;
   gap: 12px;
-}
-
-.filter-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.filter-header label {
-  margin-bottom: 0;
-}
-
-/* Include / Exclude Mode Toggle Switch */
-.filter-mode-toggle {
-  display: inline-flex;
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid var(--border-light);
-  border-radius: 20px;
-  padding: 2px;
-  cursor: pointer;
-  user-select: none;
-  font-size: 11px;
-  font-weight: 700;
-  transition: var(--transition-smooth);
-}
-
-.filter-mode-toggle .mode-label {
-  padding: 4px 12px;
-  border-radius: 18px;
-  color: var(--color-text-muted);
-  transition: var(--transition-smooth);
-}
-
-.filter-mode-toggle .mode-label.active {
-  color: white;
-}
-
-/* When INCLUDE mode is active: Cyan theme */
-.filter-mode-toggle .mode-label#modeIncludeBtn.active {
-  background: var(--grad-cyan);
-  box-shadow: var(--glow-cyan);
-}
-
-/* When EXCLUDE mode is active: Red/Neon Red theme */
-.filter-mode-toggle .mode-label#modeExcludeBtn.active {
-  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
-  box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
-}
-
-.filter-inputs {
+  align-items: flex-start;
   width: 100%;
 }
 
-.filter-inputs input {
-  width: 100%;
-  padding: 10px 14px;
-  font-size: 13px;
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid var(--border-light);
-  border-radius: 10px;
-  color: white;
-  transition: var(--transition-smooth);
-}
-
-.filter-inputs input:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.15);
-}
-
-.filter-formats-container {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.filter-formats-label {
-  font-size: 10px;
-  color: var(--color-text-muted);
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-.filter-pills {
+.format-toggle-pills {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  flex: 1;
+  min-width: 0;
 }
 
-/* Cyber Format Pills */
-.filter-pill {
-  background: rgba(255, 255, 255, 0.02);
+.format-pill {
+  background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border-light);
-  border-radius: 8px;
   padding: 6px 12px;
+  border-radius: 8px;
   font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 600;
   color: var(--color-text-muted);
   cursor: pointer;
   transition: var(--transition-smooth);
   user-select: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
 }
 
-.filter-pill:hover {
-  background: rgba(255, 255, 255, 0.05);
+.format-pill:hover {
+  background: rgba(6, 182, 212, 0.05);
+  border-color: rgba(6, 182, 212, 0.3);
   color: var(--color-text-main);
-  border-color: rgba(255, 255, 255, 0.2);
 }
 
-/* Include Selection Style (Cyan) */
-.filter-pill.selected-include {
-  background: rgba(6, 182, 212, 0.1);
+.format-pill.active {
+  background: rgba(6, 182, 212, 0.15);
   border-color: var(--color-accent);
-  color: white;
-  text-shadow: 0 0 5px var(--color-accent);
+  color: var(--color-accent);
   box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
 }
 
-.filter-pill.selected-include::before {
-  content: '✓';
-  font-weight: 900;
-  color: var(--color-accent);
-}
-
-/* Exclude Selection Style (Red) */
-.filter-pill.selected-exclude {
-  background: rgba(239, 68, 68, 0.1);
+/* Exclude active state styling (red glow when exclude mode is checked) */
+.exclude-active .format-pill.active {
+  background: rgba(239, 68, 68, 0.15);
   border-color: #ef4444;
   color: #ef4444;
-  text-shadow: 0 0 5px rgba(239, 68, 68, 0.4);
-  box-shadow: 0 0 10px rgba(239, 68, 68, 0.15);
-  text-decoration: line-through;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.2);
 }
 
-.filter-pill.selected-exclude::before {
-  content: '✕';
-  font-weight: 900;
+.cyber-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 0 12px;
+  height: 32px;
+  align-self: flex-start;
+  transition: var(--transition-smooth);
+  flex-shrink: 0;
+}
+
+.cyber-checkbox-label:hover {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.4);
   color: #ef4444;
-  text-decoration: none;
-  display: inline-block;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.15);
+}
+
+.cyber-checkbox-label input[type="checkbox"] {
+  display: none;
+}
+
+.cyber-checkbox-box {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-text-muted);
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  transition: var(--transition-smooth);
+}
+
+.cyber-checkbox-label input[type="checkbox"]:checked + .cyber-checkbox-box {
+  border-color: #ef4444;
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+}
+
+.cyber-checkbox-label input[type="checkbox"]:checked + .cyber-checkbox-box::after {
+  content: '✓';
+  color: black;
+  font-size: 10px;
+  font-weight: 900;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.cyber-checkbox-label input[type="checkbox"]:checked ~ .checkbox-text {
+  color: #ef4444;
+  text-shadow: 0 0 5px rgba(239, 68, 68, 0.5);
 }

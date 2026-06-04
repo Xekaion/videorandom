@@ -6,9 +6,8 @@
 let videoList = [];        // All scanned videos
 let filteredList = [];     // Currently filtered videos (based on UI inputs)
 let pickHistory = [];      // History of picked videos
+let selectedFormats = new Set(); // Multi-select format filters
 let isSoundEnabled = true; // Web Audio API sound effects toggle
-let selectedFormats = new Set(); // Currently selected filter formats
-let filterMode = 'include';     // Filter mode: 'include' or 'exclude'
 
 // Web Audio API Context (Lazily initialized)
 let audioCtx = null;
@@ -130,8 +129,17 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // Filter Listeners
   document.getElementById('filterKeyword').addEventListener('input', applyFilters);
-  document.getElementById('modeIncludeBtn').addEventListener('click', () => setFilterMode('include'));
-  document.getElementById('modeExcludeBtn').addEventListener('click', () => setFilterMode('exclude'));
+  
+  const excludeFormatCheckbox = document.getElementById('excludeFormat');
+  excludeFormatCheckbox.addEventListener('change', (e) => {
+    const pillsContainer = document.getElementById('filterFormatPills');
+    if (e.target.checked) {
+      pillsContainer.classList.add('exclude-active');
+    } else {
+      pillsContainer.classList.remove('exclude-active');
+    }
+    applyFilters();
+  });
 
   // Winner Actions
   document.getElementById('playWinnerBtn').addEventListener('click', () => {
@@ -433,8 +441,8 @@ async function startScan() {
     // Render Stats Pills
     renderFormatStats(data.stats);
 
-    // Populate Format Filter Pills
-    populateFormatPills(data.stats);
+    // Populate Format Filter Dropdown
+    populateFormatFilter(data.stats);
 
     // Show result
     document.getElementById('scanResultCard').classList.remove('hidden');
@@ -476,91 +484,62 @@ function renderFormatStats(stats) {
   });
 }
 
-// Populate Format filter pills dynamically
-function populateFormatPills(stats) {
+// Populate Format toggle pills
+function populateFormatFilter(stats) {
   const container = document.getElementById('filterFormatPills');
   container.innerHTML = '';
   
-  const validSelected = new Set();
+  selectedFormats.clear(); // Reset selection on new scan
+  
   const sortedFormats = Object.keys(stats).sort();
+  
+  if (sortedFormats.length === 0) {
+    container.innerHTML = '<span class="text-muted" style="font-size: 11px;">포맷 없음</span>';
+    return;
+  }
+  
+  // Uncheck exclude on new scan to keep state clean
+  const excludeFormatCheckbox = document.getElementById('excludeFormat');
+  excludeFormatCheckbox.checked = false;
+  container.classList.remove('exclude-active');
   
   sortedFormats.forEach(format => {
     const pill = document.createElement('span');
-    pill.className = 'filter-pill';
-    pill.setAttribute('data-format', format);
-    pill.innerHTML = ` ${format}`;
-    
-    // Restore selection state if it is still present in stats
-    if (selectedFormats.has(format)) {
-      validSelected.add(format);
-      pill.classList.add(filterMode === 'include' ? 'selected-include' : 'selected-exclude');
-    }
+    pill.className = 'format-pill';
+    pill.textContent = `${format} (${stats[format]})`;
+    pill.dataset.format = format;
     
     pill.addEventListener('click', () => {
-      toggleFormatSelection(format, pill);
+      pill.classList.toggle('active');
+      playTickSound(650, 0.03);
+      
+      if (selectedFormats.has(format)) {
+        selectedFormats.delete(format);
+      } else {
+        selectedFormats.add(format);
+      }
+      
+      applyFilters();
     });
     
     container.appendChild(pill);
   });
-  
-  selectedFormats = validSelected;
-}
-
-// Toggle format pill selection
-function toggleFormatSelection(format, pillEl) {
-  playTickSound(650, 0.03);
-  if (selectedFormats.has(format)) {
-    selectedFormats.delete(format);
-    pillEl.classList.remove('selected-include', 'selected-exclude');
-  } else {
-    selectedFormats.add(format);
-    pillEl.classList.add(filterMode === 'include' ? 'selected-include' : 'selected-exclude');
-  }
-  applyFilters();
-}
-
-// Set Filter Mode (Include / Exclude)
-function setFilterMode(mode) {
-  if (filterMode === mode) return;
-  playTickSound(700, 0.03);
-  filterMode = mode;
-  
-  // Update UI buttons
-  document.getElementById('modeIncludeBtn').classList.toggle('active', mode === 'include');
-  document.getElementById('modeExcludeBtn').classList.toggle('active', mode === 'exclude');
-  
-  // Update classes on all pills
-  const pills = document.querySelectorAll('.filter-pill');
-  pills.forEach(pill => {
-    const format = pill.getAttribute('data-format');
-    if (selectedFormats.has(format)) {
-      if (mode === 'include') {
-        pill.classList.remove('selected-exclude');
-        pill.classList.add('selected-include');
-      } else {
-        pill.classList.remove('selected-include');
-        pill.classList.add('selected-exclude');
-      }
-    }
-  });
-  
-  applyFilters();
 }
 
 // Apply keyword/format filters to videoList
 function applyFilters() {
   const keyword = document.getElementById('filterKeyword').value.trim().toLowerCase();
-  
+  const excludeFormat = document.getElementById('excludeFormat').checked;
+
   filteredList = videoList.filter(video => {
     const matchesKeyword = !keyword || video.name.toLowerCase().includes(keyword);
     
     let matchesFormat = true;
     if (selectedFormats.size > 0) {
-      const hasFormat = selectedFormats.has(video.ext);
-      if (filterMode === 'exclude') {
-        matchesFormat = !hasFormat;
+      if (excludeFormat) {
+        matchesFormat = !selectedFormats.has(video.ext);
       } else {
-        matchesFormat = hasFormat;
+        matchesFormat = selectedFormats.has(video.ext);
       }
     }
     
