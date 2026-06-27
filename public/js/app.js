@@ -211,6 +211,13 @@ function loadSettings() {
   }
   updateSoundButtonUI();
 
+  // Excluded Dirs
+  const excludePref = localStorage.getItem('exclude_dirs');
+  if (excludePref !== null) {
+    const excludeEl = document.getElementById('excludeInput');
+    if (excludeEl) excludeEl.value = excludePref;
+  }
+
   // History
   const historyPref = localStorage.getItem('pick_history');
   if (historyPref) {
@@ -371,11 +378,18 @@ async function detectDrives() {
 // Start Directory Scanner API call
 async function startScan() {
   const pathInput = document.getElementById('directoryInput').value.trim();
+  const excludeInput = document.getElementById('excludeInput') ? document.getElementById('excludeInput').value.trim() : '';
 
   if (!pathInput) {
     alert('검색할 드라이브 또는 디렉터리 경로를 입력해 주세요.');
     return;
   }
+
+  // Save exclusion preference
+  localStorage.setItem('exclude_dirs', excludeInput);
+
+  // Parse exclusions
+  const excludeDirs = excludeInput ? excludeInput.split(',').map(s => s.trim()).filter(Boolean) : [];
 
   // Reset states
   videoList = [];
@@ -414,7 +428,7 @@ async function startScan() {
     const response = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ directory: pathInput })
+      body: JSON.stringify({ directory: pathInput, excludeDirs })
     });
 
     clearInterval(simulationInterval);

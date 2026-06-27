@@ -149,10 +149,25 @@ app.post('/api/browse', async (req, res) => {
  * Recursively scans the given directory asynchronously for video files without blocking the server
  */
 app.post('/api/scan', async (req, res) => {
-  const { directory } = req.body;
+  const { directory, excludeDirs } = req.body;
 
   if (!directory) {
     return res.status(400).json({ error: '디렉터리 경로가 필요합니다.' });
+  }
+
+  // Parse custom exclusions
+  const userExcludeDirs = Array.isArray(excludeDirs) ? excludeDirs : [];
+  const customExcludeNames = new Set();
+  const customExcludePaths = [];
+
+  for (const item of userExcludeDirs) {
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    if (trimmed.includes('\\') || trimmed.includes('/')) {
+      customExcludePaths.push(path.normalize(trimmed).toLowerCase());
+    } else {
+      customExcludeNames.add(trimmed.toLowerCase());
+    }
   }
 
   // Parse comma-separated paths (e.g. "D:\, E:\")
@@ -180,6 +195,9 @@ app.post('/api/scan', async (req, res) => {
   }
 
   console.log(`Starting non-blocking async scan in: ${validDirs.join(', ')}`);
+  if (userExcludeDirs.length > 0) {
+    console.log(`Excluding custom directories/paths: ${userExcludeDirs.join(', ')}`);
+  }
   
   const videoFiles = [];
   const formatStats = {}; 
@@ -220,6 +238,23 @@ app.post('/api/scan', async (req, res) => {
           // Skip system/excluded directories
           if (EXCLUDED_DIRS.has(dirNameLower) || dirNameLower.startsWith('.')) {
             continue;
+          }
+
+          // Skip custom excluded names (e.g. Cache)
+          if (customExcludeNames.has(dirNameLower)) {
+            continue;
+          }
+
+          // Skip custom excluded paths (e.g. D:\huge_folder)
+          if (customExcludePaths.length > 0) {
+            const normFullPath = path.normalize(fullPath).toLowerCase();
+            const shouldSkipPath = customExcludePaths.some(p => {
+              const rel = path.relative(p, normFullPath);
+              return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+            });
+            if (shouldSkipPath) {
+              continue;
+            }
           }
 
           queue.push(fullPath);
