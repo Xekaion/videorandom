@@ -388,8 +388,10 @@ async function startScan() {
   // Save exclusion preference
   localStorage.setItem('exclude_dirs', excludeInput);
 
-  // Parse exclusions
-  const excludeDirs = excludeInput ? excludeInput.split(',').map(s => s.trim()).filter(Boolean) : [];
+  // Parse exclusions (split by commas not preceded by a backslash, then restore escaped commas)
+  const excludeDirs = excludeInput
+    ? excludeInput.split(/(?<!\\),/).map(s => s.replace(/\\,/g, ',').trim()).filter(Boolean)
+    : [];
 
   // Reset states
   videoList = [];
