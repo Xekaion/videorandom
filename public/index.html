@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.4.1">
+  <link rel="stylesheet" href="css/style.css?v=1.5.0">
 </head>
 <body>
 
@@ -40,7 +40,7 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link" href="#videoCatalog">영상 분석</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.4.1</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.5.0</span>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
         </button>
@@ -368,6 +368,19 @@
             <input id="catalogFrameCount" type="number" min="1" max="20" value="10" inputmode="numeric">
             <small>기본 10장 · 영상 길이에 맞춰 일정한 간격으로 자동 추출합니다. 30분 영상은 약 3분 간격, 2시간 영상은 약 12분 간격입니다. 1~20장</small>
           </div>
+          <div class="catalog-field">
+            <label for="catalogTranscriptLanguage">영상 대사 언어</label>
+            <select id="catalogTranscriptLanguage">
+              <option value="auto">자동 감지</option>
+              <option value="ja">일본어</option>
+              <option value="zh">중국어</option>
+            </select>
+            <small>일본어·중국어 영상도 대사 시작·종료 시각과 함께 원문 자막으로 저장합니다. 자동 감지가 틀리면 언어를 지정해 다시 분석하세요.</small>
+          </div>
+          <label class="catalog-check catalog-summary-field hidden" for="catalogTranslateSubtitles">
+            <input id="catalogTranslateSubtitles" type="checkbox" checked>
+            <span>한국어 번역 자막도 생성 <small>자동 요약과 함께 번역하고 원문의 시간 구간을 유지합니다. 인식과 번역이 잘못된 부분은 원문과 대조해 주세요.</small></span>
+          </label>
           <div class="catalog-field catalog-remote-field hidden">
             <label for="catalogRemoteUrl">분석 서버 주소</label>
             <input id="catalogRemoteUrl" type="url" placeholder="예: http://192.168.0.10:3001" autocomplete="off" spellcheck="false" aria-describedby="catalogRemoteHint">
@@ -486,6 +499,7 @@
     <div class="catalog-detail-body">
       <p class="catalog-detail-path" id="catalogDetailPath"></p>
       <p class="catalog-detail-meta" id="catalogDetailMeta"></p>
+      <div class="catalog-repair-panel"><div><strong id="catalogDetailHealth"></strong><p id="catalogDetailRepairNote" class="catalog-section-note"></p></div><button id="catalogDetailRepair" class="btn btn-secondary" type="button">복구 / 다시 분석</button></div>
       <p class="catalog-notice hidden" id="catalogDetailWarnings"></p>
       <form id="catalogEditForm">
         <div class="catalog-edit-grid">
@@ -497,15 +511,26 @@
         <div class="catalog-save-row"><span id="catalogSaveStatus" role="status"></span><button id="catalogSave" class="btn btn-primary" type="submit">수정 내용 저장</button></div>
       </form>
       <section class="catalog-detail-section" aria-labelledby="catalogGalleryTitle"><h3 id="catalogGalleryTitle">대표 장면 <span id="catalogGalleryCount"></span></h3><p class="catalog-section-note">이미지를 누르면 크게 볼 수 있습니다. 장면 설명은 자동 요약을 사용한 경우 표시됩니다.</p><div id="catalogGallery" class="catalog-gallery"></div></section>
-      <section class="catalog-detail-section" aria-labelledby="catalogTranscriptTitle"><h3 id="catalogTranscriptTitle">전체 대사 / 자막</h3><p id="catalogTranscriptSource" class="catalog-section-note"></p><div id="catalogTranscript" class="catalog-transcript"></div></section>
+      <section class="catalog-detail-section" aria-labelledby="catalogTranscriptTitle">
+        <h3 id="catalogTranscriptTitle">전체 대사 / 시간 자막</h3>
+        <p id="catalogTranscriptSource" class="catalog-section-note"></p>
+        <p id="catalogSubtitleNotice" class="catalog-section-note hidden" role="status"></p>
+        <div class="catalog-subtitle-controls">
+          <div class="catalog-field"><label for="catalogSubtitleView">화면에 표시</label><select id="catalogSubtitleView"><option value="both">원문 + 한국어</option><option value="original">원문</option><option value="ko">한국어 번역</option></select></div>
+          <div class="catalog-field"><label for="catalogSubtitleDownloadLanguage">저장할 자막</label><select id="catalogSubtitleDownloadLanguage"><option value="ko">한국어 번역</option><option value="original">원문</option></select></div>
+          <button id="catalogSubtitleSrt" class="btn btn-secondary" type="button">SRT 저장</button>
+          <button id="catalogSubtitleVtt" class="btn btn-secondary" type="button">VTT 저장</button>
+        </div>
+        <div id="catalogTranscript" class="catalog-transcript"></div>
+      </section>
     </div>
   </dialog>
   <dialog class="catalog-zoom-dialog" id="catalogZoom" aria-labelledby="catalogZoomCaption"><button id="catalogZoomClose" class="btn btn-secondary" type="button" aria-label="확대 이미지 닫기">닫기 ×</button><img id="catalogZoomImage" alt=""><p id="catalogZoomCaption"></p></dialog>
 
   <!-- Core JavaScript Engine -->
-  <script src="js/app.js?v=1.4.1" defer></script>
-  <script src="js/history.js?v=1.4.1" defer></script>
-  <script src="js/catalog-sort.js?v=1.4.1" defer></script>
-  <script src="js/catalog.js?v=1.4.1" defer></script>
+  <script src="js/app.js?v=1.5.0" defer></script>
+  <script src="js/history.js?v=1.5.0" defer></script>
+  <script src="js/catalog-sort.js?v=1.5.0" defer></script>
+  <script src="js/catalog.js?v=1.5.0" defer></script>
 </body>
 </html>

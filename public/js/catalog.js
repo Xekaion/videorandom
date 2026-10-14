@@ -9,7 +9,7 @@
   const state = {
     scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0,
     config: null, job: null, pollTimer: null, starting: false, exporting: false,
-    refreshing: false, detailId: null, saving: false, hasModePreference: false,
+    refreshing: false, detailId: null, saving: false, subtitleDownloading: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
     autoPick: null, autoTimer: null, autoSettingsTimer: null,
     autoPolling: false, autoBusy: false, autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
@@ -68,6 +68,16 @@
   const frameUrl = (record, frame) => `/api/analysis/frames/${encodeURIComponent(record.id)}/${encodeURIComponent(frame.filename)}`;
   const isActive = job => job && ['running', 'cancelling', 'queued'].includes(job.status);
   const hasResult = record => record && (record.status !== 'failed' || frames(record).length > 0 || record.transcript?.length > 0);
+  const hasSummary = record => !![record?.summary, record?.plot].some(value => typeof value === 'string' && value.trim());
+  const transcriptLanguage = value => ['auto', 'ja', 'zh'].includes(value) ? value : 'auto';
+  const healthFor = record => {
+    if (record?.health?.code) return record.health;
+    if (!record) return { code: 'pending', reason: '아직 분석하지 않았습니다.' };
+    const code = record.status === 'failed' ? 'failed' : record.status === 'partial' ? 'partial'
+      : hasSummary(record) ? 'ready' : record.analysisMode === 'local' ? 'extraction-only' : 'summary-missing';
+    return { code, repairable: true, reason: ({ ready: '저장된 분석 결과를 사용할 수 있습니다.', 'extraction-only': '로컬 추출은 이미지와 원문 자막을 저장합니다. 자동 요약 방식으로 다시 분석하면 줄거리도 생성합니다.', 'summary-missing': '저장된 결과에 줄거리가 없습니다. 분석 설정과 오류 안내를 확인해 다시 분석하세요.', partial: '분석 일부가 완료되지 않았습니다. 아래 안내를 확인해 다시 분석하세요.', failed: record.error || '분석에 실패했습니다. 아래 안내를 확인해 다시 분석하세요.' })[code] };
+  };
+  const healthLabel = record => ({ ready: '정리 완료', 'extraction-only': '로컬 추출 · 자동 요약 전', 'summary-missing': '요약 실패 / 누락', partial: '일부 완료 · 복구 필요', failed: '분석 실패 · 복구 필요' })[healthFor(record).code] || '미분석';
   const codexReady = () => !!(state.config?.providers?.codex?.available && state.config.providers.codex.loggedIn && state.config.providers?.speech?.available);
 
   function codexUnavailableReason() {
@@ -84,6 +94,12 @@
     const value = Math.max(0, Math.floor(Number(seconds)));
     const parts = [Math.floor(value / 3600), Math.floor(value % 3600 / 60), value % 60];
     return parts.map(value => String(value).padStart(2, '0')).join(':');
+  }
+
+  function subtitleTime(seconds) {
+    if (seconds == null || !Number.isFinite(Number(seconds))) return '시간 미상';
+    const milliseconds = Math.round(Math.max(0, Number(seconds)) * 1000);
+    return `${time(milliseconds / 1000)}.${String(milliseconds % 1000).padStart(3, '0')}`;
   }
 
   async function request(url, options) {
@@ -236,6 +252,8 @@
     return {
       mode, frameCount: Number.isInteger(count) && count >= 1 && count <= 20 ? count : 10,
       transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked,
+      transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value),
+      subtitleLanguage: mode !== 'local' && $('catalogTranslateSubtitles').checked ? 'ko' : 'original',
       ...(mode === 'remote' ? { remoteUrl: $('catalogRemoteUrl').value.trim(), connectionCode: currentConnectionCode() } : {})
     };
   }
@@ -299,7 +317,11 @@
       if (!record || !record.id || !record.path) return;
       const key = pathKey(record.path);
       const previous = state.records.get(key);
-      const priority = result => result?.status === 'completed' ? 2 : result?.status === 'partial' ? 1 : 0;
+      // Keep a prior usable summary when a retry fails, while allowing a newer
+      // partial summary to repair an older result that only claimed completion.
+      const priority = result => hasSummary(result) ? result.status === 'completed' ? 4 : 3
+        : healthFor(result).code === 'extraction-only' && result.status === 'completed' ? 2
+        : result.status === 'completed' || result.status === 'partial' ? 1 : 0;
       const savedTime = result => {
         const savedAt = Date.parse(result?.savedAt || '');
         const analyzedAt = Date.parse(result?.analyzedAt || '');
@@ -366,6 +388,8 @@
     $('catalogExport').title = isActive(state.job) ? '분석이 끝나면 엑셀로 저장할 수 있습니다.' : '';
     $('catalogExport').textContent = state.exporting ? '엑셀 생성 중…' : `${state.selected.size ? '선택 결과' : '검색 결과'} 엑셀 저장${exportCount ? ` (${exportCount})` : ''}`;
     $('catalogSave').disabled = state.saving || isActive(state.job);
+    $('catalogDetailRepair').disabled = state.starting || isActive(state.job) || !state.config;
+    document.querySelectorAll('.catalog-repair-button').forEach(button => { button.disabled = state.starting || isActive(state.job) || !state.config; });
   }
 
   function render() {
@@ -421,7 +445,7 @@
       }
 
       const summaryCell = make('td');
-      summaryCell.append(make('p', 'catalog-text-clamp', record?.summary || record?.plot || (record ? '요약 없음 · 상세 화면에서 직접 작성하거나 자동 요약으로 분석하세요.' : '분석 대기')));
+      summaryCell.append(make('p', 'catalog-text-clamp', record?.summary || record?.plot || (record ? healthFor(record).reason : '분석 대기')));
       const labelsCell = make('td');
       const tags = make('div', 'catalog-labels');
       labels(record).forEach(label => tags.append(make('span', 'catalog-label', label)));
@@ -456,7 +480,7 @@
       framesCell.append(strip);
 
       const statusCell = make('td');
-      const statusText = { completed: '정리 완료', partial: '일부 완료', failed: '실패' }[record?.status] || '미분석';
+      const statusText = healthLabel(record);
       statusCell.append(make('span', `catalog-status catalog-status-${record?.status || 'pending'}`, statusText));
       if (record?.savedAt && hasResult(record)) statusCell.append(make('small', 'catalog-saved-badge', '이 PC에 저장됨'));
       if (record?.warnings?.length) {
@@ -465,6 +489,15 @@
         statusCell.append(warning);
       }
       if (record?.error) statusCell.title = record.error;
+      if (record && healthFor(record).repairable !== false) {
+        const repair = make('button', 'catalog-detail-link catalog-repair-button', healthFor(record).code === 'ready' ? '다시 분석' : '복구 / 다시 분석');
+        repair.type = 'button';
+        repair.title = '현재 분석 설정으로 다시 분석합니다. 기존 결과와 이미지는 보존됩니다.';
+        repair.setAttribute('aria-label', `${file.name} 복구 / 다시 분석`);
+        repair.disabled = state.starting || isActive(state.job) || !state.config;
+        repair.addEventListener('click', () => repairResult(record.id));
+        statusCell.append(repair);
+      }
       row.append(selectCell, nameCell, summaryCell, labelsCell, dialogueCell, framesCell, statusCell);
       fragment.append(row);
     });
@@ -483,7 +516,7 @@
     document.querySelectorAll('.catalog-summary-field').forEach(element => element.classList.toggle('hidden', mode === 'local'));
     document.querySelectorAll('.catalog-remote-field').forEach(element => element.classList.toggle('hidden', mode !== 'remote'));
     const notes = {
-      local: '로컬 추출은 이미지와 자막을 정리합니다. 줄거리와 라벨은 상세 화면에서 직접 입력할 수 있습니다.',
+      local: '로컬 추출은 이미지와 원문 시간 자막을 정리합니다. 자동 줄거리와 한국어 번역 자막은 이 PC에서 분석 또는 분석 서버 방식을 선택하세요.',
       codex: '음성은 로컬에서 인식하고 대표 이미지와 대사를 로그인된 Codex로 요약합니다. 이미지와 대사는 ChatGPT 서비스로 전송됩니다. Codex 사용량 한도가 적용되며 이 채팅창과 별도 분석 작업입니다. 표본 이미지와 인식된 대사에 따라 요약의 정확도가 달라질 수 있습니다.',
       remote: '이 프로그램이 대표 이미지, 자막과 필요한 음성을 분석 서버 PC로 전송합니다. 서버 PC의 로그인된 Codex가 이미지와 대사를 ChatGPT 서비스로 보내 요약하며 서버 계정의 Codex 사용량 한도가 적용됩니다. 새 분석 중에는 분석 서버 PC와 프로그램이 켜져 있어야 합니다. 완료된 줄거리·전체 대사·이미지는 이 PC에 저장되어 서버 연결 없이 다시 볼 수 있습니다.'
     };
@@ -495,7 +528,7 @@
     if (persist) {
       state.hasModePreference = true;
       try {
-        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode, frameCount: $('catalogFrameCount').value, remoteUrl: savedRemoteOrigin($('catalogRemoteUrl').value), transcribeAudio: $('catalogTranscribe').checked }));
+        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode, frameCount: $('catalogFrameCount').value, remoteUrl: savedRemoteOrigin($('catalogRemoteUrl').value), transcribeAudio: $('catalogTranscribe').checked, transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value), subtitleLanguage: $('catalogTranslateSubtitles').checked ? 'ko' : 'original' }));
       } catch (_) { /* Preferences are optional when browser storage is unavailable. */ }
     }
     updateSelectionUI();
@@ -507,6 +540,8 @@
     $('catalogSearch').value = '';
     $('catalogConnectionCode').value = '';
     $('catalogSort').value = catalogSort.DEFAULT_ORDER;
+    $('catalogTranscriptLanguage').value = 'auto';
+    $('catalogTranslateSubtitles').checked = true;
     try {
       $('catalogSort').value = catalogSort.normalizeOrder(localStorage.getItem(SORT_STORAGE_KEY));
     } catch (_) { /* Use completed-first ordering when browser storage is unavailable. */ }
@@ -517,10 +552,12 @@
       $('catalogFrameCount').value = Number(saved.frameCount) >= 1 && Number(saved.frameCount) <= 20 ? saved.frameCount : 10;
       $('catalogRemoteUrl').value = savedRemoteOrigin(saved.remoteUrl);
       $('catalogTranscribe').checked = saved.transcribeAudio === true;
+      $('catalogTranscriptLanguage').value = transcriptLanguage(saved.transcriptLanguage);
+      $('catalogTranslateSubtitles').checked = saved.subtitleLanguage !== 'original';
       // Remove an unsafe address saved by an older version without changing
       // the chosen mode or the raw address being edited during this session.
       if (typeof saved.remoteUrl === 'string' && saved.remoteUrl !== $('catalogRemoteUrl').value) {
-        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode: $('catalogMode').value, frameCount: $('catalogFrameCount').value, remoteUrl: $('catalogRemoteUrl').value, transcribeAudio: $('catalogTranscribe').checked }));
+        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode: $('catalogMode').value, frameCount: $('catalogFrameCount').value, remoteUrl: $('catalogRemoteUrl').value, transcribeAudio: $('catalogTranscribe').checked, transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value), subtitleLanguage: $('catalogTranslateSubtitles').checked ? 'ko' : 'original' }));
       }
     } catch (_) { /* Malformed preferences do not prevent use of the catalog. */ }
     settingsChanged(false);
@@ -685,6 +722,8 @@
         if (!state.settingsFields.has('catalogFrameCount')) $('catalogFrameCount').value = persistedOptions.frameCount || 10;
         if (!connectionTouched) $('catalogRemoteUrl').value = persistedOptions.remoteUrl || '';
         if (!state.settingsFields.has('catalogTranscribe')) $('catalogTranscribe').checked = persistedOptions.transcribeAudio === true;
+        if (!state.settingsFields.has('catalogTranscriptLanguage')) $('catalogTranscriptLanguage').value = transcriptLanguage(persistedOptions.transcriptLanguage);
+        if (!state.settingsFields.has('catalogTranslateSubtitles') && ['original', 'ko'].includes(persistedOptions.subtitleLanguage)) $('catalogTranslateSubtitles').checked = persistedOptions.subtitleLanguage === 'ko';
         state.hasModePreference = true;
       } else if (!state.hasModePreference && !state.settingsFields.has('catalogMode')) {
         $('catalogMode').value = codexReady() && config.defaultMode === 'codex' ? 'codex' : 'local';
@@ -736,7 +775,31 @@
     }
     if (!['local', 'codex', 'remote'].includes(mode)) throw new Error('분석 방식을 선택하세요.');
     if (mode === 'codex' && !codexReady()) throw new Error(codexUnavailableReason());
-    return { mode, frameCount, transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked, ...(mode === 'remote' ? remoteOptions() : {}) };
+    return { mode, frameCount, transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked,
+      transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value),
+      subtitleLanguage: mode !== 'local' && $('catalogTranslateSubtitles').checked ? 'ko' : 'original',
+      ...(mode === 'remote' ? remoteOptions() : {}) };
+  }
+
+  async function repairResult(id) {
+    if (state.starting || isActive(state.job)) return;
+    const record = findRecord(id);
+    if (!record) return;
+    try {
+      const options = analysisOptions();
+      state.starting = true;
+      updateSelectionUI();
+      notice(options.mode === 'local'
+        ? '로컬 이미지·원문 자막을 다시 추출합니다. 자동 요약·한국어 번역 자막을 생성하려면 이 PC에서 분석 또는 분석 서버 방식을 선택하세요. 기존 결과와 이미지는 보존됩니다.'
+        : '현재 분석 설정으로 복구를 시작합니다. 이전에 저장한 결과와 이미지는 보존됩니다.');
+      const result = await request(`/api/analysis/results/${encodeURIComponent(id)}/repair`, jsonOptions('POST', { options }));
+      trackJob(result.job || result);
+      if ($('catalogDetail').open && isActive(result.job || result)) $('catalogDetailRepairNote').textContent = '복구 분석 중입니다. 완료되면 새 결과를 표시합니다.';
+    } catch (error) {
+      notice(`복구 요청 실패 · ${error.message}`, true);
+      if ($('catalogDetail').open) $('catalogDetailRepairNote').textContent = `복구 요청 실패 · ${error.message}`;
+      $('catalogSettings').open = true;
+    } finally { state.starting = false; updateSelectionUI(); }
   }
 
   async function startAnalysis() {
@@ -767,7 +830,7 @@
     const overall = job.status === 'completed' ? 100 : Math.min(100, total ? (completed + (active ? (Number(job.percent) || 0) / 100 : 0)) / total * 100 : 0);
     $('catalogJob').classList.remove('hidden');
     const jobTitle = ({ completed: '분석 완료', cancelled: '분석 중지됨', failed: '분석 작업 실패', cancelling: '분석 중지 중…' })[job.status] || '영상 분석 중';
-    $('catalogJobTitle').textContent = job.source === 'auto-pick' ? `뽑은 영상 자동 ${jobTitle.replace(/^영상 /, '')}` : jobTitle;
+    $('catalogJobTitle').textContent = job.source === 'auto-pick' ? `뽑은 영상 자동 ${jobTitle.replace(/^영상 /, '')}` : job.source === 'repair' ? `복구 · ${jobTitle}` : jobTitle;
     $('catalogJobProgress').value = overall;
     $('catalogJobText').textContent = `${completed}/${total}개 처리${job.currentFile ? ` · ${job.currentFile}` : ''}${active && job.stage ? ` · ${job.stage}` : ''}${job.error ? ` · ${job.error}` : ''}`;
     $('catalogCancel').classList.toggle('hidden', !active);
@@ -790,10 +853,21 @@
       clearTimeout(state.pollTimer);
       const resultCount = Array.isArray(job.results) ? job.results.filter(hasResult).length : 0;
       const retainedCount = Array.isArray(job.results) ? job.results.filter(record => record.status !== 'completed' && recordFor(record)?.status === 'completed' && recordFor(record).id !== record.id).length : 0;
+      const problems = Array.isArray(job.results) ? job.results.filter(record => ['failed', 'partial', 'summary-missing'].includes(healthFor(record).code)) : [];
       const completedMessage = job.status === 'failed' ? job.error || '분석 작업에 실패했습니다.' : `${job.status === 'cancelled' ? '분석을 중지했습니다.' : '분석을 마쳤습니다.'} 결과 ${resultCount}개를 이 PC에 자동 저장했습니다. 프로그램을 다시 열어도 줄거리·대사·이미지가 남아 있습니다.`;
-      const message = `${completedMessage}${retainedCount ? ` 재분석이 완료되지 않은 영상 ${retainedCount}개는 이전에 완료된 결과와 이미지를 계속 표시합니다.` : ''}`;
-      if (job.source === 'auto-pick') autoNotice(message, job.status === 'failed');
-      else notice(message, job.status === 'failed');
+      const problemReason = problems[0] && (problems[0].error || healthFor(problems[0]).reason || problems[0].warnings?.[0]);
+      const message = `${completedMessage}${problems.length ? ` 복구가 필요한 결과 ${problems.length}개 · ${problemReason}` : ''}${retainedCount ? ` 재분석이 완료되지 않은 영상 ${retainedCount}개는 이전에 완료된 결과와 이미지를 계속 표시합니다.` : ''}`;
+      if (job.source === 'auto-pick') autoNotice(message, job.status === 'failed' || problems.length > 0);
+      else notice(message, job.status === 'failed' || problems.length > 0);
+      if (job.source === 'repair' && job.repairOf === state.detailId && $('catalogDetail').open && job.results?.[0]) {
+        const attempt = job.results[0];
+        const retained = recordFor(attempt);
+        if (retained) openDetail(retained.id);
+        if (retained?.id !== attempt.id && problems.length) {
+          $('catalogDetailWarnings').textContent += `\n이번 복구 분석: ${problemReason}`;
+          $('catalogDetailWarnings').classList.remove('hidden');
+        }
+      }
       clearTimeout(state.autoTimer);
       state.autoTimer = setTimeout(refreshAutoPick, 300);
     }
@@ -882,7 +956,11 @@
     const analyzedAt = record.analyzedAt ? new Date(record.analyzedAt) : null;
     const savedAt = record.savedAt ? new Date(record.savedAt) : null;
     $('catalogDetailMeta').textContent = `길이 ${time(record.duration)} · 이미지 ${frames(record).length}장${analyzedAt && !Number.isNaN(analyzedAt.getTime()) ? ` · 정리 ${analyzedAt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` : ''}${savedAt && !Number.isNaN(savedAt.getTime()) ? ` · 이 PC에 저장 ${savedAt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` : ''}`;
-    const warnings = [...(Array.isArray(record.warnings) ? record.warnings : []), ...(record.error ? [record.error] : [])];
+    $('catalogDetailHealth').textContent = healthLabel(record);
+    $('catalogDetailRepairNote').textContent = `${healthFor(record).reason} 현재 분석 설정으로 다시 분석하며 기존 결과는 보존합니다.`;
+    $('catalogDetailRepair').classList.toggle('hidden', healthFor(record).repairable === false);
+    $('catalogDetailRepair').disabled = state.starting || isActive(state.job) || !state.config;
+    const warnings = [...(Array.isArray(record.warnings) ? record.warnings : []), ...(record.error ? [record.error] : []), ...(record.subtitleError ? [record.subtitleError] : [])];
     $('catalogDetailWarnings').textContent = warnings.join('\n');
     $('catalogDetailWarnings').classList.toggle('hidden', !warnings.length);
     $('catalogEditSummary').value = record.summary || '';
@@ -909,20 +987,97 @@
     });
     if (!frames(record).length) gallery.append(make('p', 'catalog-muted', '추출된 대표 이미지가 없습니다. 분석 상태와 안내를 확인해 주세요.'));
     $('catalogGallery').replaceChildren(gallery);
-    const sourceNames = { sidecar: '동반 자막 파일', embedded: '영상 내 텍스트 자막', audio: '전체 오디오 음성 인식', none: '대사 / 자막 없음' };
-    const transcript = Array.isArray(record.transcript) ? record.transcript : [];
-    const sourceKind = String(record.transcriptSource || '').split(':')[0];
-    $('catalogTranscriptSource').textContent = `출처: ${sourceNames[sourceKind] || record.transcriptSource || '없음'} · ${transcript.length.toLocaleString()}구간`;
-    const lines = document.createDocumentFragment();
-    transcript.forEach(segment => {
-      const line = make('div', 'catalog-transcript-line');
-      line.append(make('span', 'catalog-transcript-time', `${time(segment.start)}${segment.end != null ? ` – ${time(segment.end)}` : ''}`), make('p', '', segment.text));
-      lines.append(line);
-    });
-    if (!transcript.length) lines.append(make('p', 'catalog-muted', '대사가 추출되지 않았습니다. 자동 요약은 자막이 없으면 전체 오디오를 로컬에서 음성 인식합니다. 로컬 추출은 동반 자막 / 영상 내 텍스트 자막을 사용합니다.'));
-    $('catalogTranscript').replaceChildren(lines);
+    const translated = hasTranslatedSubtitles(record);
+    $('catalogSubtitleView').value = translated ? 'both' : 'original';
+    $('catalogSubtitleDownloadLanguage').value = translated ? 'ko' : 'original';
+    renderTranscript(record);
     if (!$('catalogDetail').open) $('catalogDetail').showModal();
     $('catalogDetail').scrollTop = 0;
+  }
+
+  function hasTranslatedSubtitles(record) {
+    const original = Array.isArray(record?.transcript) ? record.transcript : [];
+    const translated = record?.subtitleTranslation;
+    return original.length > 0 && Array.isArray(translated) && translated.length === original.length
+      && translated.every((cue, index) => cue && typeof cue.text === 'string' && cue.text.trim()
+        && cue.start === original[index].start && cue.end === original[index].end);
+  }
+
+  function renderTranscript(record = findRecord(state.detailId)) {
+    if (!record) return;
+    const sourceNames = { sidecar: '동반 자막 파일', embedded: '영상 내 텍스트 자막', audio: '전체 오디오 음성 인식', none: '대사 / 자막 없음' };
+    const languageNames = { ja: '일본어', zh: '중국어', ko: '한국어', en: '영어' };
+    const transcript = Array.isArray(record.transcript) ? record.transcript : [];
+    const translated = hasTranslatedSubtitles(record);
+    const sourceKind = String(record.transcriptSource || '').split(':')[0];
+    const language = record.transcriptLanguage && record.transcriptLanguage !== 'auto' ? ` · 원문 ${languageNames[record.transcriptLanguage] || record.transcriptLanguage}` : '';
+    $('catalogTranscriptSource').textContent = `출처: ${sourceNames[sourceKind] || record.transcriptSource || '없음'} · ${transcript.length.toLocaleString()}구간${language}${translated ? ' · 한국어 번역 있음' : ''}`;
+    const view = translated ? $('catalogSubtitleView').value : 'original';
+    if (!translated) {
+      $('catalogSubtitleView').value = 'original';
+      $('catalogSubtitleDownloadLanguage').value = 'original';
+    }
+    $('catalogSubtitleView').querySelector('option[value="ko"]').disabled = !translated;
+    $('catalogSubtitleView').querySelector('option[value="both"]').disabled = !translated;
+    $('catalogSubtitleDownloadLanguage').querySelector('option[value="ko"]').disabled = !translated;
+    $('catalogSubtitleSrt').disabled = !transcript.length || state.subtitleDownloading;
+    $('catalogSubtitleVtt').disabled = !transcript.length || state.subtitleDownloading;
+    const message = record.subtitleError ? `한국어 자막 생성 실패 · ${record.subtitleError} 원문 자막은 그대로 보관됩니다.`
+      : translated ? '한국어 번역은 원문 자막의 시작·종료 시각을 그대로 사용합니다. SRT / VTT를 영상과 함께 사용할 수 있습니다.'
+      : '한국어 번역 자막은 아직 없습니다. 자동 요약 방식에서 ‘한국어 번역 자막도 생성’을 켜고 복구 / 다시 분석하세요. 원문 SRT / VTT는 바로 저장할 수 있습니다.';
+    $('catalogSubtitleNotice').textContent = message;
+    $('catalogSubtitleNotice').classList.remove('hidden');
+    $('catalogSubtitleNotice').classList.toggle('catalog-error', !!record.subtitleError);
+    const lines = document.createDocumentFragment();
+    transcript.forEach((segment, index) => {
+      const line = make('div', 'catalog-transcript-line');
+      const body = make('div', 'catalog-transcript-text');
+      if (view !== 'ko') body.append(make('p', translated && view === 'both' ? 'catalog-transcript-original' : '', segment.text));
+      if (translated && view !== 'original') body.append(make('p', 'catalog-transcript-translation', record.subtitleTranslation[index].text));
+      line.append(make('span', 'catalog-transcript-time', `${subtitleTime(segment.start)}${segment.end != null ? ` – ${subtitleTime(segment.end)}` : ''}`), body);
+      lines.append(line);
+    });
+    if (!transcript.length) lines.append(make('p', 'catalog-muted', '대사가 추출되지 않았습니다. 자막 / 음성 인식 오류 안내를 확인하고 복구 / 다시 분석하세요.'));
+    $('catalogTranscript').replaceChildren(lines);
+  }
+
+  async function downloadSubtitles(format) {
+    const record = findRecord(state.detailId);
+    if (!record || state.subtitleDownloading) return;
+    const language = $('catalogSubtitleDownloadLanguage').value === 'ko' ? 'ko' : 'original';
+    state.subtitleDownloading = true;
+    renderTranscript(record);
+    try {
+      const response = await fetch(`/api/analysis/results/${encodeURIComponent(record.id)}/subtitles?format=${format}&language=${language}`);
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || `자막 저장 실패 (${response.status})`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = make('a');
+      const basename = String(record.name || '영상').replace(/\.[^.]+$/, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_');
+      anchor.href = url;
+      anchor.download = `${basename}.${language === 'ko' ? 'ko' : 'original'}.${format}`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      if (state.detailId === record.id) {
+        $('catalogSubtitleNotice').textContent = `${language === 'ko' ? '한국어 번역' : '원문'} ${format.toUpperCase()} 자막을 저장했습니다.`;
+        $('catalogSubtitleNotice').classList.remove('catalog-error');
+      }
+    } catch (error) {
+      if (state.detailId === record.id) {
+        $('catalogSubtitleNotice').textContent = `자막 저장 실패 · ${error.message}`;
+        $('catalogSubtitleNotice').classList.add('catalog-error');
+      }
+    } finally {
+      state.subtitleDownloading = false;
+      const current = findRecord(state.detailId);
+      $('catalogSubtitleSrt').disabled = !current?.transcript?.length;
+      $('catalogSubtitleVtt').disabled = !current?.transcript?.length;
+    }
   }
 
   function openZoom(record, frame) {
@@ -962,7 +1117,7 @@
   window.videoCatalog = { onScan, onPick };
   document.addEventListener('DOMContentLoaded', () => {
     restoreSettings();
-    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); scheduleAutoSettings(id); if (state.config) renderToolStatus(); }));
+    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl', 'catalogTranscriptLanguage', 'catalogTranslateSubtitles'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); scheduleAutoSettings(id); if (state.config) renderToolStatus(); }));
     $('catalogAutoEnabled').addEventListener('change', event => changeAutoPick({ enabled: event.target.checked }));
     $('catalogAutoResume').addEventListener('click', () => changeAutoPick({ resume: true }));
     $('catalogStorageCopy').addEventListener('click', () => copyText(state.config?.storage?.directory, '이 PC의 분석 결과 저장 폴더 경로를 복사했습니다. 파일 탐색기 주소창에 붙여 넣으면 열 수 있습니다.'));
@@ -1017,6 +1172,10 @@
     $('catalogCancel').addEventListener('click', cancelAnalysis);
     $('catalogExport').addEventListener('click', exportExcel);
     $('catalogDetailClose').addEventListener('click', () => $('catalogDetail').close());
+    $('catalogDetailRepair').addEventListener('click', () => repairResult(state.detailId));
+    $('catalogSubtitleView').addEventListener('change', () => renderTranscript());
+    $('catalogSubtitleSrt').addEventListener('click', () => downloadSubtitles('srt'));
+    $('catalogSubtitleVtt').addEventListener('click', () => downloadSubtitles('vtt'));
     $('catalogDetail').addEventListener('close', () => {
       const origin = [...document.querySelectorAll('.catalog-file-name')].find(element => element.dataset.recordId === String(state.detailId));
       (origin || $('catalogRefresh')).focus();

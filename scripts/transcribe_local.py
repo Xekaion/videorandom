@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--model", default="small")
     parser.add_argument("--device", default="cpu", choices=("cpu", "cuda", "auto"))
     parser.add_argument("--compute-type", default="int8")
+    parser.add_argument("--language", default="auto", choices=("auto", "ja", "zh"))
     args = parser.parse_args()
     from faster_whisper import WhisperModel
 
@@ -27,7 +28,8 @@ def main():
     model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type,
                          download_root=os.path.abspath(args.cache))
     segments, info = model.transcribe(os.path.abspath(args.audio), beam_size=5,
-                                      vad_filter=True, condition_on_previous_text=False)
+                                      vad_filter=True, condition_on_previous_text=False,
+                                      language=None if args.language == "auto" else args.language)
     emit({"type": "info", "language": info.language, "duration": info.duration})
     count = 0
     for segment in segments:

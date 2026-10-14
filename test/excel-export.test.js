@@ -95,6 +95,22 @@ test('exports all ten actual JPEGs, catalog metadata and timestamped dialogue', 
   for (const name of images) assert.deepEqual(await zip.file(name).async('nodebuffer'), JPEG);
 });
 
+test('Korean subtitles export beside the unchanged original cues with matching timestamps and literal text', async t => {
+  const dataDir = await temporaryDirectory(t);
+  const transcript = [{ start: 1.125, end: 3.875, text: 'こんにちは。駅へ行きましょう。' }, { start: 10.25, end: 12.75, text: '今天天气很好。' }];
+  const translations = [{ ...transcript[0], text: '=1+1\n안녕하세요. 역으로 갑시다.' }, { ...transcript[1], text: '오늘 날씨가 좋습니다. '.repeat(4000) }];
+  const { workbook } = await roundtrip([record({ transcript, transcriptLanguage: 'ja', subtitleLanguage: 'ko', subtitleTranslation: translations })], dataDir);
+  const sheet = workbook.getWorksheet('전체 대사');
+  assert.equal(texts(sheet, '전체 대사').filter(Boolean).join(''), transcript.map(cue => cue.text).join(''));
+  assert.equal(texts(sheet, '한국어 자막').join(''), translations.map(cue => cue.text).join(''));
+  assert.equal(sheet.getCell(2, columnNumber(sheet, '한국어 자막')).type, ExcelJS.ValueType.String);
+  assert.ok(Math.abs(secondsFromCell(sheet.getCell(2, columnNumber(sheet, '시작'))) - 1.125) < 0.001);
+  assert.ok(Math.abs(secondsFromCell(sheet.getCell(2, columnNumber(sheet, '종료'))) - 3.875) < 0.001);
+  const { workbook: mismatch } = await roundtrip([record({ transcript, subtitleLanguage: 'ko', subtitleTranslation: [{ ...translations[0], start: 4 }, translations[1]] })], dataDir);
+  assert.equal(texts(mismatch.getWorksheet('전체 대사'), '한국어 자막')[0], '');
+  assert.match(texts(mismatch.getWorksheet('영상 목록'), '경고').join(''), /한국어 자막 시각이 원문과 달라/);
+});
+
 test('preserves long plot, summary, descriptions and complete dialogue losslessly with literal formula-looking text', async t => {
   const dataDir = await temporaryDirectory(t);
   const plot = '도입\n' + '가'.repeat(32764) + '🎬' + '전개와 결말 '.repeat(6000);

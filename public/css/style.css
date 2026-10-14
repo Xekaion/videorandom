@@ -1539,6 +1539,18 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-transcript-line:last-child { border-bottom: 0; }
 .catalog-transcript-time { color: #90c7d0; font-size: 10px; font-family: var(--font-mono); line-height: 2; }
 .catalog-transcript-line p { color: #d1d5de; font-size: 12px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.catalog-repair-panel { display: flex; align-items: center; justify-content: space-between; gap: 18px; border: 1px solid #36364b; border-radius: 9px; padding: 14px 16px; margin: 14px 0; }
+.catalog-repair-panel strong { font-size: 13px; color: #e5bd6c; }
+.catalog-repair-panel .catalog-section-note { margin-bottom: 0; }
+.catalog-repair-panel button { flex-shrink: 0; }
+.catalog-repair-button { display: block; margin-top: 9px; }
+.catalog-subtitle-controls { display: flex; align-items: end; gap: 10px; margin: 14px 0; flex-wrap: wrap; }
+.catalog-subtitle-controls .catalog-field { min-width: 130px; }
+.catalog-subtitle-controls button { margin-bottom: 1px; }
+.catalog-transcript-line .catalog-transcript-original { color: #a1a8b5; }
+.catalog-transcript-line .catalog-transcript-translation { color: #e3edf4; }
+.catalog-transcript-original + .catalog-transcript-translation { margin-top: 5px; }
+@media (max-width: 620px) { .catalog-repair-panel { align-items: start; flex-direction: column; gap: 10px; } .catalog-subtitle-controls .catalog-field { flex: 1; } }
 .catalog-zoom-dialog { padding: 18px; width: min(1200px, calc(100vw - 30px)); max-height: 94vh; overflow: auto; }
 .catalog-zoom-dialog > .btn { display: block; margin-left: auto; margin-bottom: 12px; }
 .catalog-zoom-dialog img { display: block; width: 100%; max-height: 74vh; object-fit: contain; background: #06060d; }
