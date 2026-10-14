@@ -1391,6 +1391,15 @@ input[type="text"]::placeholder {
 .catalog-heading h2 { font-size: 23px; line-height: 1.4; }
 .catalog-description { color: var(--color-text-muted); font-size: 13px; line-height: 1.7; margin-top: 8px; max-width: 750px; }
 .catalog-heading > .btn { white-space: nowrap; flex-shrink: 0; margin-top: 8px; }
+.catalog-storage { margin-bottom: 20px; padding: 15px 18px; border: 1px solid rgba(110,231,183,.22); border-radius: 12px; background: rgba(16,185,129,.045); }
+.catalog-storage > strong { display: block; color: #a7f3d0; font-size: 13px; }
+.catalog-storage > p { color: var(--color-text-muted); font-size: 12px; line-height: 1.8; margin-top: 7px; }
+.catalog-storage-path-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 10px; min-width: 0; }
+.catalog-storage-path-row > span { color: var(--color-text-muted); font-size: 11px; }
+.catalog-storage-path-row > code { color: #d1fae5; font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; min-width: 0; }
+.catalog-storage-path-row > .btn { padding: 6px 9px; border-radius: 7px; font-size: 11px; }
+.catalog-storage > .catalog-storage-count { margin-top: 6px; font-size: 11px; }
+.catalog-saved-badge { display: block; color: #a7f3d0; font-size: 10px; margin-top: 7px; }
 .catalog-settings { border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.015); border-radius: 12px; margin-bottom: 20px; }
 .catalog-settings > summary { cursor: pointer; padding: 14px 18px; font-size: 13px; font-weight: 600; }
 .catalog-settings > summary span { margin-left: 12px; color: var(--color-text-muted); font-size: 12px; font-weight: 400; }

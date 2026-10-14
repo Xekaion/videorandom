@@ -64,8 +64,28 @@
   function mergeRecords(records) {
     if (!Array.isArray(records)) return;
     records.forEach(record => {
-      if (record && record.id && record.path) state.records.set(pathKey(record.path), record);
+      if (!record || !record.id || !record.path) return;
+      const key = pathKey(record.path);
+      const previous = state.records.get(key);
+      const priority = result => result?.status === 'completed' ? 2 : result?.status === 'partial' ? 1 : 0;
+      const savedTime = result => {
+        const savedAt = Date.parse(result?.savedAt || '');
+        const analyzedAt = Date.parse(result?.analyzedAt || '');
+        return Math.max(Number.isFinite(savedAt) ? savedAt : 0, Number.isFinite(analyzedAt) ? analyzedAt : 0);
+      };
+      if (!previous || previous.id === record.id || priority(record) > priority(previous)
+          || (priority(record) === priority(previous) && savedTime(record) > savedTime(previous))) {
+        state.records.set(key, record);
+      }
     });
+  }
+
+  function renderStorage() {
+    const storage = state.config?.storage;
+    if (storage?.directory) $('catalogStoragePath').textContent = storage.directory;
+    $('catalogStorageCopy').disabled = !storage?.directory;
+    const completed = [...state.records.values()].filter(record => record.status === 'completed').length;
+    $('catalogStorageCount').textContent = `이 PC에 저장된 영상 ${state.records.size.toLocaleString()}개 · 분석 완료 ${completed.toLocaleString()}개 · 줄거리·대사는 results, 대표 이미지는 frames 폴더에 보관됩니다.`;
   }
 
   function allFiles() {
@@ -206,6 +226,7 @@
       const statusCell = make('td');
       const statusText = { completed: '정리 완료', partial: '일부 완료', failed: '실패' }[record?.status] || '미분석';
       statusCell.append(make('span', `catalog-status catalog-status-${record?.status || 'pending'}`, statusText));
+      if (record?.savedAt && hasResult(record)) statusCell.append(make('small', 'catalog-saved-badge', '이 PC에 저장됨'));
       if (record?.warnings?.length) {
         const warning = make('small', 'catalog-row-warning', `확인 ${record.warnings.length}건`);
         warning.title = record.warnings.join('\n');
@@ -220,6 +241,7 @@
     $('catalogPageInfo').textContent = state.filtered.length ? `${(start + 1).toLocaleString()}–${Math.min(start + PAGE_SIZE, state.filtered.length).toLocaleString()} / ${state.filtered.length.toLocaleString()}개 · ${state.page + 1}/${pageCount}페이지` : '';
     $('catalogPrevPage').disabled = state.page === 0;
     $('catalogNextPage').disabled = state.page >= pageCount - 1;
+    renderStorage();
     updateSelectionUI();
   }
 
@@ -230,29 +252,31 @@
     const notes = {
       local: '로컬 추출은 이미지와 자막을 정리합니다. 줄거리와 라벨은 상세 화면에서 직접 입력할 수 있습니다.',
       codex: '음성은 로컬에서 인식하고 대표 이미지와 대사를 로그인된 Codex로 요약합니다. 이미지와 대사는 ChatGPT 서비스로 전송됩니다. Codex 사용량 한도가 적용되며 이 채팅창과 별도 분석 작업입니다. 표본 이미지와 인식된 대사에 따라 요약의 정확도가 달라질 수 있습니다.',
-      remote: '이 프로그램이 대표 이미지, 자막과 필요한 음성을 분석 서버 PC로 전송합니다. 서버 PC의 로그인된 Codex가 이미지와 대사를 ChatGPT 서비스로 보내 요약하며 서버 계정의 Codex 사용량 한도가 적용됩니다. 분석 서버 PC와 프로그램이 켜져 있어야 합니다.'
+      remote: '이 프로그램이 대표 이미지, 자막과 필요한 음성을 분석 서버 PC로 전송합니다. 서버 PC의 로그인된 Codex가 이미지와 대사를 ChatGPT 서비스로 보내 요약하며 서버 계정의 Codex 사용량 한도가 적용됩니다. 새 분석 중에는 분석 서버 PC와 프로그램이 켜져 있어야 합니다. 완료된 줄거리·전체 대사·이미지는 이 PC에 저장되어 서버 연결 없이 다시 볼 수 있습니다.'
     };
     $('catalogModeNote').textContent = notes[mode] || notes.local;
-    const custom = $('catalogTimestamps').value.trim();
-    $('catalogFrameCount').disabled = !!custom;
-    $('catalogSettingsSummary').textContent = `${{ local: '로컬 추출', codex: '이 PC에서 자동 요약', remote: '분석 서버로 전송' }[mode] || '로컬 추출'} · ${custom ? '시점 직접 지정' : `대표 이미지 ${$('catalogFrameCount').value || 10}장`}`;
+    $('catalogFrameCount').disabled = false;
+    $('catalogSettingsSummary').textContent = `${{ local: '로컬 추출', codex: '이 PC에서 자동 요약', remote: '분석 서버로 전송' }[mode] || '로컬 추출'} · 영상 길이에 맞춰 자동 ${$('catalogFrameCount').value || 10}장`;
     $('catalogRemoteCheck').disabled = state.remoteChecking || !$('catalogRemoteUrl').value.trim() || !$('catalogConnectionCode').value.trim();
     if (persist) {
       state.hasModePreference = true;
       try {
-        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode, frameCount: $('catalogFrameCount').value, timestamps: $('catalogTimestamps').value, remoteUrl: $('catalogRemoteUrl').value.trim(), transcribeAudio: $('catalogTranscribe').checked }));
+        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode, frameCount: $('catalogFrameCount').value, remoteUrl: $('catalogRemoteUrl').value.trim(), transcribeAudio: $('catalogTranscribe').checked }));
       } catch (_) { /* Preferences are optional when browser storage is unavailable. */ }
     }
     updateSelectionUI();
   }
 
   function restoreSettings() {
+    $('catalogShowSaved').checked = true;
+    $('catalogStatusFilter').value = 'all';
+    $('catalogSearch').value = '';
+    $('catalogConnectionCode').value = '';
     try {
       const saved = JSON.parse(localStorage.getItem('video_catalog_settings') || '{}');
       state.hasModePreference = ['local', 'codex', 'remote'].includes(saved.mode);
       $('catalogMode').value = state.hasModePreference ? saved.mode : 'local';
       $('catalogFrameCount').value = Number(saved.frameCount) >= 1 && Number(saved.frameCount) <= 20 ? saved.frameCount : 10;
-      $('catalogTimestamps').value = typeof saved.timestamps === 'string' ? saved.timestamps : '';
       $('catalogRemoteUrl').value = typeof saved.remoteUrl === 'string' ? saved.remoteUrl : '';
       $('catalogTranscribe').checked = saved.transcribeAudio === true;
     } catch (_) { /* Malformed preferences do not prevent use of the catalog. */ }
@@ -270,7 +294,7 @@
     const mode = $('catalogMode').value;
     const unavailable = mode === 'codex' && !codexReady();
     $('catalogToolStatus').textContent = unavailable ? codexUnavailableReason() : mode === 'remote'
-      ? '이 PC는 영상 자료를 추출해 서버로 보냅니다. 이 PC의 Codex 로그인이나 음성 인식 도구는 필요하지 않습니다.'
+      ? '이 PC는 영상 자료를 추출해 서버로 보내고 분석이 끝나면 결과와 이미지를 이 PC에 자동 저장합니다. 이 PC의 Codex 로그인이나 음성 인식 도구는 필요하지 않습니다.'
       : `FFmpeg / FFprobe 준비 완료${mode === 'codex' ? ' · Codex 로그인 / 로컬 음성 인식 준비 완료' : ''} · 분석 결과는 이 컴퓨터에 저장됩니다.`;
     $('catalogToolStatus').classList.toggle('catalog-error', unavailable);
   }
@@ -391,22 +415,13 @@
 
   function analysisOptions() {
     const mode = $('catalogMode').value;
-    const custom = $('catalogTimestamps').value.trim();
-    let frameCount = Number($('catalogFrameCount').value);
+    const frameCount = Number($('catalogFrameCount').value);
     if (!Number.isInteger(frameCount) || frameCount < 1 || frameCount > 20) {
-      if (!custom) throw new Error('대표 이미지 수는 1~20 사이의 정수로 입력하세요.');
-      frameCount = 10;
-    }
-    let timestamps = null;
-    if (custom) {
-      const values = custom.split(',').map(value => value.trim());
-      if (values.some(value => !/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(value))) throw new Error('시점은 0 이상의 분 숫자를 쉼표로 구분해 입력하세요. 예: 5, 15, 30');
-      timestamps = [...new Set(values.map(value => Number(value) * 60))].sort((a, b) => a - b);
-      if (timestamps.length < 1 || timestamps.length > 20 || timestamps.some(value => !Number.isFinite(value))) throw new Error('직접 지정할 시점은 최대 20개까지 입력할 수 있습니다.');
+      throw new Error('대표 이미지 수는 1~20 사이의 정수로 입력하세요.');
     }
     if (!['local', 'codex', 'remote'].includes(mode)) throw new Error('분석 방식을 선택하세요.');
     if (mode === 'codex' && !codexReady()) throw new Error(codexUnavailableReason());
-    return { mode, frameCount, timestamps, transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked, ...(mode === 'remote' ? remoteOptions() : {}) };
+    return { mode, frameCount, transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked, ...(mode === 'remote' ? remoteOptions() : {}) };
   }
 
   async function startAnalysis() {
@@ -458,7 +473,9 @@
     else {
       clearTimeout(state.pollTimer);
       const resultCount = Array.isArray(job.results) ? job.results.filter(hasResult).length : 0;
-      notice(job.status === 'failed' ? job.error || '분석 작업에 실패했습니다.' : `${job.status === 'cancelled' ? '분석을 중지했습니다.' : '분석을 마쳤습니다.'} 저장된 결과 ${resultCount}개를 확인하세요.`, job.status === 'failed');
+      const retainedCount = Array.isArray(job.results) ? job.results.filter(record => record.status !== 'completed' && recordFor(record)?.status === 'completed' && recordFor(record).id !== record.id).length : 0;
+      const completedMessage = job.status === 'failed' ? job.error || '분석 작업에 실패했습니다.' : `${job.status === 'cancelled' ? '분석을 중지했습니다.' : '분석을 마쳤습니다.'} 결과 ${resultCount}개를 이 PC에 자동 저장했습니다. 프로그램을 다시 열어도 줄거리·대사·이미지가 남아 있습니다.`;
+      notice(`${completedMessage}${retainedCount ? ` 재분석이 완료되지 않은 영상 ${retainedCount}개는 이전에 완료된 결과와 이미지를 계속 표시합니다.` : ''}`, job.status === 'failed');
     }
   }
 
@@ -536,7 +553,8 @@
     $('catalogDetailTitle').textContent = record.name || '영상 상세';
     $('catalogDetailPath').textContent = record.path;
     const analyzedAt = record.analyzedAt ? new Date(record.analyzedAt) : null;
-    $('catalogDetailMeta').textContent = `길이 ${time(record.duration)} · 이미지 ${frames(record).length}장${analyzedAt && !Number.isNaN(analyzedAt.getTime()) ? ` · 정리 ${analyzedAt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` : ''}`;
+    const savedAt = record.savedAt ? new Date(record.savedAt) : null;
+    $('catalogDetailMeta').textContent = `길이 ${time(record.duration)} · 이미지 ${frames(record).length}장${analyzedAt && !Number.isNaN(analyzedAt.getTime()) ? ` · 정리 ${analyzedAt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` : ''}${savedAt && !Number.isNaN(savedAt.getTime()) ? ` · 이 PC에 저장 ${savedAt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` : ''}`;
     const warnings = [...(Array.isArray(record.warnings) ? record.warnings : []), ...(record.error ? [record.error] : [])];
     $('catalogDetailWarnings').textContent = warnings.join('\n');
     $('catalogDetailWarnings').classList.toggle('hidden', !warnings.length);
@@ -617,8 +635,8 @@
   window.videoCatalog = { onScan };
   document.addEventListener('DOMContentLoaded', () => {
     restoreSettings();
-    ['catalogMode', 'catalogFrameCount', 'catalogTimestamps', 'catalogTranscribe', 'catalogRemoteUrl'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); if (state.config) renderToolStatus(); }));
-    $('catalogTimestamps').addEventListener('input', () => settingsChanged());
+    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); if (state.config) renderToolStatus(); }));
+    $('catalogStorageCopy').addEventListener('click', () => copyText(state.config?.storage?.directory, '이 PC의 분석 결과 저장 폴더 경로를 복사했습니다. 파일 탐색기 주소창에 붙여 넣으면 열 수 있습니다.'));
     ['catalogRemoteUrl', 'catalogConnectionCode'].forEach(id => $(id).addEventListener('input', () => {
       $('catalogRemoteStatus').textContent = '';
       settingsChanged(id !== 'catalogConnectionCode');

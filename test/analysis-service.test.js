@@ -45,13 +45,15 @@ async function waitForJob(request, id) {
 test('analysis options reject invalid frames and API mode, and validate private server addresses', () => {
   assert.equal(validateOptions({ mode: 'local', apiKey: 'not sent' }).apiKey, '');
   assert.throws(() => validateOptions({ frameCount: 21 }));
-  assert.throws(() => validateOptions({ timestamps: [NaN] }));
+  assert.equal(validateOptions({ timestamps: [NaN] }).timestamps, null);
   assert.throws(() => validateOptions({ mode: 'wrong' }));
   assert.throws(() => validateOptions({ mode: 'ai', apiKey: '\ninvalid' }));
   assert.equal(validateOptions({ mode: 'codex' }).apiKey, '');
   assert.throws(() => validateOptions({ mode: 'remote', remoteUrl: 'https://example.com', connectionCode: 'code' }));
   assert.equal(validateOptions({ mode: 'remote', remoteUrl: 'http://192.168.55.166:3001', connectionCode: 'code' }).remoteUrl, 'http://192.168.55.166:3001');
-  assert.deepEqual(validateOptions({ timestamps: [900, 300, 300] }).timestamps, [300, 900]);
+  assert.equal(validateOptions({ timestamps: [900, 300, 300] }).timestamps, null);
+  assert.equal(validateOptions({ timestamps: 'legacy browser setting' }).frameCount, 10);
+  assert.equal(validateOptions({ frameCount: 12, timestamps: [300] }).frameCount, 12);
 });
 
 test('scanned videos analyze, persist, edit and export without exposing credentials', async t => {
