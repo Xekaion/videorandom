@@ -4,13 +4,33 @@ const fs = require('fs');
 const fsPromises = fs.promises;
 const { exec, spawn } = require('child_process');
 const open = require('open');
+const { createAnalysisService } = require('./lib/analysis-service');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const analysisService = createAnalysisService();
 
 // Middleware
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
+app.use((req, res, next) => {
+  if (!['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)) return res.status(403).json({ error: '로컬 주소로 접속해 주세요.' });
+  next();
+});
+// The catalog may contain private media. Keep access on this computer and
+// reject browser requests from unrelated origins, including other local ports.
+app.use('/api', (req, res, next) => {
+  const origin = req.get('Origin');
+  if (origin) {
+    try {
+      const originUrl = new URL(origin);
+      const expectedPort = String(PORT);
+      if (!['localhost', '127.0.0.1', '[::1]'].includes(originUrl.hostname) || originUrl.protocol !== 'http:' || (originUrl.port || '80') !== expectedPort) return res.status(403).json({ error: '이 프로그램의 화면에서 요청해 주세요.' });
+    } catch (error) { return res.status(403).json({ error: '요청 출처가 올바르지 않습니다.' }); }
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/api/analysis', analysisService.router);
 
 // Video file extensions to search
 const VIDEO_EXTENSIONS = new Set([
@@ -288,6 +308,7 @@ app.post('/api/scan', async (req, res) => {
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log(`Scan completed in ${duration}s. Found ${videoFiles.length} videos.`);
+    analysisService.registerFiles(videoFiles);
 
     return res.json({
       success: true,
@@ -369,7 +390,7 @@ app.post('/api/play', async (req, res) => {
 });
 
 // Start Server
-app.listen(PORT, async () => {
+app.listen(PORT, '127.0.0.1', async () => {
   const localUrl = `http://localhost:${PORT}`;
   console.log(`===================================================`);
   console.log(`🎬 Video Roulette Server is running!`);
@@ -377,6 +398,13 @@ app.listen(PORT, async () => {
   console.log(`===================================================`);
 
   try {
+    if (process.env.VIDEORANDOM_START_HOST === '1') {
+      try {
+        const host = await analysisService.startHost();
+        console.log('분석 서버 시작:', host.addresses.join(', '));
+      } catch (error) { console.error('분석 서버 시작 실패:', error.message); }
+    }
+    if (process.env.VIDEORANDOM_NO_OPEN === '1') return;
     await open(localUrl);
     console.log(`🚀 Browser opened automatically!`);
   } catch (err) {

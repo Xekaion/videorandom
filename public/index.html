@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=1.2">
 </head>
 <body>
 
@@ -290,15 +290,163 @@
       </section>
 
     </main>
+
+    <section class="glass-card catalog-card" id="videoCatalog" aria-labelledby="catalogTitle">
+      <div class="catalog-heading">
+        <div>
+          <p class="catalog-eyebrow">VIDEO CATALOG</p>
+          <h2 id="catalogTitle">영상 내용 정리 · 이미지 엑셀</h2>
+          <p class="catalog-description">스캔한 영상의 줄거리, 라벨, 대사와 대표 장면을 한눈에 확인하세요. 이미지가 포함된 엑셀 파일로 저장할 수 있습니다.</p>
+        </div>
+        <button class="btn btn-secondary" id="catalogRefresh" type="button"><i class="fa-solid fa-rotate" aria-hidden="true"></i> 결과 불러오기</button>
+      </div>
+
+      <details class="catalog-settings" id="catalogSettings">
+        <summary>분석 설정 <span id="catalogSettingsSummary">로컬 추출 · 대표 이미지 10장</span></summary>
+        <div class="catalog-settings-grid">
+          <div class="catalog-field">
+            <label for="catalogMode">분석 방식</label>
+            <select id="catalogMode" aria-describedby="catalogProviderStatus">
+              <option value="local">로컬 추출 · 이미지 / 자막</option>
+              <option value="codex" disabled>이 PC에서 분석 · API 키 없음</option>
+              <option value="remote">분석 서버 PC로 보내기</option>
+            </select>
+            <small id="catalogProviderStatus" role="status">이 PC의 자동 요약 환경 확인 중…</small>
+          </div>
+          <div class="catalog-field">
+            <label for="catalogFrameCount">대표 이미지 수</label>
+            <input id="catalogFrameCount" type="number" min="1" max="20" value="10" inputmode="numeric">
+            <small>영상 전체 길이에 걸쳐 고르게 추출합니다. 1~20장</small>
+          </div>
+          <div class="catalog-field catalog-span-two">
+            <label for="catalogTimestamps">직접 지정할 시점 (분, 선택)</label>
+            <input id="catalogTimestamps" type="text" placeholder="예: 5, 15, 30, 45, 60" autocomplete="off">
+            <small>비워 두면 전체 구간에서 추출합니다. 입력하면 이미지 수 대신 지정 시점을 사용합니다.</small>
+          </div>
+          <div class="catalog-field catalog-remote-field hidden">
+            <label for="catalogRemoteUrl">분석 서버 주소</label>
+            <input id="catalogRemoteUrl" type="url" placeholder="예: http://192.168.0.10:3001" autocomplete="off" spellcheck="false" aria-describedby="catalogRemoteHint">
+            <small id="catalogRemoteHint">분석할 PC에서 ‘이 PC를 분석 서버로 사용’을 열어 주소를 확인하세요.</small>
+          </div>
+          <div class="catalog-field catalog-remote-field hidden">
+            <label for="catalogConnectionCode">연결 코드</label>
+            <input id="catalogConnectionCode" type="password" placeholder="서버 PC에 표시된 코드" autocomplete="off" spellcheck="false" aria-describedby="catalogConnectionHint">
+            <small id="catalogConnectionHint">이번 실행에만 사용하며 브라우저에 저장하지 않습니다.</small>
+          </div>
+          <div class="catalog-remote-field catalog-span-two catalog-connection-row hidden">
+            <button id="catalogRemoteCheck" class="btn btn-secondary" type="button">연결 확인</button>
+            <span id="catalogRemoteStatus" role="status" aria-live="polite"></span>
+          </div>
+          <label class="catalog-check catalog-summary-field catalog-span-two hidden" for="catalogTranscribe">
+            <input id="catalogTranscribe" type="checkbox">
+            <span>자막이 있어도 오디오 전체를 음성 인식 <small>기본은 자막을 우선 사용하고, 자막이 없으면 전체 오디오를 자동으로 음성 인식합니다.</small></span>
+          </label>
+        </div>
+        <p class="catalog-mode-note" id="catalogModeNote">로컬 추출은 이미지와 자막을 정리합니다. 줄거리와 라벨은 상세 화면에서 직접 입력할 수 있습니다.</p>
+        <p class="catalog-tool-note" id="catalogToolStatus" role="status">분석 도구 확인 중…</p>
+      </details>
+
+      <details class="catalog-settings catalog-host-settings" id="catalogHostSettings">
+        <summary>이 PC를 분석 서버로 사용 <span id="catalogHostSummary">서버 상태 확인 중…</span></summary>
+        <div class="catalog-host-body">
+          <p class="catalog-host-intro">다른 PC에서 영상의 음성과 대표 이미지를 보내면 이 PC에서 대사를 인식하고 줄거리와 라벨을 정리합니다. 두 PC가 같은 공유기에 연결되어 있으면 랜선과 와이파이를 함께 사용할 수 있습니다.</p>
+          <div class="catalog-host-actions">
+            <button id="catalogHostStart" class="btn btn-primary" type="button" disabled>분석 서버 시작</button>
+            <button id="catalogHostStop" class="btn btn-secondary" type="button" disabled>서버 중지</button>
+            <span id="catalogHostStatus" role="status" aria-live="polite">서버 상태 확인 중…</span>
+          </div>
+          <div id="catalogHostConnection" class="catalog-host-connection hidden">
+            <div class="catalog-field">
+              <label>다른 PC에 입력할 서버 주소</label>
+              <div id="catalogHostAddresses" class="catalog-host-addresses"></div>
+            </div>
+            <div class="catalog-field">
+              <label for="catalogHostCode">연결 코드</label>
+              <div class="catalog-copy-row">
+                <input id="catalogHostCode" type="password" readonly autocomplete="off" aria-describedby="catalogHostCodeHint">
+                <button id="catalogHostCodeReveal" class="btn btn-secondary" type="button" aria-pressed="false" aria-controls="catalogHostCode">보기</button>
+                <button id="catalogHostCodeCopy" class="btn btn-secondary" type="button">코드 복사</button>
+              </div>
+              <small id="catalogHostCodeHint">연결할 PC에서 ‘분석 서버 PC로 보내기’를 선택하고 주소와 코드를 입력하세요.</small>
+            </div>
+          </div>
+          <p class="catalog-host-note">분석 서버 PC와 이 프로그램이 계속 켜져 있어야 합니다. 이 채팅창을 열어 두는 것만으로 서버가 실행되지는 않습니다. 연결이 안 되면 게스트 와이파이의 PC 간 통신 차단과 Windows 방화벽의 허용 여부를 확인하세요.</p>
+        </div>
+      </details>
+
+      <div class="catalog-toolbar">
+        <div class="catalog-search-wrap">
+          <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
+          <input id="catalogSearch" type="search" placeholder="파일명, 줄거리, 라벨 검색" aria-label="영상 목록 검색">
+        </div>
+        <select id="catalogStatusFilter" aria-label="분석 상태 필터">
+          <option value="all">모든 영상</option>
+          <option value="analyzed">분석 결과 있음</option>
+          <option value="pending">미분석</option>
+          <option value="failed">분석 실패</option>
+        </select>
+        <label class="catalog-check"><input id="catalogShowSaved" type="checkbox" checked> 저장된 결과 포함</label>
+      </div>
+      <div class="catalog-action-row">
+        <span class="catalog-counts" id="catalogCounts">스캔한 영상이 없습니다.</span>
+        <div class="catalog-actions">
+          <button id="catalogClearSelection" class="btn btn-secondary" type="button" disabled>선택 해제</button>
+          <button id="catalogAnalyze" class="btn btn-primary" type="button" disabled><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> 선택 영상 분석</button>
+          <button id="catalogExport" class="btn catalog-export-btn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> 이미지 엑셀 저장</button>
+        </div>
+      </div>
+
+      <div class="catalog-job hidden" id="catalogJob" aria-live="polite">
+        <div class="catalog-job-heading"><strong id="catalogJobTitle">분석 중</strong><button id="catalogCancel" class="btn btn-secondary" type="button">분석 중지</button></div>
+        <progress id="catalogJobProgress" max="100" value="0" aria-label="영상 분석 전체 진행률"></progress>
+        <p id="catalogJobText"></p>
+      </div>
+      <p class="catalog-notice hidden" id="catalogNotice" role="status"></p>
+
+      <div class="catalog-table-scroll">
+        <table class="catalog-table">
+          <caption class="catalog-sr-only">영상 파일별 요약, 라벨, 대사, 대표 이미지 목록</caption>
+          <thead><tr>
+            <th class="catalog-select-cell"><input id="catalogSelectAll" type="checkbox" aria-label="현재 검색 결과 전체 선택"></th>
+            <th scope="col">영상 파일</th><th scope="col">줄거리 / 요약</th><th scope="col">라벨</th><th scope="col">대사 요약</th><th scope="col">대표 이미지</th><th scope="col">상태</th>
+          </tr></thead>
+          <tbody id="catalogRows"></tbody>
+        </table>
+      </div>
+      <div class="catalog-pagination"><span id="catalogPageInfo"></span><div><button id="catalogPrevPage" class="btn btn-secondary" type="button" disabled>이전</button><button id="catalogNextPage" class="btn btn-secondary" type="button" disabled>다음</button></div></div>
+      <p class="catalog-footnote">선택한 분석 결과를 엑셀로 저장합니다. 선택이 없으면 현재 검색 결과의 분석 완료 항목을 저장합니다. 상세 화면에서 모든 이미지와 시간별 대사를 볼 수 있습니다.</p>
+    </section>
     
     <!-- Footer -->
     <footer class="app-footer">
-      <p>&copy; 2026 Video Roulette. Crafted by Antigravity. Windows Native Automation enabled.</p>
+      <p>&copy; 2026 Video Roulette. Crafted by Antigravity. Windows Native Automation enabled. · <a href="licenses/NOTICE.txt" target="_blank" rel="noopener">오픈소스 고지</a></p>
     </footer>
 
   </div>
 
+  <dialog class="catalog-detail-dialog" id="catalogDetail" aria-labelledby="catalogDetailTitle">
+    <div class="catalog-dialog-header"><div><p class="catalog-eyebrow">VIDEO DETAILS</p><h2 id="catalogDetailTitle">영상 상세</h2></div><button id="catalogDetailClose" class="btn btn-secondary" type="button" aria-label="영상 상세 닫기">닫기 <span aria-hidden="true">×</span></button></div>
+    <div class="catalog-detail-body">
+      <p class="catalog-detail-path" id="catalogDetailPath"></p>
+      <p class="catalog-detail-meta" id="catalogDetailMeta"></p>
+      <p class="catalog-notice hidden" id="catalogDetailWarnings"></p>
+      <form id="catalogEditForm">
+        <div class="catalog-edit-grid">
+          <div class="catalog-field"><label for="catalogEditSummary">한눈에 보는 요약</label><textarea id="catalogEditSummary" rows="3" maxlength="20000"></textarea></div>
+          <div class="catalog-field"><label for="catalogEditPlot">줄거리</label><textarea id="catalogEditPlot" rows="6" maxlength="20000"></textarea></div>
+          <div class="catalog-field"><label for="catalogEditLabels">라벨 (쉼표로 구분)</label><input id="catalogEditLabels" type="text" placeholder="예: 여행, 바다, 가족" maxlength="2000"></div>
+          <div class="catalog-field"><label for="catalogEditDialogue">대사 요약</label><textarea id="catalogEditDialogue" rows="3" maxlength="20000"></textarea></div>
+        </div>
+        <div class="catalog-save-row"><span id="catalogSaveStatus" role="status"></span><button id="catalogSave" class="btn btn-primary" type="submit">수정 내용 저장</button></div>
+      </form>
+      <section class="catalog-detail-section" aria-labelledby="catalogGalleryTitle"><h3 id="catalogGalleryTitle">대표 장면 <span id="catalogGalleryCount"></span></h3><p class="catalog-section-note">이미지를 누르면 크게 볼 수 있습니다. 장면 설명은 자동 요약을 사용한 경우 표시됩니다.</p><div id="catalogGallery" class="catalog-gallery"></div></section>
+      <section class="catalog-detail-section" aria-labelledby="catalogTranscriptTitle"><h3 id="catalogTranscriptTitle">전체 대사 / 자막</h3><p id="catalogTranscriptSource" class="catalog-section-note"></p><div id="catalogTranscript" class="catalog-transcript"></div></section>
+    </div>
+  </dialog>
+  <dialog class="catalog-zoom-dialog" id="catalogZoom" aria-labelledby="catalogZoomCaption"><button id="catalogZoomClose" class="btn btn-secondary" type="button" aria-label="확대 이미지 닫기">닫기 ×</button><img id="catalogZoomImage" alt=""><p id="catalogZoomCaption"></p></dialog>
+
   <!-- Core JavaScript Engine -->
   <script src="js/app.js?v=1.1" defer></script>
+  <script src="js/catalog.js?v=1.2" defer></script>
 </body>
 </html>

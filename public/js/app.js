@@ -445,6 +445,7 @@ async function startScan() {
     // Set official results
     videoList = data.files;
     filteredList = [...videoList];
+    if (window.videoCatalog) window.videoCatalog.onScan(videoList);
 
     // Hide scanning progress
     document.getElementById('scanProgressCard').classList.add('hidden');
