@@ -10,10 +10,25 @@
     scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0,
     config: null, job: null, pollTimer: null, starting: false, exporting: false,
     refreshing: false, detailId: null, saving: false, hasModePreference: false,
-    hostBusy: false, remoteChecking: false
+    hostBusy: false, remoteChecking: false,
+    autoPick: null, autoTimer: null, autoSettingsTimer: null,
+    autoPolling: false, autoBusy: false, autoTransportError: false, settingsReady: false, settingsTouched: false,
+    resultsReady: false, autoSavedCount: null, autoResultsLoading: false, autoResultsWanted: null,
+    winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: ''
   };
   const $ = id => document.getElementById(id);
   const pathKey = path => String(path || '').replace(/\//g, '\\').toLowerCase();
+  function savedRemoteOrigin(value) {
+    if (typeof value !== 'string') return '';
+    const address = value.trim();
+    if (address.length > 2048 || /[\r\n]/.test(address)) return '';
+    try {
+      const parsed = new URL(address);
+      const privateAddress = /^(?:127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|169\.254\.)\d/.test(parsed.hostname);
+      if (parsed.protocol !== 'http:' || !privateAddress || parsed.username || parsed.password || parsed.search || parsed.hash || !['', '/'].includes(parsed.pathname)) return '';
+      return parsed.origin;
+    } catch (_) { return ''; }
+  }
   const make = (tag, className, text) => {
     const element = document.createElement(tag);
     if (className) element.className = className;
@@ -61,6 +76,193 @@
     $('catalogNotice').textContent = message;
     $('catalogNotice').classList.toggle('hidden', !message);
     $('catalogNotice').classList.toggle('catalog-error', error);
+  }
+
+  function autoNotice(message = '', error = false) {
+    $('catalogAutoNotice').textContent = message;
+    $('catalogAutoNotice').classList.toggle('hidden', !message);
+    $('catalogAutoNotice').classList.toggle('catalog-error', error);
+  }
+
+  function renderWinnerAnalysis() {
+    const element = $('winnerAnalysisStatus');
+    if (!state.winnerPath || !element) return;
+    const key = pathKey(state.winnerPath);
+    const record = state.records.get(key);
+    const queue = state.autoPick;
+    const pending = (queue?.pending || []).some(file => pathKey(file.path) === key);
+    const active = pathKey(queue?.activeAutoPath) === key;
+    if (pending || active || record?.status === 'completed') state.winnerError = '';
+    let message;
+    if (state.winnerError) message = `자동 분석 대기 등록 실패 · ${state.winnerError}`;
+    else if (record?.status === 'completed' || state.winnerStatus === 'already-completed') message = '기존 분석 결과 사용 · 이 PC에 저장되어 있습니다.';
+    else if (active) message = '자동 분석 중 · 완료되면 이 PC에 저장됩니다.';
+    else if (pending) message = `자동 분석 대기${queue.paused ? ' · 일시 중지됨' : queue.waitingReason ? ` · ${queue.waitingReason}` : ' · 차례가 되면 시작됩니다.'}`;
+    else if (queue?.enabled === false || state.winnerStatus === 'disabled') message = '뽑은 영상 자동 분석이 꺼져 있습니다.';
+    else if (record?.status === 'failed' || record?.status === 'partial') message = '자동 분석이 완료되지 않았습니다. 영상 분석에서 결과와 안내를 확인하세요.';
+    else message = '자동 분석 대기 등록 중…';
+    element.textContent = message;
+    element.classList.remove('hidden');
+    element.classList.toggle('catalog-error', !!state.winnerError);
+  }
+
+  function renderAutoPick() {
+    const queue = state.autoPick;
+    if (!queue) return;
+    $('catalogAutoEnabled').checked = queue.enabled !== false;
+    $('catalogAutoEnabled').disabled = state.autoBusy;
+    const pending = Number(queue.pendingCount) || 0;
+    const count = `대기 ${pending.toLocaleString()}개`;
+    const message = queue.enabled === false ? `자동 분석 꺼짐 · ${count}`
+      : queue.paused ? `자동 분석 일시 중지 · ${count}${queue.waitingReason ? ` · ${queue.waitingReason}` : ''}`
+      : queue.activeAutoPath ? `뽑은 영상 자동 분석 중 · ${count}${queue.activeJob?.currentFile ? ` · ${queue.activeJob.currentFile}` : ''}`
+      : pending ? `자동 분석 ${count}${queue.waitingReason ? ` · ${queue.waitingReason}` : isActive(queue.activeJob) ? ' · 현재 분석이 끝나면 시작됩니다.' : ' · 차례대로 시작됩니다.'}`
+      : queue.configured ? '준비 완료 · 영상을 뽑으면 자동으로 분석합니다.' : '분석 설정을 확인한 뒤 영상을 뽑으면 자동으로 분석합니다.';
+    $('catalogAutoStatus').textContent = message;
+    const resume = queue.enabled !== false && pending > 0 && (queue.paused || queue.waitingReason);
+    $('catalogAutoResume').classList.toggle('hidden', !resume);
+    $('catalogAutoResume').disabled = state.autoBusy || !state.settingsReady;
+    renderWinnerAnalysis();
+  }
+
+  function scheduleAutoPoll(delay = 3000) {
+    clearTimeout(state.autoTimer);
+    const queue = state.autoPick;
+    if (queue && ((Number(queue.pendingCount) || 0) > 0 || isActive(queue.activeJob))) {
+      state.autoTimer = setTimeout(refreshAutoPick, delay);
+    }
+  }
+
+  function applyAutoPick(value) {
+    const queue = value?.queue || value;
+    if (!queue || typeof queue.enabled !== 'boolean') return;
+    state.autoPick = queue;
+    renderAutoPick();
+    refreshAutoResults(queue.savedCount);
+    if (isActive(queue.activeJob) && state.job?.id !== queue.activeJob.id) {
+      const previous = state.job;
+      const previousTime = Date.parse(previous?.startedAt || '');
+      const nextTime = Date.parse(queue.activeJob.startedAt || '');
+      if (!isActive(previous) || !Number.isFinite(previousTime) || !Number.isFinite(nextTime) || nextTime >= previousTime) {
+        if (previous?.id && isActive(previous)) recoverPreviousJob(previous.id);
+        trackJob(queue.activeJob);
+      }
+    }
+    scheduleAutoPoll();
+  }
+
+  async function refreshAutoResults(savedCount) {
+    if (!state.resultsReady || !Number.isInteger(savedCount) || savedCount < 0) return;
+    state.autoResultsWanted = savedCount;
+    if (savedCount === state.autoSavedCount || state.autoResultsLoading) return;
+    state.autoResultsLoading = true;
+    let loaded = false;
+    try {
+      mergeRecords((await request('/api/analysis/results')).results);
+      state.autoSavedCount = savedCount;
+      loaded = true;
+      render();
+    } catch (error) { autoNotice(`저장된 자동 분석 결과 연결 재시도 중 · ${error.message}`, true); }
+    finally {
+      state.autoResultsLoading = false;
+      if (loaded && state.autoResultsWanted !== state.autoSavedCount) refreshAutoResults(state.autoResultsWanted);
+    }
+  }
+
+  async function recoverPreviousJob(id) {
+    try {
+      const data = await request(`/api/analysis/jobs/${encodeURIComponent(id)}`);
+      mergeRecords((data.job || data).results);
+    } catch (error) {
+      if (error.status !== 404) {
+        autoNotice(`이전 분석 결과 확인 재시도 필요 · ${error.message}`, true);
+        return;
+      }
+      try { mergeRecords((await request('/api/analysis/results')).results); }
+      catch (failure) { autoNotice(`저장된 결과 확인 실패 · ${failure.message}`, true); }
+    }
+    render();
+  }
+
+  async function refreshAutoPick() {
+    if (state.autoPolling) return;
+    state.autoPolling = true;
+    try {
+      const result = await request('/api/analysis/auto-pick');
+      if (state.autoTransportError) autoNotice();
+      state.autoTransportError = false;
+      applyAutoPick(result);
+    }
+    catch (error) {
+      state.autoTransportError = true;
+      autoNotice(`자동 분석 상태 연결 재시도 중 · ${error.message}`, true);
+      clearTimeout(state.autoTimer);
+      state.autoTimer = setTimeout(refreshAutoPick, 5000);
+    } finally { state.autoPolling = false; }
+  }
+
+  // Incomplete connection settings are valid here: the server preserves the pick
+  // and explains why it is waiting instead of discarding it before registration.
+  function autoOptions() {
+    const mode = $('catalogMode').value;
+    const count = Number($('catalogFrameCount').value);
+    return {
+      mode, frameCount: Number.isInteger(count) && count >= 1 && count <= 20 ? count : 10,
+      transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked,
+      ...(mode === 'remote' ? { remoteUrl: $('catalogRemoteUrl').value.trim(), connectionCode: $('catalogConnectionCode').value.trim() } : {})
+    };
+  }
+
+  async function syncAutoPick(extra = {}) {
+    if (!state.settingsReady) return;
+    clearTimeout(state.autoSettingsTimer);
+    const result = await request('/api/analysis/auto-pick', jsonOptions('PUT', { options: autoOptions(), ...extra }));
+    autoNotice();
+    applyAutoPick(result);
+    return result;
+  }
+
+  function scheduleAutoSettings() {
+    state.settingsTouched = true;
+    if (!state.settingsReady) return;
+    clearTimeout(state.autoSettingsTimer);
+    state.autoSettingsTimer = setTimeout(() => syncAutoPick().catch(error => autoNotice(`자동 분석 설정 저장 실패 · ${error.message}`, true)), 450);
+  }
+
+  async function changeAutoPick(extra) {
+    if (state.autoBusy || !state.settingsReady) return;
+    state.autoBusy = true;
+    renderAutoPick();
+    try { await syncAutoPick(extra); }
+    catch (error) { autoNotice(`자동 분석 설정 적용 실패 · ${error.message}`, true); }
+    finally { state.autoBusy = false; renderAutoPick(); }
+  }
+
+  async function onPick(winner) {
+    if (!winner?.path) return;
+    const requestId = ++state.winnerRequest;
+    state.winnerPath = winner.path;
+    state.winnerStatus = '';
+    state.winnerError = '';
+    renderWinnerAnalysis();
+    try {
+      const result = await request('/api/analysis/auto-pick', jsonOptions('POST', {
+        filePath: winner.path, ...(state.settingsReady ? { options: autoOptions() } : {})
+      }));
+      if (state.winnerRequest === requestId) state.winnerStatus = result.status || 'queued';
+      applyAutoPick(result);
+      if (result.status === 'already-completed' && !state.records.get(pathKey(winner.path))) {
+        const saved = await request('/api/analysis/results');
+        mergeRecords(saved.results);
+        render();
+      }
+      if (result.status !== 'disabled') autoNotice();
+      renderWinnerAnalysis();
+    } catch (error) {
+      if (state.winnerRequest === requestId) state.winnerError = error.message;
+      autoNotice(`뽑은 영상의 자동 분석 대기 등록 실패 · ${error.message}`, true);
+      renderWinnerAnalysis();
+    }
   }
 
   function mergeRecords(records) {
@@ -245,6 +447,7 @@
     $('catalogNextPage').disabled = state.page >= pageCount - 1;
     renderStorage();
     updateSelectionUI();
+    renderWinnerAnalysis();
   }
 
   function settingsChanged(persist = true) {
@@ -263,7 +466,7 @@
     if (persist) {
       state.hasModePreference = true;
       try {
-        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode, frameCount: $('catalogFrameCount').value, remoteUrl: $('catalogRemoteUrl').value.trim(), transcribeAudio: $('catalogTranscribe').checked }));
+        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode, frameCount: $('catalogFrameCount').value, remoteUrl: savedRemoteOrigin($('catalogRemoteUrl').value), transcribeAudio: $('catalogTranscribe').checked }));
       } catch (_) { /* Preferences are optional when browser storage is unavailable. */ }
     }
     updateSelectionUI();
@@ -283,8 +486,13 @@
       state.hasModePreference = ['local', 'codex', 'remote'].includes(saved.mode);
       $('catalogMode').value = state.hasModePreference ? saved.mode : 'local';
       $('catalogFrameCount').value = Number(saved.frameCount) >= 1 && Number(saved.frameCount) <= 20 ? saved.frameCount : 10;
-      $('catalogRemoteUrl').value = typeof saved.remoteUrl === 'string' ? saved.remoteUrl : '';
+      $('catalogRemoteUrl').value = savedRemoteOrigin(saved.remoteUrl);
       $('catalogTranscribe').checked = saved.transcribeAudio === true;
+      // Remove an unsafe address saved by an older version without changing
+      // the chosen mode or the raw address being edited during this session.
+      if (typeof saved.remoteUrl === 'string' && saved.remoteUrl !== $('catalogRemoteUrl').value) {
+        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode: $('catalogMode').value, frameCount: $('catalogFrameCount').value, remoteUrl: $('catalogRemoteUrl').value, transcribeAudio: $('catalogTranscribe').checked }));
+      }
     } catch (_) { /* Malformed preferences do not prevent use of the catalog. */ }
     settingsChanged(false);
   }
@@ -386,6 +594,7 @@
       const result = await request('/api/analysis/remote/check', jsonOptions('POST', options));
       if (!result.ready) throw new Error(result.error || '서버의 분석 환경이 준비되지 않았습니다. 서버 PC에서 상태를 확인하세요.');
       $('catalogRemoteStatus').textContent = '연결 완료 · 이 서버로 선택한 영상을 분석할 수 있습니다.';
+      await syncAutoPick({ resume: true });
     } catch (error) {
       $('catalogRemoteStatus').textContent = error.message;
       $('catalogRemoteStatus').classList.add('catalog-error');
@@ -402,11 +611,26 @@
     if (results[0].status === 'fulfilled') {
       const config = state.config = results[0].value;
       $('catalogMode').querySelector('option[value="codex"]').disabled = !codexReady();
-      if (!state.hasModePreference) $('catalogMode').value = codexReady() && config.defaultMode === 'codex' ? 'codex' : 'local';
+      const firstLoad = !state.settingsReady;
+      const persistedOptions = config.autoPick?.options;
+      if (firstLoad && !state.settingsTouched && persistedOptions) {
+        $('catalogMode').value = persistedOptions.mode;
+        $('catalogFrameCount').value = persistedOptions.frameCount || 10;
+        $('catalogRemoteUrl').value = persistedOptions.remoteUrl || '';
+        $('catalogTranscribe').checked = persistedOptions.transcribeAudio === true;
+        state.hasModePreference = true;
+      } else if (!state.hasModePreference && !state.settingsTouched) {
+        $('catalogMode').value = codexReady() && config.defaultMode === 'codex' ? 'codex' : 'local';
+      }
+      state.settingsReady = true;
       settingsChanged(false);
       renderToolStatus();
       renderHost();
+      applyAutoPick(config.autoPick);
       if (config.activeJob && !isActive(state.job)) trackJob(config.activeJob);
+      if (firstLoad && (!persistedOptions || state.settingsTouched)) {
+        syncAutoPick().catch(error => autoNotice(`자동 분석 설정 저장 실패 · ${error.message}`, true));
+      }
     } else {
       notice(`분석 설정을 불러오지 못했습니다. ${results[0].reason.message}`, true);
       $('catalogToolStatus').textContent = '분석 설정을 확인하지 못했습니다. 결과 불러오기로 재시도하세요.';
@@ -414,6 +638,14 @@
     if (results[1].status === 'fulfilled') {
       state.records.clear();
       mergeRecords(results[1].value.results);
+      state.resultsReady = true;
+      state.autoSavedCount = Number.isInteger(state.autoPick?.savedCount) ? state.autoPick.savedCount : (results[1].value.results || []).length;
+      // Config and results are read independently. Catch a completion that
+      // happened between those initial responses without losing its result.
+      if (Number.isInteger(state.autoPick?.savedCount) && state.autoPick.savedCount !== (results[1].value.results || []).length) {
+        state.autoSavedCount = null;
+        refreshAutoResults(state.autoPick.savedCount);
+      }
       if (results[0].status === 'fulfilled') notice();
     } else notice(`저장된 결과를 불러오지 못했습니다. ${results[1].reason.message}`, true);
     render();
@@ -457,7 +689,8 @@
     const total = Number(job.total) || 0;
     const overall = job.status === 'completed' ? 100 : Math.min(100, total ? (completed + (active ? (Number(job.percent) || 0) / 100 : 0)) / total * 100 : 0);
     $('catalogJob').classList.remove('hidden');
-    $('catalogJobTitle').textContent = ({ completed: '분석 완료', cancelled: '분석 중지됨', failed: '분석 작업 실패', cancelling: '분석 중지 중…' })[job.status] || '영상 분석 중';
+    const jobTitle = ({ completed: '분석 완료', cancelled: '분석 중지됨', failed: '분석 작업 실패', cancelling: '분석 중지 중…' })[job.status] || '영상 분석 중';
+    $('catalogJobTitle').textContent = job.source === 'auto-pick' ? `뽑은 영상 자동 ${jobTitle.replace(/^영상 /, '')}` : jobTitle;
     $('catalogJobProgress').value = overall;
     $('catalogJobText').textContent = `${completed}/${total}개 처리${job.currentFile ? ` · ${job.currentFile}` : ''}${active && job.stage ? ` · ${job.stage}` : ''}${job.error ? ` · ${job.error}` : ''}`;
     $('catalogCancel').classList.toggle('hidden', !active);
@@ -481,7 +714,11 @@
       const resultCount = Array.isArray(job.results) ? job.results.filter(hasResult).length : 0;
       const retainedCount = Array.isArray(job.results) ? job.results.filter(record => record.status !== 'completed' && recordFor(record)?.status === 'completed' && recordFor(record).id !== record.id).length : 0;
       const completedMessage = job.status === 'failed' ? job.error || '분석 작업에 실패했습니다.' : `${job.status === 'cancelled' ? '분석을 중지했습니다.' : '분석을 마쳤습니다.'} 결과 ${resultCount}개를 이 PC에 자동 저장했습니다. 프로그램을 다시 열어도 줄거리·대사·이미지가 남아 있습니다.`;
-      notice(`${completedMessage}${retainedCount ? ` 재분석이 완료되지 않은 영상 ${retainedCount}개는 이전에 완료된 결과와 이미지를 계속 표시합니다.` : ''}`, job.status === 'failed');
+      const message = `${completedMessage}${retainedCount ? ` 재분석이 완료되지 않은 영상 ${retainedCount}개는 이전에 완료된 결과와 이미지를 계속 표시합니다.` : ''}`;
+      if (job.source === 'auto-pick') autoNotice(message, job.status === 'failed');
+      else notice(message, job.status === 'failed');
+      clearTimeout(state.autoTimer);
+      state.autoTimer = setTimeout(refreshAutoPick, 300);
     }
   }
 
@@ -489,9 +726,15 @@
     if (state.job?.id !== id) return;
     try {
       const result = await request(`/api/analysis/jobs/${encodeURIComponent(id)}`);
+      if (state.job?.id !== id) {
+        mergeRecords((result.job || result).results);
+        render();
+        return;
+      }
       notice();
       trackJob(result.job || result);
     } catch (error) {
+      if (state.job?.id !== id) return;
       if (error.status === 404) {
         clearTimeout(state.pollTimer);
         state.job = null;
@@ -513,6 +756,7 @@
     try {
       const result = await request(`/api/analysis/jobs/${encodeURIComponent(id)}/cancel`, jsonOptions('POST', {}));
       trackJob(result.job || result);
+      await refreshAutoPick();
     } catch (error) {
       notice(`중지 요청 실패 · ${error.message}`, true);
       $('catalogCancel').disabled = false;
@@ -638,14 +882,17 @@
     if ($('catalogRows')) render();
   }
 
-  window.videoCatalog = { onScan };
+  window.videoCatalog = { onScan, onPick };
   document.addEventListener('DOMContentLoaded', () => {
     restoreSettings();
-    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); if (state.config) renderToolStatus(); }));
+    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); scheduleAutoSettings(); if (state.config) renderToolStatus(); }));
+    $('catalogAutoEnabled').addEventListener('change', event => changeAutoPick({ enabled: event.target.checked }));
+    $('catalogAutoResume').addEventListener('click', () => changeAutoPick({ resume: true }));
     $('catalogStorageCopy').addEventListener('click', () => copyText(state.config?.storage?.directory, '이 PC의 분석 결과 저장 폴더 경로를 복사했습니다. 파일 탐색기 주소창에 붙여 넣으면 열 수 있습니다.'));
     ['catalogRemoteUrl', 'catalogConnectionCode'].forEach(id => $(id).addEventListener('input', () => {
       $('catalogRemoteStatus').textContent = '';
       settingsChanged(id !== 'catalogConnectionCode');
+      scheduleAutoSettings();
     }));
     $('catalogRemoteCheck').addEventListener('click', checkRemote);
     $('catalogHostStart').addEventListener('click', () => changeHost('start'));

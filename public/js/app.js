@@ -662,6 +662,8 @@ function revealWinner(winner) {
 
   // Push to history array
   addToHistory(winner);
+  // Queue analysis independently of playback and the catalog's manual selection.
+  if (window.videoCatalog) window.videoCatalog.onPick(winner);
 }
 
 // Particle generator (Confetti inside winner card)
