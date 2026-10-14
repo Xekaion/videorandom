@@ -4,6 +4,8 @@
 
   const PAGE_SIZE = 40;
   const MAX_BATCH = 1000;
+  const SORT_STORAGE_KEY = 'video_catalog_sort';
+  const catalogSort = window.videoCatalogSort;
   const state = {
     scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0,
     config: null, job: null, pollTimer: null, starting: false, exporting: false,
@@ -112,7 +114,7 @@
 
   function exportRecords() {
     const files = state.selected.size
-      ? allFiles().filter(file => state.selected.has(pathKey(file.path)))
+      ? catalogSort.sortFiles(allFiles().filter(file => state.selected.has(pathKey(file.path))), recordFor, $('catalogSort').value)
       : state.filtered;
     return files.map(recordFor).filter(hasResult);
   }
@@ -137,7 +139,7 @@
   }
 
   function render() {
-    state.filtered = filteredFiles();
+    state.filtered = catalogSort.sortFiles(filteredFiles(), recordFor, $('catalogSort').value);
     const pageCount = Math.max(1, Math.ceil(state.filtered.length / PAGE_SIZE));
     state.page = Math.min(state.page, pageCount - 1);
     const start = state.page * PAGE_SIZE;
@@ -272,6 +274,10 @@
     $('catalogStatusFilter').value = 'all';
     $('catalogSearch').value = '';
     $('catalogConnectionCode').value = '';
+    $('catalogSort').value = catalogSort.DEFAULT_ORDER;
+    try {
+      $('catalogSort').value = catalogSort.normalizeOrder(localStorage.getItem(SORT_STORAGE_KEY));
+    } catch (_) { /* Use completed-first ordering when browser storage is unavailable. */ }
     try {
       const saved = JSON.parse(localStorage.getItem('video_catalog_settings') || '{}');
       state.hasModePreference = ['local', 'codex', 'remote'].includes(saved.mode);
@@ -659,6 +665,12 @@
       }
     });
     ['catalogSearch', 'catalogStatusFilter', 'catalogShowSaved'].forEach(id => $(id).addEventListener(id === 'catalogSearch' ? 'input' : 'change', () => { state.page = 0; render(); }));
+    $('catalogSort').addEventListener('change', () => {
+      $('catalogSort').value = catalogSort.normalizeOrder($('catalogSort').value);
+      try { localStorage.setItem(SORT_STORAGE_KEY, $('catalogSort').value); } catch (_) { /* Sorting still works without stored preferences. */ }
+      state.page = 0;
+      render();
+    });
     $('catalogShowSaved').addEventListener('change', () => {
       const keys = new Set(allFiles().map(file => pathKey(file.path)));
       state.selected.forEach(key => { if (!keys.has(key)) state.selected.delete(key); });

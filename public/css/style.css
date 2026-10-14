@@ -1435,6 +1435,8 @@ input[type="text"]::placeholder {
 .catalog-search-wrap > i { position: absolute; left: 13px; top: 13px; font-size: 13px; color: var(--color-text-muted); pointer-events: none; }
 .catalog-search-wrap input { padding-left: 36px; }
 .catalog-toolbar select { width: 145px; }
+.catalog-sort-control { display: inline-flex; align-items: center; gap: 8px; color: var(--color-text-muted); font-size: 12px; white-space: nowrap; }
+.catalog-sort-control select { width: 162px; }
 .catalog-action-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
 .catalog-counts { font-size: 12px; color: var(--color-text-muted); }
 .catalog-actions { display: flex; gap: 8px; flex-wrap: wrap; }
