@@ -4,13 +4,21 @@ const fs = require('fs');
 const fsPromises = fs.promises;
 const { exec, spawn } = require('child_process');
 const open = require('open');
-const { createAnalysisService } = require('./lib/analysis-service');
+const { createAnalysisService, defaultDataDir } = require('./lib/analysis-service');
+const { createHistoryService } = require('./lib/history-service');
+const { recoverRecentVideos } = require('./lib/windows-recent');
+const { startLocalServer, startExistingAnalysisHost } = require('./lib/app-server');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const APP_VERSION = require('./package.json').version;
+const requestedPort = Number(process.env.PORT || 3000);
+let PORT = requestedPort;
+let startupInfo = { requestedPort, port: PORT, portConflict: false };
 const analysisService = createAnalysisService();
+const historyService = createHistoryService({ dataDir: defaultDataDir() });
 
 // Middleware
+app.use('/api/history/import-json', express.json({ limit: '64mb' }));
 app.use(express.json({ limit: '2mb' }));
 app.use((req, res, next) => {
   if (!['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)) return res.status(403).json({ error: '로컬 주소로 접속해 주세요.' });
@@ -29,8 +37,20 @@ app.use('/api', (req, res, next) => {
   }
   next();
 });
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { setHeaders: res => res.setHeader('Cache-Control', 'no-cache') }));
 app.use('/api/analysis', analysisService.router);
+app.use('/api/history', historyService.router);
+app.get('/api/app-info', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ application: 'videorandom', version: APP_VERSION, features: ['catalog', 'history'], ...startupInfo });
+});
+app.post('/api/history/recover-windows', async (req, res) => {
+  try {
+    const recovered = await recoverRecentVideos();
+    const result = await historyService.importWindowsRecent(recovered.entries);
+    res.json({ ...result, warnings: [...(result.warnings || []), ...recovered.warnings] });
+  } catch (error) { res.status(500).json({ error: 'Windows 최근 영상 흔적을 읽지 못했습니다: ' + error.message }); }
+});
 
 // Video file extensions to search
 const VIDEO_EXTENSIONS = new Set([
@@ -379,28 +399,35 @@ app.post('/api/play', async (req, res) => {
 
   console.log(`Playing file: ${winPath}`);
 
-  // Use exec to safely launch start command with unescaped double quotes
-  exec(`start "" "${winPath}"`, (err) => {
-    if (err) {
-      console.error('Failed to execute play command:', err);
-    }
-  });
-
-  return res.json({ success: true });
+  try {
+    await open(winPath);
+  } catch (error) { return res.status(500).json({ error: '기본 플레이어로 영상을 실행하지 못했습니다.' }); }
+  try {
+    const stat = await fsPromises.stat(winPath);
+    await historyService.recordPlayback({ path: path.resolve(winPath), name: path.basename(winPath), ext: path.extname(winPath).toLowerCase(), size: Math.round(stat.size / (1024 * 1024) * 10) / 10 });
+    return res.json({ success: true, historySaved: true });
+  } catch (error) {
+    return res.json({ success: true, historySaved: false, warning: '재생은 실행했지만 기록을 저장하지 못했습니다. 저장 폴더를 확인해 주세요.' });
+  }
 });
 
 // Start Server
-app.listen(PORT, '127.0.0.1', async () => {
+async function start() {
+  const result = await startLocalServer(app, { port: requestedPort, version: APP_VERSION });
+  PORT = result.port;
+  startupInfo = { requestedPort, port: PORT, portConflict: result.portConflict };
+  if (result.server) result.server.on('error', error => console.error('프로그램 서버 오류:', error.message));
   const localUrl = `http://localhost:${PORT}`;
   console.log(`===================================================`);
-  console.log(`🎬 Video Roulette Server is running!`);
+  console.log(`🎬 Video Roulette v${APP_VERSION} ${result.reused ? 'is already running' : 'Server is running'}!`);
   console.log(`🔗 Local URL: ${localUrl}`);
   console.log(`===================================================`);
 
   try {
+    if (result.portConflict) console.log('기존 프로그램이 사용 중인 포트를 피해 새 버전을 열었습니다. 이전 브라우저 기록은 기존 프로그램 종료 후 같은 브라우저의 localhost:3000에서 가져올 수 있습니다.');
     if (process.env.VIDEORANDOM_START_HOST === '1') {
       try {
-        const host = await analysisService.startHost();
+        const host = result.reused ? await startExistingAnalysisHost(PORT) : await analysisService.startHost();
         console.log('분석 서버 시작:', host.addresses.join(', '));
       } catch (error) { console.error('분석 서버 시작 실패:', error.message); }
     }
@@ -410,4 +437,8 @@ app.listen(PORT, '127.0.0.1', async () => {
   } catch (err) {
     console.log(`⚠️  Could not open browser automatically. Please open: ${localUrl}`);
   }
+}
+start().catch(error => {
+  console.error('프로그램 시작 실패:', error.message);
+  process.exitCode = 1;
 });

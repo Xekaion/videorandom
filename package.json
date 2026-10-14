@@ -1,6 +1,6 @@
 {
   "name": "videorandom",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Video Roulette - Premium Random Video Picker for Windows",
   "main": "server.js",
   "bin": "server.js",
@@ -17,6 +17,7 @@
     "assets": [
       "public/**/*",
       "scripts/transcribe_local.py",
+      "scripts/recover_recent.ps1",
       "node_modules/ffmpeg-static/ffmpeg.exe",
       "node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe"
     ]

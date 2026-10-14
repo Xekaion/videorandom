@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.2">
+  <link rel="stylesheet" href="css/style.css?v=1.3.0">
 </head>
 <body>
 
@@ -38,6 +38,9 @@
         </div>
       </div>
       <div class="settings-bar">
+        <a class="header-link" href="#historyCard">전체 기록</a>
+        <a class="header-link" href="#videoCatalog">영상 분석</a>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.3.0</span>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
         </button>
@@ -46,6 +49,8 @@
         </span>
       </div>
     </header>
+
+    <p id="startupNotice" class="startup-notice hidden" role="status"></p>
 
     <main class="app-content">
       
@@ -274,22 +279,48 @@
 
         </div>
 
-        <!-- History Card -->
-        <div class="glass-card panel-card history-card hidden" id="historyCard">
-          <div class="card-header">
-            <i class="fa-solid fa-clock-rotate-left card-icon"></i>
-            <h2>최근 뽑은 영상 히스토리</h2>
-          </div>
-          <div class="card-body">
-            <div class="history-list" id="historyList">
-              <!-- Dynamically populated rows -->
-            </div>
-          </div>
-        </div>
-
       </section>
 
     </main>
+
+    <section class="glass-card complete-history-card" id="historyCard" aria-labelledby="historyTitle">
+      <div class="complete-history-heading">
+        <div>
+          <p class="catalog-eyebrow">VIDEO HISTORY</p>
+          <h2 id="historyTitle">전체 영상 히스토리</h2>
+          <p class="complete-history-description">이 PC에서 뽑거나 재생을 요청한 영상을 계속 저장합니다. 프로그램을 다시 열어도 스캔 없이 확인할 수 있습니다. 재생 기록은 기본 플레이어를 실행한 요청 기준입니다.</p>
+        </div>
+        <button id="historyRefresh" class="btn btn-secondary" type="button">기록 새로고침</button>
+      </div>
+      <div class="history-toolbar">
+        <label class="history-search"><span class="catalog-sr-only">영상 이름 또는 전체 경로 검색</span><input id="historySearch" type="search" placeholder="영상 이름 또는 경로 검색" autocomplete="off"></label>
+        <label><span class="catalog-sr-only">기록 종류</span><select id="historyType"><option value="all">모든 기록</option><option value="pick">뽑기</option><option value="play">재생</option><option value="legacy_pick">이전 뽑기</option><option value="windows_recent">Windows 최근 영상</option></select></label>
+        <div class="history-export-actions">
+          <button id="historyCsv" class="btn btn-secondary" type="button">전체 CSV 저장</button>
+          <button id="historyJson" class="btn btn-secondary" type="button">전체 JSON 백업</button>
+          <button id="historyImport" class="btn btn-secondary" type="button">JSON 백업 가져오기</button>
+          <input id="historyImportFile" class="hidden" type="file" accept=".json,application/json" aria-label="히스토리 JSON 백업 파일">
+        </div>
+      </div>
+      <p id="historyCounts" class="history-counts" aria-live="polite">저장된 기록을 불러오는 중...</p>
+      <p id="historyError" class="history-message history-message-error hidden" role="alert"></p>
+      <p id="historyStatus" class="history-message hidden" role="status"></p>
+      <div class="history-table-scroll">
+        <table class="complete-history-table">
+          <caption class="catalog-sr-only">저장된 전체 영상 뽑기 및 재생 기록, 최근 기록부터 표시</caption>
+          <thead><tr><th scope="col">기록 시각</th><th scope="col">종류</th><th scope="col">영상 파일 · 전체 경로</th><th scope="col">작업</th></tr></thead>
+          <tbody id="historyRows"><tr><td colspan="4" class="history-empty">기록을 불러오는 중입니다.</td></tr></tbody>
+        </table>
+      </div>
+      <div class="history-pagination"><span id="historyPageInfo">50개씩 표시합니다.</span><div><button id="historyPrev" class="btn btn-secondary" type="button" disabled>이전</button><button id="historyNext" class="btn btn-secondary" type="button" disabled>다음</button></div></div>
+      <details class="history-recovery">
+        <summary>이전 버전 기록 및 Windows 최근 영상 확인</summary>
+        <p>이전 버전이 이 브라우저에 남긴 최근 뽑기 기록은 자동으로 가져옵니다. 예전에 사용한 같은 브라우저와 같은 주소(예: http://localhost:3000)로 새 버전을 여세요. 예전 버전에서 이미 지워진 기록은 프로그램 기록만으로 복원할 수 없습니다.</p>
+        <p>Windows의 최근 항목에 남아 있는 영상 바로가기를 참고 자료로 가져올 수 있습니다. 다른 앱으로 열었던 영상도 포함될 수 있으며, 실제 재생 날짜나 VideoRandom으로 실행한 이력은 확인되지 않습니다.</p>
+        <button id="historyRecover" class="btn btn-secondary" type="button">Windows 최근 영상 가져오기</button>
+        <p id="historyStorage" class="history-storage">이 PC의 기록 파일: %LOCALAPPDATA%\VideoRandom\catalog\history\events.jsonl</p>
+      </details>
+    </section>
 
     <section class="glass-card catalog-card" id="videoCatalog" aria-labelledby="catalogTitle">
       <div class="catalog-heading">
@@ -446,7 +477,8 @@
   <dialog class="catalog-zoom-dialog" id="catalogZoom" aria-labelledby="catalogZoomCaption"><button id="catalogZoomClose" class="btn btn-secondary" type="button" aria-label="확대 이미지 닫기">닫기 ×</button><img id="catalogZoomImage" alt=""><p id="catalogZoomCaption"></p></dialog>
 
   <!-- Core JavaScript Engine -->
-  <script src="js/app.js?v=1.1" defer></script>
-  <script src="js/catalog.js?v=1.2" defer></script>
+  <script src="js/app.js?v=1.3.0" defer></script>
+  <script src="js/history.js?v=1.3.0" defer></script>
+  <script src="js/catalog.js?v=1.3.0" defer></script>
 </body>
 </html>

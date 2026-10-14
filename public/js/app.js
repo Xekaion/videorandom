@@ -5,7 +5,6 @@
 // Global State
 let videoList = [];        // All scanned videos
 let filteredList = [];     // Currently filtered videos (based on UI inputs)
-let pickHistory = [];      // History of picked videos
 let isSoundEnabled = true; // Web Audio API sound effects toggle
 let selectedFormats = new Set(); // Multi-selected formats for filtering
 
@@ -218,16 +217,6 @@ function loadSettings() {
     if (excludeEl) excludeEl.value = excludePref;
   }
 
-  // History
-  const historyPref = localStorage.getItem('pick_history');
-  if (historyPref) {
-    try {
-      pickHistory = JSON.parse(historyPref);
-      renderHistoryList();
-    } catch (e) {
-      console.error('Failed to parse pick history from local storage');
-    }
-  }
 }
 
 function toggleSound() {
@@ -721,8 +710,13 @@ async function playVideo(filePath) {
       body: JSON.stringify({ filePath })
     });
     if (!response.ok) throw new Error();
+    const result = await response.json();
     showToast('기본으로 설정된 플레이어로 재생됩니다!');
     playTickSound(700, 0.05);
+    if (window.VideoRandomHistory) {
+      window.VideoRandomHistory.reportError(result.historySaved === false ? (result.warning || '재생 요청의 기록을 PC에 저장하지 못했습니다.') : '');
+      window.VideoRandomHistory.refresh();
+    }
   } catch (e) {
     alert('영상을 실행하는 데 실패했습니다. 파일 경로 또는 시스템 연결을 확인하세요.');
   }
@@ -745,68 +739,7 @@ async function openFolder(filePath) {
   }
 }
 
-// Add winner to Pick History queue
+// Keep every pick in the durable, shared PC history.
 function addToHistory(video) {
-  // Check if it already exists to avoid duplicates
-  pickHistory = pickHistory.filter(item => item.path !== video.path);
-  
-  // Insert at front
-  const timestamp = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  pickHistory.unshift({
-    name: video.name,
-    path: video.path,
-    size: video.size,
-    ext: video.ext,
-    time: timestamp
-  });
-
-  // Keep top 5
-  if (pickHistory.length > 5) {
-    pickHistory.pop();
-  }
-
-  // Persist
-  localStorage.setItem('pick_history', JSON.stringify(pickHistory));
-
-  renderHistoryList();
-}
-
-// Render dynamic history card list
-function renderHistoryList() {
-  const container = document.getElementById('historyList');
-  const historyCard = document.getElementById('historyCard');
-
-  if (pickHistory.length === 0) {
-    historyCard.classList.add('hidden');
-    return;
-  }
-
-  historyCard.classList.remove('hidden');
-  container.innerHTML = '';
-
-  pickHistory.forEach(item => {
-    const row = document.createElement('div');
-    row.className = 'history-item';
-    row.innerHTML = `
-      <div class="history-info">
-        <div class="history-dot"></div>
-        <div class="history-name" title="${item.name}">${item.name}</div>
-        <div class="history-meta">[${item.ext} | ${item.time}]</div>
-      </div>
-      <div class="history-actions">
-        <button class="btn-mini play" title="재생하기">
-          <i class="fa-solid fa-play"></i> 재생
-        </button>
-        <button class="btn-mini folder" title="위치 보기">
-          <i class="fa-solid fa-folder-open"></i> 폴더
-        </button>
-      </div>
-    `;
-
-    // Hook buttons
-    row.querySelector('.play').addEventListener('click', () => playVideo(item.path));
-    row.querySelector('.folder').addEventListener('click', () => openFolder(item.path));
-
-    container.appendChild(row);
-  });
+  if (window.VideoRandomHistory) window.VideoRandomHistory.recordPick(video);
 }
