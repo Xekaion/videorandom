@@ -77,7 +77,7 @@ test('relay starts only explicitly and requires private client plus bearer authe
   assert.equal(f.service.status().running, false);
   assert.equal(f.service.status().connectionCode, '');
   const restarted = await f.service.start({ port: 0, host: '127.0.0.1' });
-  assert.notEqual(restarted.connectionCode, f.status.connectionCode);
+  assert.equal(restarted.connectionCode, f.status.connectionCode);
 });
 
 test('uploads process authenticated data without host paths and retains JPEG frames', async t => {

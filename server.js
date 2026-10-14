@@ -14,7 +14,9 @@ const APP_VERSION = require('./package.json').version;
 const requestedPort = Number(process.env.PORT || 3000);
 let PORT = requestedPort;
 let startupInfo = { requestedPort, port: PORT, portConflict: false };
-const analysisService = createAnalysisService();
+// A second launch may reuse an existing app. It must not submit that app's
+// restored analysis queue before local server ownership is decided.
+const analysisService = createAnalysisService({ deferAutoStart: true });
 const historyService = createHistoryService({ dataDir: defaultDataDir() });
 
 // Middleware
@@ -417,6 +419,12 @@ async function start() {
   PORT = result.port;
   startupInfo = { requestedPort, port: PORT, portConflict: result.portConflict };
   if (result.server) result.server.on('error', error => console.error('프로그램 서버 오류:', error.message));
+  if (result.server) {
+    await analysisService.ready;
+    await analysisService.activateAutoAnalysis();
+  } else {
+    await analysisService.stop();
+  }
   const localUrl = `http://localhost:${PORT}`;
   console.log(`===================================================`);
   console.log(`🎬 Video Roulette v${APP_VERSION} ${result.reused ? 'is already running' : 'Server is running'}!`);
@@ -425,12 +433,14 @@ async function start() {
 
   try {
     if (result.portConflict) console.log('기존 프로그램이 사용 중인 포트를 피해 새 버전을 열었습니다. 이전 브라우저 기록은 기존 프로그램 종료 후 같은 브라우저의 localhost:3000에서 가져올 수 있습니다.');
-    if (process.env.VIDEORANDOM_START_HOST === '1') {
-      try {
+    try {
+      const hostPreference = process.env.VIDEORANDOM_START_HOST;
+      const shouldStartHost = hostPreference === '1' || (hostPreference !== '0' && await analysisService.getHostAutoStart());
+      if (shouldStartHost) {
         const host = result.reused ? await startExistingAnalysisHost(PORT) : await analysisService.startHost();
         console.log('분석 서버 시작:', host.addresses.join(', '));
-      } catch (error) { console.error('분석 서버 시작 실패:', error.message); }
-    }
+      }
+    } catch (error) { console.error('분석 서버 시작 실패:', error.message); }
     if (process.env.VIDEORANDOM_NO_OPEN === '1') return;
     await open(localUrl);
     console.log(`🚀 Browser opened automatically!`);

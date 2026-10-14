@@ -117,8 +117,11 @@ test('the job start lock prevents overlapping manual jobs during asynchronous va
   assert.equal(f.calls.length, 1);
 });
 
-test('a remote queue survives restart without rescanning and waits for a fresh RAM-only code', async t => {
+test('a verified remembered remote pair resumes its queue after restart without rescanning or retyping', async t => {
   const f = await fixture(t, undefined, false);
+  const saved = await f.request('/connection', remoteOptions, 'PUT');
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.remembered, true);
   await f.request('/auto-pick', { filePath: f.files[0], options: { ...remoteOptions, apiKey: 'also-never-persist' } });
   const serialized = await fs.readFile(path.join(f.dataDir, 'auto-pick.json'), 'utf8');
   assert.equal(serialized.includes(remoteOptions.connectionCode), false);
@@ -130,16 +133,12 @@ test('a remote queue survives restart without rescanning and waits for a fresh R
   const restored = (await reopened.request('/auto-pick')).data;
   assert.equal(restored.mode, 'remote');
   assert.equal(restored.configured, true);
-  assert.equal(restored.pendingCount, 1);
-  assert.match(restored.waitingReason, /연결 코드/);
   assert.equal(JSON.stringify(restored).includes(remoteOptions.connectionCode), false);
-  await delay(40);
-  assert.equal(f.calls.length, 0);
-  await reopened.request('/auto-pick', { options: remoteOptions, resume: true }, 'PUT');
   await quiet(reopened.request);
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].options.mode, 'remote');
   assert.equal(f.calls[0].options.connectionCode, remoteOptions.connectionCode);
+  assert.equal((await reopened.request('/config')).data.connection.connectionCode, remoteOptions.connectionCode);
 });
 
 test('an empty code preserves same-server credentials but clears them for a changed destination', async t => {

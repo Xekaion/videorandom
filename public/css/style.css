@@ -1416,6 +1416,7 @@ input[type="text"]::placeholder {
 .catalog-connection-row, .catalog-host-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .catalog-connection-row .btn, .catalog-host-actions .btn, .catalog-copy-row .btn { padding: 9px 12px; font-size: 12px; border-radius: 8px; white-space: nowrap; }
 .catalog-connection-row > span, .catalog-host-actions > span { font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.catalog-connection-saved { margin: 0; color: #a7f3d0; font-size: 12px; line-height: 1.7; }
 .catalog-host-body { padding: 4px 18px 18px; }
 .catalog-host-intro, .catalog-host-note { color: var(--color-text-muted); font-size: 12px; line-height: 1.8; }
 .catalog-host-actions { margin: 14px 0; }

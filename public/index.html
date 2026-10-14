@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.4.0">
+  <link rel="stylesheet" href="css/style.css?v=1.4.1">
 </head>
 <body>
 
@@ -40,7 +40,7 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link" href="#videoCatalog">영상 분석</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.4.0</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.4.1</span>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
         </button>
@@ -376,12 +376,14 @@
           <div class="catalog-field catalog-remote-field hidden">
             <label for="catalogConnectionCode">연결 코드</label>
             <input id="catalogConnectionCode" type="password" placeholder="서버 PC에 표시된 코드" autocomplete="off" spellcheck="false" aria-describedby="catalogConnectionHint">
-            <small id="catalogConnectionHint">이번 실행에만 사용하며 브라우저에 저장하지 않습니다.</small>
+            <small id="catalogConnectionHint">연결 확인에 성공하면 이 PC에 저장합니다. 업데이트 후에도 주소와 코드를 다시 입력할 필요가 없습니다.</small>
           </div>
           <div class="catalog-remote-field catalog-span-two catalog-connection-row hidden">
             <button id="catalogRemoteCheck" class="btn btn-secondary" type="button">연결 확인</button>
+            <button id="catalogConnectionForget" class="btn btn-secondary hidden" type="button">저장된 연결 지우기</button>
             <span id="catalogRemoteStatus" role="status" aria-live="polite"></span>
           </div>
+          <p id="catalogConnectionSaved" class="catalog-remote-field catalog-span-two catalog-connection-saved hidden" role="status">연결 확인에 성공하면 이 PC에 저장하여 다음 실행과 업데이트에도 사용합니다.</p>
           <label class="catalog-check catalog-summary-field catalog-span-two hidden" for="catalogTranscribe">
             <input id="catalogTranscribe" type="checkbox">
             <span>자막이 있어도 오디오 전체를 음성 인식 <small>기본은 자막을 우선 사용하고, 자막이 없으면 전체 오디오를 자동으로 음성 인식합니다.</small></span>
@@ -501,9 +503,9 @@
   <dialog class="catalog-zoom-dialog" id="catalogZoom" aria-labelledby="catalogZoomCaption"><button id="catalogZoomClose" class="btn btn-secondary" type="button" aria-label="확대 이미지 닫기">닫기 ×</button><img id="catalogZoomImage" alt=""><p id="catalogZoomCaption"></p></dialog>
 
   <!-- Core JavaScript Engine -->
-  <script src="js/app.js?v=1.4.0" defer></script>
-  <script src="js/history.js?v=1.4.0" defer></script>
-  <script src="js/catalog-sort.js?v=1.4.0" defer></script>
-  <script src="js/catalog.js?v=1.4.0" defer></script>
+  <script src="js/app.js?v=1.4.1" defer></script>
+  <script src="js/history.js?v=1.4.1" defer></script>
+  <script src="js/catalog-sort.js?v=1.4.1" defer></script>
+  <script src="js/catalog.js?v=1.4.1" defer></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-/* Scanned videos and persisted analysis records. Connection codes stay in memory only. */
+/* Scanned videos and persisted analysis records. Connections are remembered by this PC's server. */
 (() => {
   'use strict';
 
@@ -10,9 +10,9 @@
     scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0,
     config: null, job: null, pollTimer: null, starting: false, exporting: false,
     refreshing: false, detailId: null, saving: false, hasModePreference: false,
-    hostBusy: false, remoteChecking: false,
+    hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
     autoPick: null, autoTimer: null, autoSettingsTimer: null,
-    autoPolling: false, autoBusy: false, autoTransportError: false, settingsReady: false, settingsTouched: false,
+    autoPolling: false, autoBusy: false, autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
     resultsReady: false, autoSavedCount: null, autoResultsLoading: false, autoResultsWanted: null,
     winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: ''
   };
@@ -28,6 +28,33 @@
       if (parsed.protocol !== 'http:' || !privateAddress || parsed.username || parsed.password || parsed.search || parsed.hash || !['', '/'].includes(parsed.pathname)) return '';
       return parsed.origin;
     } catch (_) { return ''; }
+  }
+  function rememberedCode() {
+    const address = savedRemoteOrigin($('catalogRemoteUrl').value);
+    return address && address === state.connection?.remoteUrl ? state.connection.connectionCode : '';
+  }
+  function currentConnectionCode() {
+    const entered = $('catalogConnectionCode').value.trim();
+    const origin = savedRemoteOrigin($('catalogRemoteUrl').value);
+    if (entered && entered === state.connection?.connectionCode && origin !== state.connection.remoteUrl && (!origin || state.connectionCodeOrigin !== origin)) return '';
+    return entered || rememberedCode() || '';
+  }
+  function applyConnection(value) {
+    const remoteUrl = savedRemoteOrigin(value?.remoteUrl);
+    const connectionCode = typeof value?.connectionCode === 'string' ? value.connectionCode.trim() : '';
+    state.connection = remoteUrl && connectionCode ? { remoteUrl, connectionCode } : null;
+    state.connectionVersion++;
+    renderConnection();
+  }
+  function renderConnection() {
+    const connection = state.connection;
+    const matches = connection && savedRemoteOrigin($('catalogRemoteUrl').value) === connection.remoteUrl
+      && (!$('catalogConnectionCode').value.trim() || $('catalogConnectionCode').value.trim() === connection.connectionCode);
+    $('catalogConnectionForget').classList.toggle('hidden', !connection);
+    $('catalogConnectionForget').disabled = state.connectionForgetting || state.remoteChecking;
+    $('catalogConnectionSaved').textContent = connection
+      ? matches ? '이 PC에 연결 정보 저장됨 · 프로그램을 업데이트해도 자동으로 다시 사용합니다.' : '다른 연결 정보가 이 PC에 저장되어 있습니다. 연결 확인에 성공하면 현재 입력값으로 바뀝니다.'
+      : '연결 확인에 성공하면 이 PC에 저장하여 다음 실행과 업데이트에도 사용합니다.';
   }
   const make = (tag, className, text) => {
     const element = document.createElement(tag);
@@ -209,7 +236,7 @@
     return {
       mode, frameCount: Number.isInteger(count) && count >= 1 && count <= 20 ? count : 10,
       transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked,
-      ...(mode === 'remote' ? { remoteUrl: $('catalogRemoteUrl').value.trim(), connectionCode: $('catalogConnectionCode').value.trim() } : {})
+      ...(mode === 'remote' ? { remoteUrl: $('catalogRemoteUrl').value.trim(), connectionCode: currentConnectionCode() } : {})
     };
   }
 
@@ -222,8 +249,9 @@
     return result;
   }
 
-  function scheduleAutoSettings() {
+  function scheduleAutoSettings(field) {
     state.settingsTouched = true;
+    if (field) state.settingsFields.add(field);
     if (!state.settingsReady) return;
     clearTimeout(state.autoSettingsTimer);
     state.autoSettingsTimer = setTimeout(() => syncAutoPick().catch(error => autoNotice(`자동 분석 설정 저장 실패 · ${error.message}`, true)), 450);
@@ -462,7 +490,8 @@
     $('catalogModeNote').textContent = notes[mode] || notes.local;
     $('catalogFrameCount').disabled = false;
     $('catalogSettingsSummary').textContent = `${{ local: '로컬 추출', codex: '이 PC에서 자동 요약', remote: '분석 서버로 전송' }[mode] || '로컬 추출'} · 영상 길이에 맞춰 자동 ${$('catalogFrameCount').value || 10}장`;
-    $('catalogRemoteCheck').disabled = state.remoteChecking || !$('catalogRemoteUrl').value.trim() || !$('catalogConnectionCode').value.trim();
+    $('catalogRemoteCheck').disabled = state.remoteChecking || state.connectionForgetting || !$('catalogRemoteUrl').value.trim() || !currentConnectionCode();
+    renderConnection();
     if (persist) {
       state.hasModePreference = true;
       try {
@@ -575,7 +604,7 @@
 
   function remoteOptions() {
     const remoteUrl = $('catalogRemoteUrl').value.trim();
-    const connectionCode = $('catalogConnectionCode').value.trim();
+    const connectionCode = currentConnectionCode();
     let parsed;
     try { parsed = new URL(remoteUrl); } catch (_) { throw new Error('서버 PC에 표시된 주소를 입력하세요. 예: http://192.168.0.10:3001'); }
     if (parsed.protocol !== 'http:' || parsed.username || parsed.password || parsed.search || parsed.hash || !['', '/'].includes(parsed.pathname)) throw new Error('서버 주소는 같은 공유기의 http:// 내부 IP 주소와 포트로 입력하세요.');
@@ -584,26 +613,62 @@
   }
 
   async function checkRemote() {
-    if (state.remoteChecking) return;
+    if (state.remoteChecking || state.connectionForgetting) return;
     try {
       const options = remoteOptions();
+      const revision = state.connectionRevision;
       state.remoteChecking = true;
       $('catalogRemoteStatus').textContent = '서버 연결 확인 중…';
       $('catalogRemoteStatus').classList.remove('catalog-error');
       settingsChanged(false);
       const result = await request('/api/analysis/remote/check', jsonOptions('POST', options));
       if (!result.ready) throw new Error(result.error || '서버의 분석 환경이 준비되지 않았습니다. 서버 PC에서 상태를 확인하세요.');
-      $('catalogRemoteStatus').textContent = '연결 완료 · 이 서버로 선택한 영상을 분석할 수 있습니다.';
-      await syncAutoPick({ resume: true });
+      if (!result.connection) {
+        $('catalogRemoteStatus').textContent = '연결 확인 중 저장 설정이 바뀌었습니다. 연결 확인을 다시 눌러 주세요.';
+        return;
+      }
+      // The backend stores only a successfully verified pair. Input edited while
+      // the check was in flight stays untouched and is not resumed automatically.
+      applyConnection(result.connection);
+      if (state.connectionRevision === revision) {
+        $('catalogRemoteStatus').textContent = '연결 완료 · 이 PC에 저장했습니다. 다음 실행과 업데이트에도 자동으로 연결합니다.';
+        await syncAutoPick({ resume: true });
+      } else $('catalogRemoteStatus').textContent = '확인한 연결을 저장했습니다. 새로 입력한 연결은 연결 확인을 눌러 주세요.';
     } catch (error) {
       $('catalogRemoteStatus').textContent = error.message;
       $('catalogRemoteStatus').classList.add('catalog-error');
     } finally { state.remoteChecking = false; settingsChanged(false); }
   }
 
+  async function forgetConnection() {
+    if (!state.connection || state.connectionForgetting || state.remoteChecking) return;
+    state.connectionForgetting = true;
+    clearTimeout(state.autoSettingsTimer);
+    const revision = state.connectionRevision;
+    settingsChanged(false);
+    try {
+      const result = await request('/api/analysis/connection', { method: 'DELETE' });
+      applyConnection(result);
+      if (state.connectionRevision === revision) {
+        $('catalogConnectionCode').value = '';
+        state.connectionCodeOrigin = '';
+        $('catalogRemoteUrl').value = '';
+        state.connectionRevision++;
+      }
+      $('catalogRemoteStatus').textContent = '저장된 연결 정보를 지웠습니다. 새 서버 주소와 코드를 입력해 연결하세요.';
+      $('catalogRemoteStatus').classList.remove('catalog-error');
+      scheduleAutoSettings();
+      await syncAutoPick();
+    } catch (error) {
+      $('catalogRemoteStatus').textContent = `저장된 연결 삭제 실패 · ${error.message}`;
+      $('catalogRemoteStatus').classList.add('catalog-error');
+    } finally { state.connectionForgetting = false; settingsChanged(); }
+  }
+
   async function refresh() {
     if (state.refreshing) return;
     state.refreshing = true;
+    const connectionVersion = state.connectionVersion;
     $('catalogRefresh').disabled = true;
     const results = await Promise.allSettled([request('/api/analysis/config'), request('/api/analysis/results')]);
     state.refreshing = false;
@@ -613,14 +678,26 @@
       $('catalogMode').querySelector('option[value="codex"]').disabled = !codexReady();
       const firstLoad = !state.settingsReady;
       const persistedOptions = config.autoPick?.options;
-      if (firstLoad && !state.settingsTouched && persistedOptions) {
-        $('catalogMode').value = persistedOptions.mode;
-        $('catalogFrameCount').value = persistedOptions.frameCount || 10;
-        $('catalogRemoteUrl').value = persistedOptions.remoteUrl || '';
-        $('catalogTranscribe').checked = persistedOptions.transcribeAudio === true;
+      if (state.connectionVersion === connectionVersion) applyConnection(config.connection);
+      const connectionTouched = state.settingsFields.has('catalogRemoteUrl') || state.settingsFields.has('catalogConnectionCode');
+      if (firstLoad && persistedOptions) {
+        if (!state.settingsFields.has('catalogMode')) $('catalogMode').value = persistedOptions.mode;
+        if (!state.settingsFields.has('catalogFrameCount')) $('catalogFrameCount').value = persistedOptions.frameCount || 10;
+        if (!connectionTouched) $('catalogRemoteUrl').value = persistedOptions.remoteUrl || '';
+        if (!state.settingsFields.has('catalogTranscribe')) $('catalogTranscribe').checked = persistedOptions.transcribeAudio === true;
         state.hasModePreference = true;
-      } else if (!state.hasModePreference && !state.settingsTouched) {
+      } else if (!state.hasModePreference && !state.settingsFields.has('catalogMode')) {
         $('catalogMode').value = codexReady() && config.defaultMode === 'codex' ? 'codex' : 'local';
+      }
+      if (firstLoad && state.connection) {
+        // A saved connection belongs to this PC, even if an update opens another
+        // localhost port with empty or stale browser preferences.
+        if (!persistedOptions && !state.settingsFields.has('catalogMode')) $('catalogMode').value = 'remote';
+        if (!connectionTouched && (persistedOptions?.mode !== 'remote' || !persistedOptions.remoteUrl || savedRemoteOrigin(persistedOptions.remoteUrl) === state.connection.remoteUrl)) {
+          $('catalogRemoteUrl').value = state.connection.remoteUrl;
+          $('catalogConnectionCode').value = state.connection.connectionCode;
+          state.hasModePreference = true;
+        }
       }
       state.settingsReady = true;
       settingsChanged(false);
@@ -885,16 +962,21 @@
   window.videoCatalog = { onScan, onPick };
   document.addEventListener('DOMContentLoaded', () => {
     restoreSettings();
-    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); scheduleAutoSettings(); if (state.config) renderToolStatus(); }));
+    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); scheduleAutoSettings(id); if (state.config) renderToolStatus(); }));
     $('catalogAutoEnabled').addEventListener('change', event => changeAutoPick({ enabled: event.target.checked }));
     $('catalogAutoResume').addEventListener('click', () => changeAutoPick({ resume: true }));
     $('catalogStorageCopy').addEventListener('click', () => copyText(state.config?.storage?.directory, '이 PC의 분석 결과 저장 폴더 경로를 복사했습니다. 파일 탐색기 주소창에 붙여 넣으면 열 수 있습니다.'));
     ['catalogRemoteUrl', 'catalogConnectionCode'].forEach(id => $(id).addEventListener('input', () => {
+      state.connectionRevision++;
+      if (id === 'catalogRemoteUrl' && state.connection && savedRemoteOrigin($('catalogRemoteUrl').value) !== state.connection.remoteUrl
+          && $('catalogConnectionCode').value.trim() === state.connection.connectionCode) { $('catalogConnectionCode').value = ''; state.connectionCodeOrigin = ''; }
+      if (id === 'catalogConnectionCode') state.connectionCodeOrigin = savedRemoteOrigin($('catalogRemoteUrl').value);
       $('catalogRemoteStatus').textContent = '';
       settingsChanged(id !== 'catalogConnectionCode');
-      scheduleAutoSettings();
+      scheduleAutoSettings(id);
     }));
     $('catalogRemoteCheck').addEventListener('click', checkRemote);
+    $('catalogConnectionForget').addEventListener('click', forgetConnection);
     $('catalogHostStart').addEventListener('click', () => changeHost('start'));
     $('catalogHostStop').addEventListener('click', () => changeHost('stop'));
     $('catalogHostCodeCopy').addEventListener('click', () => copyText($('catalogHostCode').value, '연결 코드를 복사했습니다. 다른 PC의 분석 설정에 입력하세요.'));

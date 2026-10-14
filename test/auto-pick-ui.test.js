@@ -26,16 +26,18 @@ class Element {
   remove() {}
 }
 
-async function boot({ savedSettings, initialQueue, records = [], delayConfig = false, jobResponse } = {}) {
+async function boot({ savedSettings, initialQueue, initialConnection = null, records = [], delayConfig = false, delayRemote = false, remoteReady = true, remoteSuperseded = false, jobResponse } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
   let queue = initialQueue || baseQueue();
+  let connection = initialConnection;
   const preferences = new Map(savedSettings ? [['video_catalog_settings', JSON.stringify(savedSettings)]] : []);
   const calls = [], timers = new Map();
-  let load, releaseConfig, timerId = 0;
+  let load, releaseConfig, releaseRemote, timerId = 0;
   const configGate = delayConfig ? new Promise(resolve => { releaseConfig = resolve; }) : Promise.resolve();
-  const config = () => ({ tools: { available: true }, providers: { codex: { available: true, loggedIn: true }, speech: { available: true } }, defaultMode: 'codex', host: { running: false }, autoPick: plain(queue) });
+  const remoteGate = delayRemote ? new Promise(resolve => { releaseRemote = resolve; }) : Promise.resolve();
+  const config = () => ({ tools: { available: true }, providers: { codex: { available: true, loggedIn: true }, speech: { available: true } }, defaultMode: 'codex', host: { running: false }, autoPick: plain(queue), connection: plain(connection) });
   const sandbox = {
     document: { body: new Element('body'), getElementById: id => elements.get(id), createElement: tag => new Element(tag), createDocumentFragment: () => new Element('#fragment'), querySelectorAll: () => [], addEventListener: (_type, callback) => { load = callback; } },
     localStorage: { getItem: key => preferences.get(key) ?? null, setItem: (key, value) => preferences.set(key, value) },
@@ -45,9 +47,15 @@ async function boot({ savedSettings, initialQueue, records = [], delayConfig = f
       const body = options.body ? JSON.parse(options.body) : null;
       calls.push({ url, method, body });
       let result;
-      if (url.endsWith('/config')) { await configGate; result = config(); }
+      if (url.endsWith('/config')) { const snapshot = config(); await configGate; result = snapshot; }
       else if (url.endsWith('/results')) result = { results: records };
-      else if (url.endsWith('/remote/check')) result = { ready: true };
+      else if (url.endsWith('/remote/check')) {
+        await remoteGate;
+        if (remoteReady && !remoteSuperseded) connection = { ...body, remembered: true };
+        result = remoteSuperseded ? { ready: remoteReady } : { ready: remoteReady, connection: plain(connection) };
+      }
+      else if (url === '/api/analysis/connection' && method === 'DELETE') { connection = null; result = { remoteUrl: '', connectionCode: '', remembered: false }; }
+      else if (url === '/api/analysis/jobs') result = { job: { id: 'manual', source: 'manual', status: 'completed', total: body.files.length, completed: body.files.length, results: [] } };
       else if (url === '/api/analysis/auto-pick') {
         if (method === 'PUT') {
           if (body.options) {
@@ -82,7 +90,7 @@ async function boot({ savedSettings, initialQueue, records = [], delayConfig = f
     for (const [id, timer] of ready) { timers.delete(id); await timer.callback(); }
     await flush();
   };
-  return { sandbox, elements, calls, preferences, runTimers, releaseConfig, setQueue: next => { queue = next; }, getQueue: () => queue };
+  return { sandbox, elements, calls, preferences, runTimers, releaseConfig, releaseRemote, getConnection: () => connection, setQueue: next => { queue = next; }, getQueue: () => queue };
 }
 
 test('revealing a winner records the pick and queues analysis without replaying or changing selections', () => {
@@ -252,4 +260,193 @@ test('a delayed old job response merges its durable result without taking over t
   assert(ui.elements.get('catalogJobText').textContent.includes('다음 영상.mp4'));
   assert.equal(ui.elements.get('catalogJobTitle').textContent, '뽑은 영상 자동 분석 중');
   assert.equal(ui.elements.get('catalogRows').childNodes[0].childNodes[2].childNodes[0].textContent, '완료된 첫 영상');
+});
+
+const remembered = () => ({ remoteUrl: 'http://192.168.55.166:3001', connectionCode: 'remembered-client-code', remembered: true });
+
+test('a remembered PC connection restores remote analysis after an update opens a fresh browser origin', async () => {
+  const ui = await boot({ initialConnection: remembered(), savedSettings: { mode: 'local', frameCount: 7 } });
+  assert.equal(ui.elements.get('catalogMode').value, 'remote');
+  assert.equal(ui.elements.get('catalogRemoteUrl').value, remembered().remoteUrl);
+  assert.equal(ui.elements.get('catalogConnectionCode').value, remembered().connectionCode);
+  assert.equal(ui.elements.get('catalogFrameCount').value, 7);
+  assert(ui.elements.get('catalogConnectionSaved').textContent.includes('업데이트'));
+  assert.equal(ui.elements.get('catalogConnectionForget').classList.contains('hidden'), false);
+  await ui.sandbox.videoCatalog.onPick(picked());
+  const posted = ui.calls.find(call => call.method === 'POST' && call.url.endsWith('/auto-pick'));
+  assert.equal(posted.body.options.mode, 'remote');
+  assert.equal(posted.body.options.connectionCode, remembered().connectionCode);
+  assert(![...ui.preferences.values()].join('').includes(remembered().connectionCode));
+  const reopened = await boot({ initialConnection: remembered() });
+  assert.equal(reopened.elements.get('catalogMode').value, 'remote');
+  assert.equal(reopened.elements.get('catalogConnectionCode').value, remembered().connectionCode);
+  const local = await boot({ initialConnection: remembered(), initialQueue: { ...baseQueue(), configured: true, mode: 'local', options: { mode: 'local', frameCount: 4 } } });
+  assert.equal(local.elements.get('catalogMode').value, 'local');
+  local.elements.get('catalogMode').value = 'remote';
+  await local.elements.get('catalogMode').dispatch('change');
+  assert.equal(local.elements.get('catalogRemoteUrl').value, remembered().remoteUrl);
+  assert.equal(local.elements.get('catalogConnectionCode').value, remembered().connectionCode);
+});
+
+test('remembered credentials never fill a different queued server or follow an edited or invalid address', async () => {
+  const queue = { ...baseQueue(), configured: true, mode: 'remote', options: { mode: 'remote', frameCount: 10, remoteUrl: 'http://192.168.55.40:3001' } };
+  const changed = await boot({ initialConnection: remembered(), initialQueue: queue });
+  assert.equal(changed.elements.get('catalogRemoteUrl').value, queue.options.remoteUrl);
+  assert.equal(changed.elements.get('catalogConnectionCode').value, '');
+  await changed.sandbox.videoCatalog.onPick(picked());
+  assert.equal(changed.calls.at(-1).body.options.connectionCode, '');
+
+  const ui = await boot({ initialConnection: remembered() });
+  const address = ui.elements.get('catalogRemoteUrl');
+  for (const value of ['http://192.168.55.40:3001', 'not-a-url', 'http://user:password@192.168.55.166:3001/?key=token']) {
+    address.value = value;
+    await address.dispatch('input');
+    assert.equal(address.value, value);
+    assert.equal(ui.elements.get('catalogConnectionCode').value, '');
+    await ui.sandbox.videoCatalog.onPick(picked(value));
+    assert.equal(ui.calls.at(-1).body.options.connectionCode, '');
+  }
+  address.value = ` ${remembered().remoteUrl}/ `;
+  await address.dispatch('input');
+  await ui.sandbox.videoCatalog.onPick(picked('다시 기존 서버.mp4'));
+  assert.equal(ui.calls.at(-1).body.options.connectionCode, remembered().connectionCode);
+});
+
+test('a changed server address can use a code explicitly re-entered by the user, including the same stable host code', async () => {
+  const ui = await boot({ initialConnection: remembered() });
+  ui.elements.get('catalogRemoteUrl').value = 'http://192.168.55.40:3001';
+  await ui.elements.get('catalogRemoteUrl').dispatch('input');
+  assert.equal(ui.elements.get('catalogConnectionCode').value, '');
+  ui.elements.get('catalogConnectionCode').value = remembered().connectionCode;
+  await ui.elements.get('catalogConnectionCode').dispatch('input');
+  await ui.elements.get('catalogRemoteCheck').dispatch('click');
+  const checked = ui.calls.find(call => call.url.endsWith('/remote/check'));
+  assert.equal(checked.body.remoteUrl, 'http://192.168.55.40:3001');
+  assert.equal(checked.body.connectionCode, remembered().connectionCode);
+  assert.equal(ui.getConnection().remoteUrl, checked.body.remoteUrl);
+});
+
+test('successful connection checks remember credentials on the PC and share same-origin reuse across manual and automatic analysis', async () => {
+  const ui = await boot();
+  ui.elements.get('catalogMode').value = 'remote';
+  await ui.elements.get('catalogMode').dispatch('change');
+  ui.elements.get('catalogRemoteUrl').value = remembered().remoteUrl;
+  await ui.elements.get('catalogRemoteUrl').dispatch('input');
+  ui.elements.get('catalogConnectionCode').value = remembered().connectionCode;
+  await ui.elements.get('catalogConnectionCode').dispatch('input');
+  await ui.elements.get('catalogRemoteCheck').dispatch('click');
+  assert.deepEqual(ui.getConnection(), remembered());
+  assert(ui.elements.get('catalogRemoteStatus').textContent.includes('저장했습니다'));
+  assert.equal(ui.calls.filter(call => call.url === '/api/analysis/connection' && call.method === 'PUT').length, 0);
+  assert(ui.calls.some(call => call.url.endsWith('/auto-pick') && call.body?.resume === true));
+  assert(![...ui.preferences.values()].join('').includes(remembered().connectionCode));
+
+  ui.elements.get('catalogConnectionCode').value = '';
+  await ui.elements.get('catalogConnectionCode').dispatch('input');
+  assert.equal(ui.elements.get('catalogRemoteCheck').disabled, false);
+  await ui.sandbox.videoCatalog.onPick(picked());
+  assert.equal(ui.calls.at(-1).body.options.connectionCode, remembered().connectionCode);
+  ui.sandbox.videoCatalog.onScan([picked()]);
+  const checkbox = ui.elements.get('catalogRows').childNodes[0].childNodes[0].childNodes[0];
+  checkbox.checked = true; await checkbox.dispatch('change');
+  await ui.elements.get('catalogAnalyze').dispatch('click');
+  const manual = ui.calls.find(call => call.url === '/api/analysis/jobs');
+  assert.equal(manual.body.options.connectionCode, remembered().connectionCode);
+
+  const reopened = await boot({ initialConnection: ui.getConnection() });
+  assert.equal(reopened.elements.get('catalogConnectionCode').value, remembered().connectionCode);
+});
+
+test('forgetting the saved connection clears inputs and pending settings without resending the old code', async () => {
+  const ui = await boot({ initialConnection: remembered() });
+  ui.elements.get('catalogFrameCount').value = 8;
+  await ui.elements.get('catalogFrameCount').dispatch('change');
+  await ui.elements.get('catalogConnectionForget').dispatch('click');
+  assert.equal(ui.getConnection(), null);
+  assert.equal(ui.elements.get('catalogConnectionCode').value, '');
+  assert.equal(ui.elements.get('catalogRemoteUrl').value, '');
+  assert.equal(ui.elements.get('catalogConnectionForget').classList.contains('hidden'), true);
+  const deleted = ui.calls.findIndex(call => call.method === 'DELETE');
+  await ui.runTimers(450);
+  await ui.sandbox.videoCatalog.onPick(picked());
+  assert(!ui.calls.slice(deleted + 1).some(call => call.body?.options?.connectionCode === remembered().connectionCode));
+  assert.equal(ui.calls.at(-1).body.options.mode, 'remote');
+  assert.equal(ui.calls.at(-1).body.options.connectionCode, '');
+  assert(![...ui.preferences.values()].join('').includes(remembered().connectionCode));
+});
+
+test('late initial config preserves edited connection fields while frame-only edits still restore the saved remote connection', async () => {
+  const queue = { ...baseQueue(), configured: true, mode: 'remote', options: { mode: 'remote', frameCount: 10, remoteUrl: remembered().remoteUrl } };
+  const editing = await boot({ initialConnection: remembered(), initialQueue: queue, delayConfig: true });
+  editing.elements.get('catalogRemoteUrl').value = 'http://192.168.55.40:3001';
+  await editing.elements.get('catalogRemoteUrl').dispatch('input');
+  editing.elements.get('catalogConnectionCode').value = 'new-unverified-code';
+  await editing.elements.get('catalogConnectionCode').dispatch('input');
+  editing.releaseConfig(); await flush();
+  assert.equal(editing.elements.get('catalogRemoteUrl').value, 'http://192.168.55.40:3001');
+  assert.equal(editing.elements.get('catalogConnectionCode').value, 'new-unverified-code');
+  assert.equal(editing.elements.get('catalogMode').value, 'remote');
+
+  const frameOnly = await boot({ initialConnection: remembered(), initialQueue: queue, delayConfig: true });
+  frameOnly.elements.get('catalogFrameCount').value = 6;
+  await frameOnly.elements.get('catalogFrameCount').dispatch('change');
+  frameOnly.releaseConfig(); await flush();
+  assert.equal(frameOnly.elements.get('catalogFrameCount').value, 6);
+  assert.equal(frameOnly.elements.get('catalogMode').value, 'remote');
+  assert.equal(frameOnly.elements.get('catalogRemoteUrl').value, remembered().remoteUrl);
+  assert.equal(frameOnly.elements.get('catalogConnectionCode').value, remembered().connectionCode);
+  const sync = frameOnly.calls.find(call => call.method === 'PUT');
+  assert.equal(sync.body.options.frameCount, 6);
+  assert.equal(sync.body.options.connectionCode, remembered().connectionCode);
+});
+
+test('an in-flight connection check cannot overwrite newly edited fields or resume their unverified server', async () => {
+  const ui = await boot({ initialConnection: remembered(), delayRemote: true });
+  const checking = ui.elements.get('catalogRemoteCheck').dispatch('click');
+  await flush();
+  ui.elements.get('catalogRemoteUrl').value = 'http://192.168.55.40:3001';
+  await ui.elements.get('catalogRemoteUrl').dispatch('input');
+  ui.elements.get('catalogConnectionCode').value = 'new-unverified-code';
+  await ui.elements.get('catalogConnectionCode').dispatch('input');
+  ui.releaseRemote(); await checking;
+  assert.equal(ui.elements.get('catalogRemoteUrl').value, 'http://192.168.55.40:3001');
+  assert.equal(ui.elements.get('catalogConnectionCode').value, 'new-unverified-code');
+  assert(!ui.calls.some(call => call.body?.resume === true));
+  assert(ui.elements.get('catalogRemoteStatus').textContent.includes('새로 입력한'));
+});
+
+test('a stale initial config cannot discard a connection saved while it was loading', async () => {
+  const ui = await boot({ delayConfig: true });
+  ui.elements.get('catalogMode').value = 'remote';
+  await ui.elements.get('catalogMode').dispatch('change');
+  ui.elements.get('catalogRemoteUrl').value = remembered().remoteUrl;
+  await ui.elements.get('catalogRemoteUrl').dispatch('input');
+  ui.elements.get('catalogConnectionCode').value = remembered().connectionCode;
+  await ui.elements.get('catalogConnectionCode').dispatch('input');
+  await ui.elements.get('catalogRemoteCheck').dispatch('click');
+  ui.elements.get('catalogConnectionCode').value = '';
+  await ui.elements.get('catalogConnectionCode').dispatch('input');
+  ui.releaseConfig(); await flush();
+  assert(ui.elements.get('catalogConnectionSaved').textContent.includes('이 PC에 연결 정보 저장됨'));
+  await ui.sandbox.videoCatalog.onPick(picked());
+  assert.equal(ui.calls.at(-1).body.options.connectionCode, remembered().connectionCode);
+});
+
+test('a failed connection check leaves the prior remembered pair intact without resuming analysis', async () => {
+  const ui = await boot({ initialConnection: remembered(), remoteReady: false });
+  ui.elements.get('catalogConnectionCode').value = 'invalid-new-code';
+  await ui.elements.get('catalogConnectionCode').dispatch('input');
+  await ui.runTimers(450);
+  await ui.elements.get('catalogRemoteCheck').dispatch('click');
+  assert.deepEqual(ui.getConnection(), remembered());
+  assert.equal(ui.elements.get('catalogConnectionCode').value, 'invalid-new-code');
+  assert(ui.elements.get('catalogRemoteStatus').classList.contains('catalog-error'));
+  assert(!ui.calls.some(call => call.body?.resume === true));
+});
+
+test('a superseded connection check does not recreate a pair that the backend declined to remember', async () => {
+  const ui = await boot({ initialConnection: remembered(), remoteSuperseded: true });
+  await ui.elements.get('catalogRemoteCheck').dispatch('click');
+  assert(!ui.calls.some(call => call.body?.resume === true));
+  assert(ui.elements.get('catalogRemoteStatus').textContent.includes('저장 설정이 바뀌었습니다'));
 });
