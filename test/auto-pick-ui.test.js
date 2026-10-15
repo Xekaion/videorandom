@@ -31,7 +31,7 @@ class Element {
   focus() {}
 }
 
-async function boot({ savedSettings, initialQueue, initialConnection = null, records = [], delayConfig = false, delayRemote = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v2'], remoteSuperseded = false, jobResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, browserCrypto = crypto.webcrypto } = {}) {
+async function boot({ savedSettings, initialQueue, initialConnection = null, records = [], delayConfig = false, delayRemote = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v2'], remoteSuperseded = false, jobResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
@@ -42,7 +42,7 @@ async function boot({ savedSettings, initialQueue, initialConnection = null, rec
   let load, releaseConfig, releaseRemote, timerId = 0;
   const configGate = delayConfig ? new Promise(resolve => { releaseConfig = resolve; }) : Promise.resolve();
   const remoteGate = delayRemote ? new Promise(resolve => { releaseRemote = resolve; }) : Promise.resolve();
-  const config = () => ({ tools: { available: true }, providers: { codex: { available: true, loggedIn: true }, speech: { available: true } }, defaultMode: 'codex', host: { running: false }, autoPick: plain(queue), connection: plain(connection) });
+  const config = () => ({ tools: { available: true }, providers: providerStatus, defaultMode: 'codex', host: { running: false }, autoPick: plain(queue), connection: plain(connection) });
   const sandbox = {
     crypto: browserCrypto, TextEncoder,
     document: { body: new Element('body'), getElementById: id => elements.get(id), createElement: tag => new Element(tag), createDocumentFragment: () => new Element('#fragment'), querySelectorAll: () => [], addEventListener: (_type, callback) => { load = callback; } },
@@ -386,6 +386,30 @@ test('forgetting the saved connection clears inputs and pending settings without
   assert.equal(ui.calls.at(-1).body.options.mode, 'remote');
   assert.equal(ui.calls.at(-1).body.options.connectionCode, '');
   assert(![...ui.preferences.values()].join('').includes(remembered().connectionCode));
+});
+
+test('a client without faster-whisper can send remote analysis while local AI analysis still requires it', async () => {
+  const missingSpeech = '로컬 음성 인식 환경을 설치해야 합니다. No module named faster_whisper';
+  const ui = await boot({ initialConnection: remembered(), savedSettings: { mode: 'remote' },
+    providerStatus: { codex: { available: true, loggedIn: true }, speech: { available: false, error: missingSpeech } } });
+  ui.sandbox.videoCatalog.onScan([picked()]);
+  const checkbox = ui.elements.get('catalogRows').childNodes[0].childNodes[0].childNodes[0];
+  checkbox.checked = true; await checkbox.dispatch('change');
+  assert.equal(ui.elements.get('catalogAnalyze').disabled, false);
+  assert.equal(ui.elements.get('catalogProviderStatus').classList.contains('catalog-error'), false);
+  assert.equal(ui.elements.get('catalogProviderStatus').textContent.includes('No module'), false);
+  assert(ui.elements.get('catalogProviderStatus').textContent.includes('서버 PC에서 실행'));
+  ui.elements.get('catalogMode').value = 'codex';
+  await ui.elements.get('catalogMode').dispatch('change');
+  assert.equal(ui.elements.get('catalogAnalyze').disabled, true);
+  assert.equal(ui.elements.get('catalogProviderStatus').classList.contains('catalog-error'), true);
+  assert(ui.elements.get('catalogProviderStatus').textContent.includes(missingSpeech));
+  ui.elements.get('catalogMode').value = 'remote';
+  await ui.elements.get('catalogMode').dispatch('change');
+  assert.equal(ui.elements.get('catalogAnalyze').disabled, false);
+  assert.equal(ui.elements.get('catalogProviderStatus').classList.contains('catalog-error'), false);
+  await ui.elements.get('catalogAnalyze').dispatch('click');
+  assert.equal(ui.calls.find(call => call.url === '/api/analysis/jobs').body.options.mode, 'remote');
 });
 
 test('late initial config preserves edited connection fields while frame-only edits still restore the saved remote connection', async () => {

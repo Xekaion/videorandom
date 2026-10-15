@@ -569,14 +569,17 @@
   }
 
   function renderToolStatus() {
-    $('catalogProviderStatus').textContent = codexReady() ? '이 PC의 Codex 로그인과 로컬 음성 인식 준비 완료' : `이 PC 자동 요약: ${codexUnavailableReason()}`;
-    $('catalogProviderStatus').classList.toggle('catalog-error', !codexReady());
+    const mode = $('catalogMode').value;
+    $('catalogProviderStatus').textContent = mode === 'remote'
+      ? '음성 인식과 자동 요약은 연결한 서버 PC에서 실행합니다. 이 PC에는 Codex나 음성 인식 환경을 설치하지 않아도 됩니다.'
+      : mode === 'local' ? '로컬 추출에는 Codex 로그인이나 음성 인식 환경이 필요하지 않습니다.'
+        : codexReady() ? '이 PC의 Codex 로그인과 로컬 음성 인식 준비 완료' : `이 PC 자동 요약: ${codexUnavailableReason()}`;
+    $('catalogProviderStatus').classList.toggle('catalog-error', mode === 'codex' && !codexReady());
     if (state.config?.tools?.available === false) {
       $('catalogToolStatus').textContent = '분석 도구가 없습니다. FFmpeg와 FFprobe를 설치한 뒤 결과 불러오기를 눌러 주세요.';
       $('catalogToolStatus').classList.add('catalog-error');
       return;
     }
-    const mode = $('catalogMode').value;
     const unavailable = mode === 'codex' && !codexReady();
     $('catalogToolStatus').textContent = unavailable ? codexUnavailableReason() : mode === 'remote'
       ? '이 PC는 영상 자료를 추출해 서버로 보내고 분석이 끝나면 결과와 이미지를 이 PC에 자동 저장합니다. 이 PC의 Codex 로그인이나 음성 인식 도구는 필요하지 않습니다.'
