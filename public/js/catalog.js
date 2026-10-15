@@ -736,7 +736,7 @@
         if (!connectionTouched) $('catalogRemoteUrl').value = persistedOptions.remoteUrl || '';
         if (!state.settingsFields.has('catalogTranscribe')) $('catalogTranscribe').checked = persistedOptions.transcribeAudio === true;
         if (!state.settingsFields.has('catalogTranscriptLanguage')) $('catalogTranscriptLanguage').value = transcriptLanguage(persistedOptions.transcriptLanguage);
-        if (!state.settingsFields.has('catalogTranslateSubtitles') && ['original', 'ko'].includes(persistedOptions.subtitleLanguage)) $('catalogTranslateSubtitles').checked = persistedOptions.subtitleLanguage === 'ko';
+        if (persistedOptions.mode !== 'local' && !state.settingsFields.has('catalogTranslateSubtitles') && ['original', 'ko'].includes(persistedOptions.subtitleLanguage)) $('catalogTranslateSubtitles').checked = persistedOptions.subtitleLanguage === 'ko';
         if (persistedOptions.mode !== 'local' && !state.settingsFields.has('catalogSubtitleQuality') && ['accurate', 'fast'].includes(persistedOptions.subtitleQuality)) $('catalogSubtitleQuality').value = persistedOptions.subtitleQuality;
         state.hasModePreference = true;
       } else if (!state.hasModePreference && !state.settingsFields.has('catalogMode')) {

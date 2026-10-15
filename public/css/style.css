@@ -1412,7 +1412,7 @@ input[type="text"]::placeholder {
 .catalog-settings { border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.015); border-radius: 12px; margin-bottom: 20px; }
 .catalog-settings > summary { cursor: pointer; padding: 14px 18px; font-size: 13px; font-weight: 600; }
 .catalog-settings > summary span { margin-left: 12px; color: var(--color-text-muted); font-size: 12px; font-weight: 400; }
-.catalog-settings-grid { padding: 4px 18px 0; display: grid; grid-template-columns: 1fr 1fr; gap: 17px; }
+.catalog-settings-grid { padding: 4px 18px 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
 .catalog-connection-row, .catalog-host-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .catalog-connection-row .btn, .catalog-host-actions .btn, .catalog-copy-row .btn { padding: 9px 12px; font-size: 12px; border-radius: 8px; white-space: nowrap; }
 .catalog-connection-row > span, .catalog-host-actions > span { font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
@@ -1439,6 +1439,9 @@ input[type="text"]::placeholder {
 .catalog-check.catalog-span-two { white-space: normal; align-items: flex-start; }
 .catalog-check.catalog-span-two input { margin-top: 4px; }
 .catalog-check.catalog-span-two > span { color: #d1d5db; }
+.catalog-settings-grid > .catalog-check { min-width: 0; white-space: normal; align-items: flex-start; }
+.catalog-settings-grid > .catalog-check input { margin-top: 4px; }
+.catalog-settings-grid > .catalog-check > span { min-width: 0; overflow-wrap: anywhere; }
 .catalog-card input[type="checkbox"] { accent-color: var(--color-accent); width: 16px; height: 16px; cursor: pointer; flex-shrink: 0; }
 .catalog-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .catalog-search-wrap { display: flex; position: relative; flex: 1; min-width: 220px; }

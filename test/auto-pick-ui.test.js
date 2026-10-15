@@ -713,6 +713,25 @@ test('local extraction queue settings do not change the next AI subtitle default
   assert.equal(explicit.elements.get('catalogSubtitleQuality').value, 'fast');
 });
 
+test('a local queue never replaces the next AI Korean subtitle default or an explicit translation preference', async () => {
+  for (const mode of ['codex', 'remote']) {
+    for (const preference of [undefined, 'ko', 'original']) {
+      const queue = { ...baseQueue(), configured: true, mode: 'local', options: { mode: 'local', frameCount: 10, subtitleLanguage: 'original', subtitleQuality: 'fast' } };
+      const ui = await boot({ initialQueue: queue,
+        ...(preference === undefined ? {} : { savedSettings: { mode: 'local', subtitleLanguage: preference } }) });
+      const expected = preference === 'original' ? 'original' : 'ko';
+      assert.equal(ui.elements.get('catalogTranslateSubtitles').checked, expected === 'ko', `restored ${preference || 'default'} translation preference`);
+      ui.elements.get('catalogMode').value = mode;
+      await ui.elements.get('catalogMode').dispatch('change');
+      await ui.runTimers(450);
+      const submitted = ui.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options;
+      assert.equal(submitted.mode, mode);
+      assert.equal(submitted.subtitleLanguage, expected, `${mode} uses the retained ${preference || 'default'} preference`);
+      assert.equal(JSON.parse(ui.preferences.get('video_catalog_settings')).subtitleLanguage, expected);
+    }
+  }
+});
+
 test('subtitle details distinguish full audio processing from unresolved speech without promising perfect recognition', async () => {
   for (const complete of [true, false]) {
     const record = { ...timedRecord(), transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3',
