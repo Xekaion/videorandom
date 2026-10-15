@@ -1489,6 +1489,9 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-file-path { display: block; margin-top: 5px; font-size: 10px; color: #788397; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .catalog-file-duration { display: block; color: var(--color-text-muted); font-family: var(--font-mono); font-size: 10px; margin-top: 7px; }
 .catalog-detail-link { margin-top: 7px; border: 0; color: #a1d8e0; font: inherit; font-size: 10px; background: none; padding: 0; cursor: pointer; }
+.catalog-file-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 9px; }
+.catalog-file-actions > .catalog-detail-link { margin-top: 0; }
+.catalog-play-button { padding: 6px 10px; white-space: nowrap; }
 .catalog-text-clamp { line-height: 1.8; color: #cbd0da; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
 .catalog-labels { display: flex; flex-wrap: wrap; gap: 5px; }
 .catalog-label { border: 1px solid rgba(168,85,247,.2); background: rgba(168,85,247,.08); padding: 3px 7px; border-radius: 5px; font-size: 10px; line-height: 1.5; color: #d8b4fe; max-width: 100%; }

@@ -439,13 +439,27 @@
       path.title = file.path;
       nameCell.append(name, path);
       if (record?.duration != null) nameCell.append(make('span', 'catalog-file-duration', time(record.duration)));
+      const actions = make('div', 'catalog-file-actions');
+      const play = make('button', 'btn-mini play catalog-play-button', '▶ 재생');
+      play.type = 'button';
+      play.title = '이 PC의 기본 동영상 플레이어로 재생';
+      play.setAttribute('aria-label', `${file.name || '영상'} 재생`);
+      play.disabled = !file.path;
+      play.addEventListener('click', async () => {
+        if (play.disabled) return;
+        play.disabled = true;
+        try { await playVideo(file.path); }
+        finally { play.disabled = !file.path; }
+      });
+      actions.append(play);
       if (record) {
         const details = make('button', 'catalog-detail-link', '상세 보기 →');
         details.type = 'button';
         details.setAttribute('aria-label', `${file.name} 상세 보기`);
         details.addEventListener('click', () => openDetail(record.id));
-        nameCell.append(details);
+        actions.append(details);
       }
+      nameCell.append(actions);
 
       const summaryCell = make('td');
       summaryCell.append(make('p', 'catalog-text-clamp', record?.summary || record?.plot || (record ? healthFor(record).reason : '분석 대기')));

@@ -117,6 +117,56 @@ test('revealing a winner records the pick and queues analysis without replaying 
   assert.deepEqual(events, [['history', picked().path], ['analysis', picked().path]]);
 });
 
+test('catalog playback opens the exact local file and refreshes play history without changing selection or queuing analysis', async () => {
+  const pending = picked('새 영상 & 봄.mp4');
+  const completed = { ...picked('분석 완료.mp4'), id: 'play-completed', status: 'completed', summary: '예시 요약', frames: [] };
+  const ui = await boot({ records: [completed] });
+  ui.sandbox.videoCatalog.onScan([pending, completed]);
+  const rows = ui.elements.get('catalogRows').childNodes;
+  const rowFor = file => rows.find(row => row.childNodes[1].childNodes[0].textContent === file.name);
+  const buttonFor = file => rowFor(file).childNodes[1].childNodes.at(-1).childNodes.find(button => button.textContent === '▶ 재생');
+  const checkbox = rowFor(pending).childNodes[0].childNodes[0];
+  checkbox.checked = true; await checkbox.dispatch('change');
+  const selection = ui.elements.get('catalogCounts').textContent;
+  const requests = [], alerts = [], historyWarnings = [];
+  let releasePlay, nextPlay, success = true, refreshes = 0;
+  const existingFetch = ui.sandbox.fetch;
+  ui.sandbox.fetch = async (url, options) => {
+    if (url !== '/api/play') return existingFetch(url, options);
+    requests.push({ url, method: options.method, body: JSON.parse(options.body) });
+    if (nextPlay) await nextPlay;
+    return { ok: success, json: async () => ({ success: true, historySaved: true }) };
+  };
+  ui.sandbox.showToast = () => {};
+  ui.sandbox.playTickSound = () => {};
+  ui.sandbox.alert = message => alerts.push(message);
+  ui.sandbox.VideoRandomHistory = { refresh: () => { refreshes++; }, reportError: message => historyWarnings.push(message) };
+  const app = fs.readFileSync(path.join(publicDir, 'js', 'app.js'), 'utf8');
+  vm.runInContext(app.slice(app.indexOf('async function playVideo('), app.indexOf('// OS API integrations: Highlight in Explorer')), ui.sandbox);
+  nextPlay = new Promise(resolve => { releasePlay = resolve; });
+  const pendingButton = buttonFor(pending);
+  const opening = pendingButton.dispatch('click');
+  await flush();
+  assert.equal(pendingButton.disabled, true);
+  await pendingButton.dispatch('click');
+  assert.equal(requests.length, 1, 'ignore another click while the player is opening');
+  releasePlay(); await opening; nextPlay = null;
+  assert.equal(pendingButton.disabled, false);
+  await buttonFor(completed).dispatch('click');
+  assert.deepEqual(requests.map(request => request.body.filePath), [pending.path, completed.path]);
+  assert(requests.every(request => request.method === 'POST' && request.url === '/api/play'));
+  assert.equal(refreshes, 2);
+  assert.deepEqual(historyWarnings, ['', '']);
+  success = false;
+  await pendingButton.dispatch('click');
+  assert.equal(alerts.length, 1);
+  assert.equal(pendingButton.disabled, false, 'allow a retry after playback fails');
+  assert.equal(refreshes, 2, 'failed playback does not claim a saved history entry');
+  assert.equal(ui.elements.get('catalogCounts').textContent, selection);
+  assert(!ui.elements.get('catalogDetail').open);
+  assert(!ui.calls.some(call => call.method === 'POST'), 'playback never starts analysis or creates a pick');
+});
+
 test('picks queue independently of manual selection, reuse completed records, and keep connection codes out of browser storage', async () => {
   const completed = { ...picked('이미 완료.mp4'), id: 'done', status: 'completed', frames: [], summary: '기존 요약' };
   const ui = await boot({ savedSettings: { mode: 'remote', remoteUrl: 'http://192.168.55.166:3001', frameCount: 10 }, records: [completed] });
