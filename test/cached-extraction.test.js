@@ -8,7 +8,7 @@ const { reuseCachedExtraction } = require('../lib/cached-extraction');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const sourceId = 'a'.repeat(32), attemptId = 'b'.repeat(32);
-const completeAccurate = () => ({ version: 1, recognitionRevision: 2, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+const completeAccurate = () => ({ version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, processingComplete: true,
   language: 'ja', duration: 60, processedUntil: 60, wordTimestamps: true,
   audit: { complete: true, speechSeconds: 4, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] });
 
@@ -39,7 +39,7 @@ async function fixture(t) {
   };
   const providerImpl = { async analyzeExtracted(record) { calls.provider++; return { ...record, summary: '새 요약', plot: '새 줄거리', status: 'completed' }; } };
   const lanImpl = {
-    async checkRemoteServer() { calls.connection++; return { ready: true, capabilities: ['subtitle-quality-v1', 'subtitle-quality-v2'] }; },
+    async checkRemoteServer() { calls.connection++; return { ready: true, capabilities: ['subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3'] }; },
     async sendRemoteAnalysis(record, receivedOptions) {
       calls.remote++; assert.equal(receivedOptions.audioPath, undefined);
       const { extractionReusedFrom, ...transportRecord } = record;
@@ -160,6 +160,7 @@ test('cancelled cached repair propagates abort without re-extraction or modifyin
 test('accurate Korean repair refuses sidecars, small-model and incomplete cached recognition', async t => {
   const variations = [{}, { transcriptionQuality: { ...completeAccurate(), model: 'small' } },
     { transcriptionQuality: { ...completeAccurate(), recognitionRevision: undefined } }, { transcriptionQuality: { ...completeAccurate(), recognitionRevision: 1 } },
+    { transcriptionQuality: { ...completeAccurate(), recognitionRevision: 2 } }, { transcriptionQuality: { ...completeAccurate(), processingComplete: false } },
     { transcriptionQuality: { ...completeAccurate(), profile: 'fast' } }, { transcriptionQuality: { ...completeAccurate(), complete: false } },
     { transcriptionQuality: { ...completeAccurate(), processedUntil: 20 } },
     { transcriptionQuality: completeAccurate(), transcriptSource: 'sidecar:neutral.ja.srt' },
@@ -174,6 +175,65 @@ test('accurate Korean repair refuses sidecars, small-model and incomplete cached
   }
 });
 
+test('whole processing with 303 audit warnings never bypasses actual accurate repair', async t => {
+  const f = await fixture(t);
+  const saved = { ...f.saved, transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: {
+    ...completeAccurate(), complete: false, audit: { complete: false,
+      unresolved: Array.from({ length: 200 }, (_, index) => ({ start: index / 10, end: index / 10 + 0.05, reason: 'low_confidence' })),
+      unresolvedCount: 303, unresolvedByReason: { low_confidence: 303 }, unresolvedTruncated: true }
+  } };
+  const before = JSON.stringify(saved);
+  const reused = await reuseCachedExtraction(f.file, { ...f.options, subtitleQuality: 'accurate', repairRecord: saved }, { dataDir: f.dataDir });
+  assert.equal(reused, null);
+  assert.equal(JSON.stringify(saved), before);
+  assert.equal(await fs.stat(path.join(f.dataDir, 'frames', attemptId)).catch(() => null), null);
+});
+
+test('legacy v2 recognition is decoded again for accurate repair while its saved original remains intact', async t => {
+  for (const mode of ['codex', 'remote']) {
+    const f = await fixture(t);
+    f.saved.transcriptSource = 'audio:faster-whisper large-v3';
+    f.saved.transcriptionQuality = { ...completeAccurate(), recognitionRevision: 2 };
+    const before = JSON.stringify(f.saved);
+    const calls = { extraction: 0, tools: 0, audio: 0, analysis: 0 };
+    const engine = createCatalogEngine({
+      extractionImpl: {
+        async analyzeVideo(file) { calls.extraction++; return { ...f.saved, ...file, status: 'completed', error: null, warnings: [] }; },
+        async getToolsStatus() { calls.tools++; return { available: true, ffmpeg: { path: 'mock-ffmpeg' } }; },
+        async runProcess(binary, args) {
+          calls.audio++;
+          assert.equal(binary, 'mock-ffmpeg');
+          assert.equal(args.includes('-ss') || args.includes('-t'), false);
+          assert.equal(args[args.indexOf('-c:a') + 1], 'flac');
+          await fs.writeFile(args.at(-1), 'fLaCowned-v2-repair');
+        }
+      },
+      providerImpl: { async analyzeExtracted(record, options) {
+        calls.analysis++;
+        assert.equal(options.ffmpegPath, 'mock-ffmpeg', 'provider receives the decoder required to replace its stale source');
+        assert.equal(options.subtitleQuality, 'accurate');
+        return { ...record, transcriptionQuality: completeAccurate(), summary: '최신 검수 재인식' };
+      } },
+      lanImpl: {
+        async checkRemoteServer() { return { ready: true, capabilities: ['subtitle-quality-v3'] }; },
+        async sendRemoteAnalysis(record, options) {
+          calls.analysis++;
+          assert.equal(options.subtitleQuality, 'accurate');
+          assert.equal(await fs.readFile(options.audioPath, 'utf8'), 'fLaCowned-v2-repair');
+          return { ...record, transcriptionQuality: completeAccurate(), summary: '최신 검수 재인식' };
+        }
+      }
+    });
+    const result = await engine.analyzeVideo(f.file, { ...f.options, mode, subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
+    assert.equal(result.summary, '최신 검수 재인식');
+    assert.equal(result.transcriptionQuality.recognitionRevision, 3);
+    assert.equal(result.extractionReusedFrom, undefined);
+    assert.deepEqual(calls, { extraction: 1, tools: 1, audio: mode === 'remote' ? 1 : 0, analysis: 1 });
+    assert.equal(JSON.stringify(f.saved), before);
+    for (const frame of f.saved.frames) assert.deepEqual(await fs.readFile(path.join(f.sourceDir, frame.filename)), JPEG);
+  }
+});
+
 test('verified accurate cache retains word confidence and proof and avoids speech extraction in Codex and LAN modes', async t => {
   for (const mode of ['codex', 'remote']) {
     const f = await fixture(t);
@@ -185,6 +245,8 @@ test('verified accurate cache retains word confidence and proof and avoids speec
     const result = await f.engine.analyzeVideo(f.file, { ...f.options, mode, subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
     assert.equal(result.extractionReusedFrom, sourceId);
     assert.equal(result.transcriptionQuality.profile, 'accurate');
+    assert.equal(result.transcriptionQuality.recognitionRevision, 3);
+    assert.equal(result.transcriptionQuality.processingComplete, true);
     assert.equal(result.transcript[0].words[0].probability, 0.95);
     assert.equal(f.calls.extraction, 0);
     assert.equal(f.calls.tools, 0);
@@ -217,7 +279,7 @@ test('a new accurate Korean analysis sends whole lossless audio even when extern
     },
     providerImpl: {},
     lanImpl: {
-      checkRemoteServer: async () => ({ ready: true, capabilities: ['subtitle-quality-v1', 'subtitle-quality-v2'] }),
+      checkRemoteServer: async () => ({ ready: true, capabilities: ['subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3'] }),
       sendRemoteAnalysis: async (record, options) => {
         remote++;
         assert.equal(options.subtitleQuality, 'accurate');
@@ -247,10 +309,10 @@ test('an old server is rejected before a long accurate audio extraction begins',
     lanImpl: { checkRemoteServer: async () => ({ ready: true, capabilities }),
       sendRemoteAnalysis: async () => { uploads++; } }
   });
-  for (capabilities of [['timed-subtitles-v1'], ['timed-subtitles-v1', 'subtitle-quality-v1']]) {
+  for (capabilities of [['timed-subtitles-v1'], ['timed-subtitles-v1', 'subtitle-quality-v1'], ['timed-subtitles-v1', 'subtitle-quality-v2']]) {
     const result = await engine.analyzeVideo(f.file, { mode: 'remote', subtitleLanguage: 'ko', subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
     assert.equal(result.status, 'partial');
-    assert.match(result.error, /분석 서버 PC도 새 버전으로 업데이트/);
+    assert.match(result.error, /분석 서버 PC도 1\.6\.6 이상으로 업데이트/);
     assert.deepEqual(result.transcript, f.saved.transcript);
   }
   assert.equal(decoded, 0);

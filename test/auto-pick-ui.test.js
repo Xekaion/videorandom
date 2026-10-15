@@ -18,6 +18,8 @@ class Element {
     const classes = new Set();
     this.classList = { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name), toggle: (name, on) => { if (on === undefined ? !classes.has(name) : on) classes.add(name); else classes.delete(name); } };
   }
+  set disabled(value) { this._disabled = Boolean(value); }
+  get disabled() { return this._disabled || false; }
   append(...items) { for (const item of items) this.childNodes.push(...(item.tag === '#fragment' ? item.childNodes : [item])); }
   replaceChildren(...items) { this.childNodes = []; this.append(...items); }
   setAttribute() {}
@@ -32,7 +34,7 @@ class Element {
   focus() {}
 }
 
-async function boot({ savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v2'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
+async function boot({ savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
@@ -40,10 +42,11 @@ async function boot({ savedSettings, initialQueue, initialActiveJob = null, init
   let connection = initialConnection;
   const preferences = new Map(savedSettings ? [['video_catalog_settings', JSON.stringify(savedSettings)]] : []);
   const calls = [], timers = new Map();
-  let load, releaseConfig, releaseRemote, releaseRepair, timerId = 0;
+  let load, releaseConfig, releaseRemote, releaseRepair, releaseFolderSave, timerId = 0;
   const configGate = delayConfig ? new Promise(resolve => { releaseConfig = resolve; }) : Promise.resolve();
   const remoteGate = delayRemote ? new Promise(resolve => { releaseRemote = resolve; }) : Promise.resolve();
   const repairGate = delayRepair ? new Promise(resolve => { releaseRepair = resolve; }) : Promise.resolve();
+  const folderSaveGate = delayFolderSave ? new Promise(resolve => { releaseFolderSave = resolve; }) : Promise.resolve();
   const config = () => ({ tools: { available: true }, providers: providerStatus, defaultMode: 'codex', host: { running: false }, activeJob: plain(initialActiveJob), autoPick: plain(queue), connection: plain(connection) });
   const sandbox = {
     crypto: browserCrypto, TextEncoder,
@@ -67,6 +70,14 @@ async function boot({ savedSettings, initialQueue, initialActiveJob = null, init
         await repairGate;
         result = repairResponse || { id: 'repair-job', source: 'repair', repairOf: decodeURIComponent(url.split('/').at(-2)), status: 'running', total: 1, completed: 0, results: [] };
         return { ok: repairStatus < 400, status: repairStatus, json: async () => plain(result) };
+      }
+      else if (/\/results\/[^/]+\/subtitles\/save$/.test(url)) {
+        assert.equal(method, 'POST');
+        await folderSaveGate;
+        const record = records.find(item => item.id === decodeURIComponent(url.split('/').at(-3)));
+        result = typeof folderSaveResponse === 'function' ? await folderSaveResponse({ record, body }) : folderSaveResponse;
+        result ||= { record: plain(record), subtitleAutoSave: { status: 'saved', path: 'Z:\\합성_UI_전용\\영상.ko.srt', generated: true } };
+        return { ok: folderSaveStatus < 400, status: folderSaveStatus, json: async () => plain(result) };
       }
       else if (/\/results\/[^/]+\/subtitles\?/.test(url)) {
         return { ok: subtitleStatus < 400, status: subtitleStatus, json: async () => ({ error: subtitleResponse || '저장된 한국어 번역 자막이 없습니다.' }), blob: async () => new Blob([subtitleResponse || '1\n00:00:01,250 --> 00:00:03,500\n안녕하세요.\n'], { type: 'text/plain;charset=utf-8' }) };
@@ -106,7 +117,7 @@ async function boot({ savedSettings, initialQueue, initialActiveJob = null, init
     for (const [id, timer] of ready) { timers.delete(id); await timer.callback(); }
     await flush();
   };
-  return { sandbox, elements, calls, preferences, runTimers, releaseConfig, releaseRemote, releaseRepair, body: sandbox.document.body, getConnection: () => connection, setQueue: next => { queue = next; }, getQueue: () => queue };
+  return { sandbox, elements, calls, preferences, runTimers, releaseConfig, releaseRemote, releaseRepair, releaseFolderSave, body: sandbox.document.body, getConnection: () => connection, setQueue: next => { queue = next; }, getQueue: () => queue };
 }
 
 test('revealing a winner records the pick and queues analysis without replaying or changing selections', () => {
@@ -535,13 +546,15 @@ test('a failed connection check leaves the prior remembered pair intact without 
 });
 
 test('a reachable older host is saved but clearly requests a server update before resuming accurate subtitles', async () => {
-  const ui = await boot({ initialConnection: remembered(), remoteCapabilities: ['timed-subtitles-v1', 'subtitle-quality-v1'], savedSettings: { mode: 'remote', subtitleQuality: 'accurate' } });
-  const before = ui.calls.length;
-  await ui.elements.get('catalogRemoteCheck').dispatch('click');
-  assert(ui.elements.get('catalogRemoteStatus').textContent.includes('서버 PC도 1.6.1 이상'));
-  assert(ui.elements.get('catalogRemoteStatus').classList.contains('catalog-error'));
-  assert(ui.getConnection().remembered);
-  assert(!ui.calls.slice(before).some(call => call.url.endsWith('/auto-pick') && call.body?.resume));
+  for (const previous of ['subtitle-quality-v1', 'subtitle-quality-v2']) {
+    const ui = await boot({ initialConnection: remembered(), remoteCapabilities: ['timed-subtitles-v1', previous], savedSettings: { mode: 'remote', subtitleQuality: 'accurate' } });
+    const before = ui.calls.length;
+    await ui.elements.get('catalogRemoteCheck').dispatch('click');
+    assert(ui.elements.get('catalogRemoteStatus').textContent.includes('서버 PC도 1.6.6 이상'));
+    assert(ui.elements.get('catalogRemoteStatus').classList.contains('catalog-error'));
+    assert(ui.getConnection().remembered);
+    assert(!ui.calls.slice(before).some(call => call.url.endsWith('/auto-pick') && call.body?.resume));
+  }
 });
 
 test('a superseded connection check does not recreate a pair that the backend declined to remember', async () => {
@@ -913,6 +926,87 @@ test('timed subtitle choices restore durable queue options and accompany automat
 });
 
 const timedRecord = () => ({ ...picked('일본어 예제.mp4'), id: 'timed', status: 'completed', summary: '일본어 인사 예제', frames: [], transcriptSource: 'audio:local', transcriptLanguage: 'ja', transcript: [{ start: 1.25, end: 3.5, text: 'こんにちは。' }, { start: 5, end: 8.25, text: 'また明日。' }], subtitleLanguage: 'ko', subtitleTranslation: [{ start: 1.25, end: 3.5, text: '안녕하세요.' }, { start: 5, end: 8.25, text: '내일 또 만나요.' }] });
+const partialTimedRecord = () => ({ ...timedRecord(), status: 'partial', subtitleTranslation: undefined, subtitleLanguage: undefined,
+  subtitleTranslationPartial: [{ start: 1.25, end: 3.5, text: '안녕하세요.' }],
+  subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: false, sourceFingerprint: fingerprint(timedRecord().transcript) },
+  subtitleError: '합성 원어 인식 확인 필요' });
+
+test('saving reviewed subtitles beside the video posts once and retains the current transcript while the request is pending', async () => {
+  const record = timedRecord();
+  const saved = { status: 'saved', path: 'Z:\\합성_UI_전용\\일본어 예제.ko.srt', generated: true };
+  const ui = await boot({ records: [record], delayFolderSave: true,
+    folderSaveResponse: { record: { ...record, transcript: [], summary: 'A response snapshot must not replace the open record' }, subtitleAutoSave: saved } });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const button = ui.elements.get('catalogSubtitleSaveFolder');
+  assert.equal(button.disabled, false);
+  const pending = button.dispatch('click'); await flush();
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, '폴더에 저장 중…');
+  await button.dispatch('click');
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/subtitles/save')).length, 1);
+  ui.releaseFolderSave(); await pending;
+  const posted = ui.calls.find(call => call.url.endsWith('/subtitles/save'));
+  assert.equal(posted.url, '/api/analysis/results/timed/subtitles/save');
+  assert.deepEqual(posted.body, {});
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, '영상 폴더에 저장');
+  const notice = ui.elements.get('catalogSubtitleAutoSaveNotice');
+  assert(notice.textContent.includes(saved.path));
+  assert(notice.textContent.includes('자동 저장했습니다'));
+  assert.equal(notice.classList.contains('catalog-error'), false);
+  assert.equal(ui.elements.get('catalogTranscript').childNodes.length, record.transcript.length);
+  assert.equal(ui.elements.get('catalogTranscript').childNodes[0].childNodes[1].childNodes[1].textContent, '안녕하세요.');
+});
+
+test('a folder-save network error remains visible after rendering and permits retry without analysis', async () => {
+  const record = timedRecord(); let attempts = 0;
+  const saved = { status: 'saved', path: 'Z:\\합성_UI_전용\\다시 저장.ko.srt', generated: true };
+  const ui = await boot({ records: [record], folderSaveResponse: () => {
+    if (++attempts === 1) throw new TypeError('합성 네트워크 응답 실패');
+    return { record: plain(record), subtitleAutoSave: saved };
+  } });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const button = ui.elements.get('catalogSubtitleSaveFolder');
+  await button.dispatch('click');
+  const notice = ui.elements.get('catalogSubtitleAutoSaveNotice');
+  assert(notice.textContent.includes('합성 네트워크 응답 실패'));
+  assert.equal(notice.classList.contains('catalog-error'), true);
+  assert.equal(notice.classList.contains('hidden'), false);
+  assert.equal(button.disabled, false);
+  await button.dispatch('click');
+  assert.equal(attempts, 2);
+  assert(notice.textContent.includes(saved.path));
+  assert.equal(notice.classList.contains('catalog-error'), false);
+  assert.equal(ui.calls.filter(call => call.method === 'POST').length, 2);
+  assert(ui.calls.filter(call => call.method === 'POST').every(call => call.url.endsWith('/subtitles/save')));
+});
+
+test('folder-save HTTP failure and a successful HTTP response with failed metadata both stay visible and retryable', async () => {
+  for (const metadataFailure of [false, true]) {
+    const message = metadataFailure ? '합성 폴더 쓰기 권한 없음' : '합성 동일 영상 분석 중';
+    const ui = await boot({ records: [timedRecord()], folderSaveStatus: metadataFailure ? 200 : 409,
+      folderSaveResponse: metadataFailure ? { record: timedRecord(), subtitleAutoSave: { status: 'failed', path: 'Z:\\합성_UI_전용\\읽기전용.ko.srt', error: message } } : { error: message } });
+    await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+    await ui.elements.get('catalogSubtitleSaveFolder').dispatch('click');
+    const notice = ui.elements.get('catalogSubtitleAutoSaveNotice');
+    assert(notice.textContent.includes(message));
+    assert.equal(notice.classList.contains('catalog-error'), true);
+    assert.equal(notice.classList.contains('hidden'), false);
+    assert.equal(ui.elements.get('catalogSubtitleSaveFolder').disabled, false);
+    await ui.elements.get('catalogSubtitleSrt').dispatch('click');
+    assert(ui.calls.some(call => call.url.endsWith('/subtitles?format=srt&language=ko')));
+    if (metadataFailure) assert(notice.textContent.includes(message), 'Manual download must not hide persisted folder write failure metadata');
+  }
+});
+
+test('folder saving remains disabled during an active analysis job', async () => {
+  const ui = await boot({ records: [timedRecord()], initialActiveJob: { id: 'owned-active-job', status: 'running', total: 1, completed: 0, results: [], percent: 20 } });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const button = ui.elements.get('catalogSubtitleSaveFolder');
+  assert.equal(button.disabled, true);
+  await button.dispatch('click');
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/subtitles/save')).length, 0);
+});
 
 test('subtitle details show original and translated cues with shared timestamps and download Korean SRT or original VTT', async () => {
   const record = timedRecord();
@@ -1102,6 +1196,32 @@ test('an unfinished translated prefix shows counts without claiming all speech o
   assert.equal(ui.elements.get('catalogSubtitleView').value, 'original');
 });
 
+test('quality details separate completed file processing and translation review from remaining source checks with exact truncated totals', async () => {
+  const record = { ...partialTimedRecord(), transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', recognitionRevision: 3,
+    model: 'large-v3', processingComplete: true, complete: false, duration: 600, processedUntil: 600,
+    audit: { complete: false, unresolvedCount: 303, unresolvedTruncated: true,
+      unresolvedByReason: { low_confidence: 300, possible_missing_speech: 3, unrecognized_reason: 17 },
+      unresolved: Array.from({ length: 200 }, (_, index) => ({ start: index * 2, end: index * 2 + 1, reason: 'low_confidence' })) } },
+    subtitleTranslationProgress: { ...partialTimedRecord().subtitleTranslationProgress, totalCues: 2, completedCues: 2, translationComplete: true, complete: false, sourceComplete: false } };
+  const ui = await boot({ records: [record] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const notice = ui.elements.get('catalogSubtitleQualityNotice');
+  assert(notice.textContent.includes('처리 00:10:00 / 00:10:00'));
+  assert(notice.textContent.includes('전체 음성 파일 처리는 끝났습니다'));
+  assert(notice.textContent.includes('별도의 누락·신뢰도 검수 결과'));
+  assert(notice.textContent.includes('한국어 번역 2 / 2구간 · 번역 검수 완료 · 원어 인식 확인 필요'));
+  assert(notice.textContent.includes('추가 확인 303개'));
+  assert(notice.textContent.includes('대사 신뢰도 확인 300개'));
+  assert(notice.textContent.includes('발화 누락 의심 3개'));
+  assert(notice.textContent.includes('시간 목록은 200개 표본'));
+  assert.equal(notice.textContent.includes('추가 확인 200개'), false);
+  assert.equal(notice.textContent.includes('unrecognized_reason'), false);
+  assert.equal(notice.textContent.includes('2구간 완료'), false);
+  assert.equal(notice.textContent.includes('전체 음성 처리와 발화 누락 점검을 마쳤습니다'), false);
+  assert.equal(notice.classList.contains('catalog-error'), true);
+  assert.equal(notice.childNodes.length, 0);
+});
+
 test('reviewed partial Korean cues remain visible and download explicitly as partial without hiding untranslated originals', async () => {
   const record = { ...timedRecord(), subtitleTranslation: undefined, subtitleLanguage: undefined,
     subtitleTranslationPartial: [{ start: 1.25, end: 3.5, text: '안녕하세요.' }],
@@ -1121,7 +1241,8 @@ test('reviewed partial Korean cues remain visible and download explicitly as par
   await ui.elements.get('catalogSubtitleSrt').dispatch('click');
   assert(ui.calls.some(call => call.url.endsWith('/subtitles?format=srt&language=ko&partial=1')));
   assert(ui.body.childNodes.some(element => element.download?.endsWith('.ko.partial.srt') && element.clicked));
-  assert(ui.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('hidden'));
+  assert(ui.elements.get('catalogSubtitleAutoSaveNotice').textContent.includes('영상 폴더에 저장 버튼'));
+  assert.equal(ui.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('hidden'), false);
 });
 
 function delayedBrowserHash() {
@@ -1133,6 +1254,57 @@ function delayedBrowserHash() {
   } } };
   return { browserCrypto, pending };
 }
+
+test('partial folder saving waits for the verified fingerprint and preserves proof for manual partial downloads after saving', async () => {
+  const record = partialTimedRecord();
+  const hash = delayedBrowserHash();
+  const saved = { status: 'saved', partial: true, path: 'Z:\\합성_UI_전용\\일본어 예제.ko.partial.srt', generated: true };
+  const ui = await boot({ records: [record], browserCrypto: hash.browserCrypto,
+    folderSaveResponse: { record: plain(record), subtitleAutoSave: saved } });
+  const opening = ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const button = ui.elements.get('catalogSubtitleSaveFolder');
+  assert.equal(hash.pending.length, 1);
+  assert.equal(button.disabled, true);
+  await button.dispatch('click');
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/subtitles/save')).length, 0);
+  hash.pending.shift()(); await opening;
+  assert.equal(button.disabled, false);
+  assert.equal(ui.elements.get('catalogSubtitleDownloadLanguage').value, 'ko');
+  await button.dispatch('click');
+  assert.equal(button.disabled, false);
+  const notice = ui.elements.get('catalogSubtitleAutoSaveNotice');
+  assert(notice.textContent.includes('한국어 부분 SRT'));
+  assert(notice.textContent.includes(saved.path));
+  assert(notice.textContent.includes('.ko.partial.srt'));
+  assert(notice.textContent.includes('직접 불러오세요'));
+  assert.equal(notice.classList.contains('catalog-error'), false);
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+  assert.equal(ui.elements.get('catalogSubtitleDownloadLanguage').value, 'ko');
+  assert.deepEqual(ui.elements.get('catalogTranscript').childNodes[0].childNodes[1].childNodes.map(node => node.textContent), ['こんにちは。', '안녕하세요.']);
+  await ui.elements.get('catalogSubtitleSrt').dispatch('click');
+  assert(ui.calls.some(call => call.url.endsWith('/subtitles?format=srt&language=ko&partial=1')));
+  assert(ui.body.childNodes.some(element => element.download?.endsWith('.ko.partial.srt') && element.clicked));
+  assert.equal(hash.pending.length, 0, 'Saving only metadata must not replace the weak-map-verified record or require another fingerprint calculation');
+});
+
+test('partial automatic-save metadata distinguishes failed and reused files without claiming the complete player subtitle was replaced', async () => {
+  for (const status of ['saved', 'unchanged', 'failed']) {
+    const saved = { status, partial: true, path: 'Z:\\합성_UI_전용\\일본어 예제.ko.partial.srt', error: '합성 부분 자막 저장 오류' };
+    const record = { ...partialTimedRecord(), subtitleAutoSave: saved };
+    const ui = await boot({ records: [record] });
+    await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+    const notice = ui.elements.get('catalogSubtitleAutoSaveNotice');
+    assert(notice.textContent.includes('한국어 부분 SRT'));
+    assert(notice.textContent.includes(saved.path));
+    assert.equal(notice.classList.contains('catalog-error'), status === 'failed');
+    if (status === 'failed') assert(notice.textContent.includes(saved.error));
+    else {
+      assert(notice.textContent.includes('.ko.partial.srt'));
+      assert(notice.textContent.includes('직접 불러오세요'));
+      assert(notice.textContent.includes('기존 완성 자막'));
+    }
+  }
+});
 
 test('closing a detail while its partial subtitle hash is pending never reopens it or enables stale controls', async () => {
   const record = { ...timedRecord(), id: 'partial-hash', status: 'partial', subtitleTranslation: undefined, subtitleLanguage: undefined,
@@ -1199,6 +1371,9 @@ test('corrupt partial Korean timing and progress never enable Korean viewing or 
     await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
     assert.equal(ui.elements.get('catalogSubtitleView').value, 'original');
     assert.equal(ui.elements.get('catalogSubtitleDownloadLanguage').value, 'original');
+    assert.equal(ui.elements.get('catalogSubtitleSaveFolder').disabled, true);
+    await ui.elements.get('catalogSubtitleSaveFolder').dispatch('click');
+    assert.equal(ui.calls.filter(call => call.url.endsWith('/subtitles/save')).length, 0);
   }
 });
 

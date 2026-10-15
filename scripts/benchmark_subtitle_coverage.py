@@ -146,6 +146,8 @@ def main():
     parser.add_argument('--device', choices=['auto', 'cpu', 'cuda'], default='auto')
     parser.add_argument('--compute-type', default='auto')
     parser.add_argument('--model', default='large-v3')
+    parser.add_argument('--cpu-threads', type=int, default=4)
+    parser.add_argument('--variant', choices=['before', 'after'], action='append', dest='variants')
     parser.add_argument('--require-cuda', action='store_true')
     args = parser.parse_args()
     output = Path(args.output).resolve()
@@ -161,7 +163,8 @@ def main():
         parser.error('No selected benchmark cases.')
     metadata, modules = {'manifest': str(manifest), 'manifestSha256': sha256(manifest),
                          'python': sys.version, 'runnerSha256': sha256(__file__),
-                         'modelReused': True, 'sources': {}}, {}
+                         'modelReused': True, 'model': args.model, 'device': args.device, 'computeType': args.compute_type,
+                         'cpuThreads': args.cpu_threads, 'variants': args.variants or ['before', 'after'], 'sources': {}}, {}
     for variant, filename in [('before', args.baseline), ('after', args.source)]:
         source = Path(filename).resolve()
         snapshot = output / ('source-' + variant + '.py')
@@ -190,12 +193,14 @@ def main():
         name = str(sample.get('case', index))
         safe_name = re.sub(r'[^A-Za-z0-9_.-]', '_', name)
         for variant, module in modules.items():
+            if args.variants and variant not in args.variants:
+                continue
             print(json.dumps({'event': 'case-start', 'case': name, 'variant': variant}), flush=True)
             log = EventLog(output / (safe_name + '-' + variant + '.jsonl'), console, name, variant)
             started = time.monotonic()
             cues, quality, speech = invoke(module, [str(module.__file__), '--audio', str(audio), '--cache', args.cache,
                 '--language', sample['language'], '--profile', 'accurate', '--model', args.model,
-                '--device', args.device, '--compute-type', args.compute_type], log)
+                '--device', args.device, '--compute-type', args.compute_type, '--cpu-threads', str(args.cpu_threads)], log)
             hypothesis = ''.join(cue['text'] for cue in cues)
             row = {'case': name, 'variant': variant, 'elapsedSeconds': time.monotonic() - started,
                    'sourceSha256': metadata['sources'][variant]['sha256'], 'audioSha256': sha256(audio),

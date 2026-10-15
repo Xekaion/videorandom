@@ -235,7 +235,7 @@ test('desktop executable and shared Python runtime are discovered without readin
 });
 
 function fullQuality(duration = 90, extra = {}) {
-    return { version: 1, recognitionRevision: 2, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, duration, processedUntil: duration,
+    return { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, duration, processedUntil: duration,
         wordTimestamps: true, language: 'ja', languageProbability: 0.99,
         audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [], ...extra };
 }
@@ -302,7 +302,7 @@ test('accurate repair retranscribes an older recognition revision and preserves 
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
     assert.equal(mocked.calls.filter(call => call.args.includes('--audio')).length, 1);
-    assert.equal(result.transcriptionQuality.recognitionRevision, 2);
+    assert.equal(result.transcriptionQuality.recognitionRevision, 3);
     assert.equal(result.transcript[0].text, 'こんにちは。');
     assert.equal(result.subtitleLanguage, 'ko', result.subtitleError);
 });
@@ -324,13 +324,17 @@ test('an unresolved audio span still exposes reviewed Korean for recognized cues
     assert.equal(result.transcript[0].text, 'こんにちは。');
     assert.equal(result.transcriptionQuality.audit.unresolved.length, 1);
     assert.equal(result.subtitleLanguage, undefined);
-    assert.match(result.subtitleError, /일부 구간|완성본/);
+    assert.equal(result.subtitleError, null, 'the translation succeeded; the source audit warning is separate');
+    assert.equal(result.transcriptionQuality.processingComplete, true);
     assert.equal(result.subtitleTranslationPartial.length, 1);
     assert.equal(result.subtitleTranslationPartial[0].text, '안녕하세요.');
     assert.deepEqual([result.subtitleTranslationPartial[0].start, result.subtitleTranslationPartial[0].end], [1, 3]);
     assert.equal(result.subtitleTranslationProgress.completedCues, 1);
     assert.equal(result.subtitleTranslationProgress.complete, false);
     assert.equal(result.subtitleTranslationProgress.sourceComplete, false);
+    assert.equal(result.subtitleTranslationProgress.translationComplete, true);
+    assert.equal(result.subtitleTranslationProgress.sourceProcessed, true);
+    assert.equal(result.subtitleTranslationProgress.sourceAuditComplete, false);
     assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, 3, 'recognized dialogue is translated and reviewed; unknown speech is never fabricated');
 });
 
@@ -504,7 +508,94 @@ test('real fast-profile quality JSONL completes Korean subtitles without claimin
     assert.equal(result.transcriptionQuality.complete, true);
     assert.equal(result.transcriptionQuality.audit.complete, false);
     assert.equal(result.transcriptionQuality.profile, 'fast');
+    assert.equal(result.transcriptionQuality.processingComplete, false, 'VAD-filtered fast decoding is not whole-audio proof');
+    assert.equal(result.subtitleTranslationProgress.translationComplete, true);
+    assert.equal(result.subtitleTranslationProgress.sourceProcessed, false);
     assert.equal(isVerifiedFullTranscription(result, 'accurate'), false);
     assert.ok(result.warnings.some(warning => /누락 재검사를 생략/.test(warning)));
     assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, 2, 'fast mode keeps its single translation pass');
+});
+
+test('a failed new ASR prefix cannot replace an earlier whole decoded source with unresolved audit warnings', async t => {
+    const original = [{ start: 1, end: 3, text: '以前の正しい挨拶' }, { start: 60, end: 62, text: '後半の元の会話' }];
+    const { dataDir, record } = await fixture(t, { transcript: original.map(cue => ({ ...cue })), transcriptLanguage: 'ja',
+        transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: fullQuality(90, { recognitionRevision: 2, complete: false,
+            processingComplete: true, audit: { complete: false, unresolved: [{ start: 40, end: 41, reason: 'low_confidence' }] } }) });
+    const audioPath = path.join(dataDir, 'retry.flac'); await fs.promises.writeFile(audioPath, 'fLaCmock');
+    const mocked = mockSpawn(async call => {
+        if (call.args.includes('--audio')) {
+            call.child.stdout.write([{ type: 'info', language: 'zh', duration: 90 },
+                { type: 'segment', start: 1, end: 1.5, text: '失敗した新しい先頭' }].map(JSON.stringify).join('\n') + '\n');
+            throw Object.assign(new Error('owned speech decoder interrupted'), { exitCode: 1 });
+        }
+        const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
+        await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '이전의 인사입니다.' }, { index: 1, text: '뒤쪽의 원래 대화입니다.' }], terms: [] } : summary());
+    });
+    const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
+    assert.deepEqual(result.transcript, original);
+    assert.equal(result.transcriptLanguage, 'ja', 'rolling back the text also rolls back its detected language');
+    assert.equal(result.transcriptionQuality.recognitionRevision, 2);
+    assert.equal(result.subtitleTranslationPartial.length, 2);
+    assert.equal(result.subtitleTranslationProgress.sourceProcessed, true);
+    assert.equal(result.subtitleTranslationProgress.translationComplete, true);
+    assert.equal(result.subtitleTranslationProgress.sourceAuditComplete, false);
+    assert.equal(result.subtitleLanguage, undefined);
+    assert.equal(result.status, 'partial');
+    const attempt = JSON.parse(await fs.promises.readFile(path.join(dataDir, 'checkpoints', record.id + '-source-attempt.json'), 'utf8'));
+    assert.equal(attempt.transcript[0].text, '失敗した新しい先頭');
+    assert.equal(attempt.transcriptLanguage, 'zh');
+    const before = JSON.parse(await fs.promises.readFile(path.join(dataDir, 'checkpoints', record.id + '-source-before.json'), 'utf8'));
+    assert.equal(before.transcriptLanguage, 'ja');
+    const retained = JSON.parse(await fs.promises.readFile(path.join(dataDir, 'checkpoints', record.id + '-source.json'), 'utf8'));
+    assert.deepEqual(retained.transcript, original);
+    assert.equal(retained.transcriptLanguage, 'ja');
+});
+
+test('long-video diagnostics retain totals and completed reviewed translations resume only after a new successful summary', async t => {
+    const { dataDir, record } = await fixture(t, { transcript: [], transcriptLanguage: 'ja', duration: 3240 });
+    const audioPath = path.join(dataDir, 'long-owned.flac'); await fs.promises.writeFile(audioPath, 'fLaCmock');
+    const unresolved = Array.from({ length: 200 }, (_, index) => ({ start: 10 + index * 10, end: 11 + index * 10, reason: 'possible_missing_speech' }));
+    const quality = fullQuality(3240, { complete: undefined, processingComplete: true, audit: { complete: false, unresolved,
+        unresolvedCount: 303, unresolvedByReason: { possible_missing_speech: 302, low_confidence: 1 }, unresolvedTruncated: true } });
+    let refuseSummary = false;
+    const mocked = mockSpawn(async call => {
+        if (call.args.includes('--audio')) {
+            call.child.stdout.write([{ type: 'info', duration: 3240, language: 'ja' }, { type: 'segment', start: 1, end: 3, text: 'こんにちは。' },
+                { type: 'complete', segments: 1, quality }].map(JSON.stringify).join('\n') + '\n');
+            return;
+        }
+        const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
+        if (!schema.properties.subtitles && refuseSummary) throw Object.assign(new Error('safety refusal'), { exitCode: 1 });
+        await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+    });
+    const instance = provider(mocked.spawnImpl);
+    const options = { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' };
+    const first = await instance.analyzeExtracted(record, options);
+    assert.equal(first.transcriptionQuality.complete, false);
+    assert.equal(first.transcriptionQuality.processingComplete, true);
+    assert.equal(first.transcriptionQuality.audit.unresolved.length, 200);
+    assert.equal(first.transcriptionQuality.audit.unresolvedCount, 303);
+    assert.deepEqual(first.transcriptionQuality.audit.unresolvedByReason, quality.audit.unresolvedByReason);
+    assert.equal(first.subtitleTranslationProgress.translationComplete, true);
+    assert.equal(first.subtitleTranslationProgress.complete, false);
+    assert.equal(first.subtitleError, null);
+    const saved = JSON.parse(await fs.promises.readFile(path.join(dataDir, 'checkpoints', first.id + '-ko.json'), 'utf8'));
+    assert.equal(saved.translationComplete, true);
+    assert.equal(saved.complete, false);
+    const repair = async id => {
+        await fs.promises.mkdir(path.join(dataDir, 'frames', id), { recursive: true });
+        await fs.promises.writeFile(path.join(dataDir, 'frames', id, 'frame-01.jpg'), 'mock jpeg');
+        return instance.analyzeExtracted({ ...first, id, status: 'completed', warnings: [] }, options);
+    };
+    const second = await repair('fresh-owned-repair');
+    assert.equal(mocked.calls.filter(call => call.args.includes('--audio')).length, 2, 'uncertain audio is actually rechecked rather than bypassing the strict repair gate');
+    assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, 4, 'same exact source needs a new summary but retains its already reviewed translation');
+    assert.equal(second.subtitleTranslationProgress.translationComplete, true);
+    assert.equal(second.subtitleTranslationPartial[0].text, '안녕하세요.');
+    refuseSummary = true;
+    const refused = await repair('fresh-owned-refusal');
+    assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, 5, 'summary refusal stops before translation cache lookup or any retry');
+    assert.equal(refused.subtitleTranslationPartial, undefined);
+    assert.equal(refused.subtitleTranslation, undefined);
+    assert.match(refused.summaryError, /safety refusal/);
 });

@@ -40,11 +40,104 @@ function revisedRecord(record) {
     ({ ...cue, text: index ? '오늘은 날씨가 아주 좋습니다.' : '다시 안녕하세요.' })) };
 }
 
+function partialRecord(record, completedCues = 1) {
+  return { ...record, status: 'partial', subtitleLanguage: 'original', subtitleError: 'Synthetic translation interrupted',
+    subtitleTranslation: [], subtitleTranslationPartial: record.subtitleTranslation.slice(0, completedCues),
+    subtitleTranslationProgress: { version: 1, language: 'ko', complete: false, sourceComplete: true,
+      sourceFingerprint: crypto.createHash('sha256').update(JSON.stringify(record.transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex'),
+      totalCues: record.transcript.length, completedCues } };
+}
+
 async function ownedPrevious(f) {
   const previous = await saveKoreanSubtitle(f.record);
   assert.equal(previous.path, f.normal);
   return [{ path: previous.path, sha256: previous.sha256 }];
 }
+
+test('validated incomplete Korean progress is saved under a partial filename and leaves the complete subtitle intact', async t => {
+  const f = await fixture(t);
+  await saveKoreanSubtitle(f.record);
+  const partial = partialRecord(f.record);
+  // Neither the completion flag nor a successful subtitle stage is required for
+  // a verified partial prefix; fingerprint and exact source times are required.
+  delete partial.subtitleLanguage;
+  const expected = Buffer.from(subtitleText(partial, { language: 'ko', partial: true }), 'utf8');
+  const result = await saveKoreanSubtitle(partial);
+  const partialPath = path.join(f.root, '언어 연습.ko.partial.srt');
+  assert.deepEqual(result, { status: 'saved', path: partialPath, sha256: crypto.createHash('sha256').update(expected).digest('hex'), partial: true });
+  assert.deepEqual(await fs.readFile(partialPath), expected);
+  assert.match(expected.toString('utf8'), /00:00:00,125 --> 00:00:02,375/);
+  assert.doesNotMatch(expected.toString('utf8'), /오늘은 날씨/);
+  assert.deepEqual(await fs.readFile(f.normal), f.bytes);
+  assert.deepEqual(await saveKoreanSubtitle(partial), { ...result, status: 'unchanged' });
+  await noTemporaryFiles(f.root);
+});
+
+test('partial progress rejects stale source fingerprints, changed timings or IDs and empty translation prefixes', async t => {
+  const f = await fixture(t);
+  const valid = partialRecord({ ...f.record, transcript: f.record.transcript.map((cue, index) => ({ ...cue, id: index + 1 })) });
+  const cases = [
+    { ...valid, transcript: valid.transcript.map((cue, index) => index ? cue : { ...cue, text: 'Source was edited.' }) },
+    { ...valid, subtitleTranslationPartial: valid.subtitleTranslationPartial.map(cue => ({ ...cue, end: cue.end + 0.01 })) },
+    { ...valid, subtitleTranslationPartial: valid.subtitleTranslationPartial.map(cue => ({ ...cue, id: 999 })) },
+    { ...valid, subtitleTranslationPartial: [] },
+    ...[{ sourceFingerprint: '0'.repeat(64) }, { completedCues: 2 }, { totalCues: 99 }, { sourceComplete: 'yes' }, { complete: true }]
+      .map(changes => ({ ...valid, subtitleTranslationProgress: { ...valid.subtitleTranslationProgress, ...changes } }))
+  ];
+  for (const record of cases) assert.equal(await saveKoreanSubtitle(record), null);
+  assert.deepEqual(await fs.readdir(f.root), [path.basename(f.videoPath)]);
+});
+
+test('trusted partial progress updates its own canonical partial SRT with a backup and never modifies a complete SRT', async t => {
+  const f = await fixture(t);
+  const full = await saveKoreanSubtitle(f.record);
+  const firstRecord = partialRecord(f.record);
+  const first = await saveKoreanSubtitle(firstRecord);
+  const firstBytes = await fs.readFile(first.path);
+  const nextRecord = partialRecord(revisedRecord(f.record), 2);
+  nextRecord.subtitleTranslationProgress.sourceComplete = false;
+  const result = await saveKoreanSubtitle(nextRecord, { generatedSubtitleFiles: [
+    { path: full.path, sha256: full.sha256 }, { path: first.path, sha256: first.sha256 }
+  ] });
+  assert.equal(result.status, 'saved'); assert.equal(result.partial, true); assert.equal(result.updated, true);
+  assert.equal(result.path, first.path);
+  assert.match(result.backupPath, /\.ko\.partial\.srt\.videorandom-[a-f0-9]{32}\.bak$/);
+  assert.deepEqual(await fs.readFile(result.backupPath), firstBytes);
+  assert.equal(await fs.readFile(result.path, 'utf8'), subtitleText(nextRecord, { language: 'ko', partial: true }));
+  assert.deepEqual(await fs.readFile(f.normal), f.bytes);
+  await noTemporaryFiles(f.root);
+});
+
+test('manually edited partial SRT is preserved and new partial progress uses an alternate filename', async t => {
+  const f = await fixture(t);
+  const original = await saveKoreanSubtitle(partialRecord(f.record));
+  await fs.writeFile(original.path, 'User corrected this incomplete subtitle.');
+  const nextRecord = partialRecord(revisedRecord(f.record), 2);
+  const result = await saveKoreanSubtitle(nextRecord, { generatedSubtitleFiles: [{ path: original.path, sha256: original.sha256 }] });
+  assert.equal(result.status, 'saved'); assert.equal(result.partial, true); assert.equal(result.updated, undefined);
+  assert.match(result.path, /언어 연습\.videorandom-fedcba987654\.ko\.partial\.srt$/);
+  assert.equal(await fs.readFile(original.path, 'utf8'), 'User corrected this incomplete subtitle.');
+  assert.equal(await fs.readFile(result.path, 'utf8'), subtitleText(nextRecord, { language: 'ko', partial: true }));
+  assert.equal((await fs.readdir(f.root)).some(name => name.endsWith('.bak')), false);
+  await noTemporaryFiles(f.root);
+});
+
+test('partial save failure carries partial metadata, and abort rolls back a newly published partial file', async t => {
+  const f = await fixture(t);
+  const record = partialRecord(f.record);
+  const denied = await saveKoreanSubtitle(record, { io: { ...fs, open: async (filename, flags, ...rest) => {
+    if (flags === 'wx') throw Object.assign(new Error('Synthetic readonly folder'), { code: 'EACCES' });
+    return fs.open(filename, flags, ...rest);
+  } } });
+  assert.equal(denied.status, 'failed'); assert.equal(denied.partial, true); assert.equal(denied.code, 'EACCES');
+  assert.match(denied.path, /\.ko\.partial\.srt$/);
+  const controller = new AbortController();
+  assert.equal(await saveKoreanSubtitle(record, { signal: controller.signal, io: { ...fs, link: async (...args) => {
+    await fs.link(...args); controller.abort();
+  } } }), null);
+  assert.deepEqual(await fs.readdir(f.root), [path.basename(f.videoPath)]);
+  await noTemporaryFiles(f.root);
+});
 
 test('trusted generated Korean subtitles update the canonical player filename and preserve the exact former bytes in a unique backup', async t => {
   const f = await fixture(t);

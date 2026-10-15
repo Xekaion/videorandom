@@ -7,11 +7,12 @@ import os
 from pathlib import Path
 import re
 import sys
+import unicodedata
 
 SAMPLE_RATE = 16000
 MAX_UNRESOLVED = 200
 MAX_BOUNDARY_RANGES = 10000
-RECOGNITION_REVISION = 2
+RECOGNITION_REVISION = 3
 DLL_DIRECTORY_HANDLES = []
 DLL_DIRECTORY_PATHS = set()
 DLL_LIBRARY_HANDLES = []
@@ -176,6 +177,10 @@ def needs_review(cue):
     # Missing word alignment is a timing-granularity limitation, not evidence
     # that correctly decoded dialogue or its valid segment times are missing.
     return low_confidence(cue)
+
+
+def needs_alignment_review(cue):
+    return not cue.get('words')
 
 
 def very_quiet_stationary_noise(audio, start, end, sample_rate):
@@ -345,18 +350,31 @@ def reconcile_window_boundaries(cues):
 
 
 def recovery_windows(targets, duration, budget, maximum=30.0):
-    """Bound recheck cost while including context around short gaps."""
+    """Plan nonoverlapping review cores; budget counts their owned samples."""
     windows, used = [], 0.0
     for start, end in merge_intervals(targets, duration, padding=1.5):
         cursor = start
         while cursor < end and used < budget:
             right = min(end, cursor + maximum, cursor + budget - used)
-            if right - cursor < 0.5:
+            if right <= cursor:
                 break
             windows.append((cursor, right))
             used += right - cursor
             cursor = right
     return windows
+
+
+def recovery_plan(targets, duration, maximum=30.0, context=3.0):
+    """Own each target sample once; decode context across internal core cuts."""
+    spans = merge_intervals(targets, duration, padding=1.5)
+    cores = recovery_windows(targets, duration, duration, maximum)
+    plan, span_index = [], 0
+    for core_start, core_end in cores:
+        while span_index + 1 < len(spans) and core_start >= spans[span_index][1]:
+            span_index += 1
+        start, end = spans[span_index]
+        plan.append((max(start, core_start - context), min(end, core_end + context), core_start, core_end))
+    return plan
 
 
 def rebuild_word_cues(words, templates, duration):
@@ -439,10 +457,69 @@ def merge_novel_recovery_words(result, candidate):
     return result, len(novel), blocked
 
 
+def transcript_key(text):
+    return ''.join(character.lower() for character in unicodedata.normalize('NFKC', text)
+                   if character.isalnum())
+
+
+def recheck_improves(old, candidate):
+    """A resolved log/silence signal matters even when word scores are equal."""
+    old_score, new_score = cue_confidence(old), cue_confidence(candidate)
+    if not needs_review(old) or needs_review(candidate) or old_score is None or new_score is None:
+        return False
+    if new_score >= old_score + 0.1:
+        return True
+    if not high_confidence(candidate):
+        return False
+    old_log, new_log = old.get('avgLogprob'), candidate.get('avgLogprob')
+    old_silence, new_silence = old.get('noSpeechProbability'), candidate.get('noSpeechProbability')
+    return ((finite(old_log) and finite(new_log) and old_log < -1.0 and new_log >= -0.5
+             and new_log - old_log >= 0.3)
+            or (finite(old_silence) and finite(new_silence) and old_silence > 0.8
+                and new_silence <= 0.4 and old_silence - new_silence >= 0.3))
+
+
+def recheck_fits_neighbors(candidates, original, old_index, replacements=None):
+    replacements = replacements or {}
+    return not any(min(cue['end'], neighbor['end']) - max(cue['start'], neighbor['start']) > 0.02
+                   for cue in candidates for index, old in enumerate(original) if index != old_index
+                   for neighbor in replacements.get(index, [old]))
+
+
+def concordant_rechecks(original, candidates):
+    """Confirm a native cue across several independently decoded reading cues."""
+    used, replacements = set(), {}
+    for old_index, old in enumerate(original):
+        if not (needs_review(old) or needs_alignment_review(old)):
+            continue
+        matches = [(index, cue) for index, cue in enumerate(candidates) if index not in used
+                   and cue.get('words') and not needs_review(cue)
+                   and cue_confidence(cue) is not None and cue_confidence(cue) >= 0.7
+                   and old['start'] <= (cue['start'] + cue['end']) / 2 <= old['end']]
+        matches.sort(key=lambda pair: (pair[1]['start'], pair[1]['end']))
+        if not matches or not transcript_key(old['text']):
+            continue
+        if transcript_key(''.join(cue['text'] for _, cue in matches)) != transcript_key(old['text']):
+            continue
+        covered = merge_intervals([(cue['start'], cue['end']) for _, cue in matches], old['end'])
+        overlap = sum(max(0.0, min(end, old['end']) - max(start, old['start'])) for start, end in covered)
+        if overlap / (old['end'] - old['start']) < 0.7:
+            continue
+        # Do not displace a neighboring native subtitle to fit the new reading
+        # breaks. Its actual words and times remain authoritative observations.
+        if not recheck_fits_neighbors([cue for _, cue in matches], original, old_index, replacements):
+            continue
+        flag = 'rechecked_confidence' if needs_review(old) else 'rechecked_alignment'
+        replacements[old_index] = [{**cue, 'qualityFlags': list(dict.fromkeys(cue.get('qualityFlags', []) + [flag]))}
+                                   for _, cue in matches]
+        used.update(index for index, _ in matches)
+    result = [cue for index, old in enumerate(original) for cue in replacements.get(index, [old])]
+    return result, [cue for index, cue in enumerate(candidates) if index not in used], len(used)
+
+
 def merge_recovery(original, candidates):
     """Keep established dialogue unless a better aligned recheck replaces it."""
-    result = list(original)
-    accepted = 0
+    result, candidates, accepted = concordant_rechecks(original, candidates)
     for candidate in candidates:
         if needs_review(candidate):
             continue
@@ -453,10 +530,10 @@ def merge_recovery(original, candidates):
                 overlaps.append((index, cue, overlap))
         if len(overlaps) == 1:
             index, old, overlap = overlaps[0]
-            old_score, new_score = cue_confidence(old), cue_confidence(candidate)
-            if (needs_review(old) and old_score is not None and new_score is not None
-                    and new_score >= old_score + 0.1 and overlap / (old['end'] - old['start']) >= 0.7):
-                result[index] = candidate
+            if (recheck_improves(old, candidate) and overlap / (old['end'] - old['start']) >= 0.7
+                    and recheck_fits_neighbors([candidate], result, index)):
+                result[index] = {**candidate, 'qualityFlags': list(dict.fromkeys(
+                    candidate.get('qualityFlags', []) + ['rechecked_confidence']))}
                 accepted += 1
                 continue
         if candidate.get('words'):
@@ -560,23 +637,31 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
             cues, removed = prune_non_speech_artifacts(cues, audio, speech, sample_rate)
             removed_non_speech.extend(removed)
         raw_gaps, gaps = audit_gaps(speech, coverage_for(cues, duration), duration)
-        uncertain = [(cue['start'], cue['end']) for cue in cues if needs_review(cue)]
+        uncertain = [(cue['start'], cue['end']) for cue in cues if needs_review(cue) or needs_alignment_review(cue)]
         targets = merge_intervals(gaps + uncertain, duration)
-        budget = min(duration, min(600.0, max(60.0, duration * 0.25)))
-        windows = recovery_windows(targets, duration, budget)
-        for start, end in windows:
-            chunk = audio[int(start * sample_rate):int(end * sample_rate)]
+        # All cores are examined, with context across internal cuts rather than
+        # truncated phonemes. Thirty-second cores plus three seconds per side
+        # cost at most 1.2 audio-durations. Count the actual decoded samples.
+        windows = [(round(start * sample_rate), round(end * sample_rate), core_start, core_end)
+                   for start, end, core_start, core_end in recovery_plan(targets, duration)]
+        budget = sum((right - left) / sample_rate for left, right, _, _ in windows)
+        recovery_cues = []
+        for window, (left, right, core_start, core_end) in enumerate(windows):
+            start, end = left / sample_rate, right / sample_rate
+            chunk = audio[left:right]
             retry_options = {**options, 'vad_filter': False, 'no_speech_threshold': 0.8}
             segments, _ = model.transcribe(chunk, **retry_options)
             candidates = []
             for segment in segments:
-                candidates.extend(recovery_candidates_for_targets(
-                    cues_from_segment(segment, start, duration), targets, duration))
-            # No decoded speech is valid: leave intervals empty, never fill text.
-            cues, _ = merge_recovery(cues, candidates)
-            rechecked += end - start
+                candidates.extend(recovery_candidates_for_targets(cues_from_segment(
+                    segment, start, duration, (core_start, core_end)), targets, duration))
+            recovery_cues.extend({**cue, '_window': window, '_boundary': core_start} for cue in candidates)
+            rechecked += len(chunk) / sample_rate
             emitter({'type': 'progress', 'phase': 'recovery', 'completedSeconds': duration,
-                     'totalSeconds': duration, 'percent': 84.0 + 14.0 * rechecked / max(1.0, sum(right - left for left, right in windows))})
+                     'totalSeconds': duration, 'percent': 84.0 + 14.0 * rechecked / max(1.0, budget)})
+        # Reconcile context observations before confirming split native cues.
+        # Empty rechecks stay empty; no words or times are synthesized.
+        cues, _ = merge_recovery(cues, reconcile_window_boundaries(recovery_cues))
         if audit_available:
             cues, removed = prune_non_speech_artifacts(cues, audio, speech, sample_rate)
             removed_non_speech.extend(removed)
@@ -614,14 +699,20 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
         warning = f'단어별 시간 정렬이 불완전한 대사 {alignment_fallbacks}개는 원래의 유효한 구간 시간으로 보관했습니다. 단어 시간을 임의로 추정하지 않았으며, 이 제한은 음성 누락과 별도로 표시합니다.'
         warnings.append(warning)
         emitter({'type': 'warning', 'message': warning})
+    unresolved_by_reason = {}
+    for item in unresolved:
+        unresolved_by_reason[item['reason']] = unresolved_by_reason.get(item['reason'], 0) + 1
     audit = {'complete': audit_available and not unresolved, 'speechSeconds': sum(end - start for start, end in speech),
              'uncoveredSpeechSeconds': sum(end - start for start, end in raw_gaps),
              'unresolvedSpeechSeconds': sum(end - start for start, end in unresolved_gaps),
              'boundaryUncertaintySeconds': sum(item['end'] - item['start'] for item in boundary_ranges),
              'boundaryRanges': boundary_ranges,
-             'recheckedSeconds': rechecked, 'recoveryBudgetSeconds': budget, 'unresolved': unresolved[:MAX_UNRESOLVED]}
+             'recheckedSeconds': rechecked, 'recoveryBudgetSeconds': budget, 'unresolved': unresolved[:MAX_UNRESOLVED],
+             'unresolvedCount': len(unresolved), 'unresolvedByReason': unresolved_by_reason,
+             'unresolvedTruncated': len(unresolved) > MAX_UNRESOLVED}
     quality = {'profile': profile, 'model': model_name, 'device': device, 'computeType': compute_type,
                'recognitionRevision': RECOGNITION_REVISION,
+               'processingComplete': profile == 'accurate' and processed == duration,
                'durationSeconds': duration, 'processedSeconds': processed, 'wordTimestamps': all(bool(cue.get('words')) for cue in cues),
                'audit': audit, 'warnings': warnings}
     emitter({'type': 'transcript', 'segments': cues})

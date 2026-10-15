@@ -10,7 +10,7 @@ const { createLanAnalysis, sendRemoteAnalysis, checkRemoteServer, privateAddress
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const MP3 = Buffer.from('ID3tiny-transport-fixture');
 const FLAC = Buffer.from('fLaCtiny-lossless-transport-fixture');
-const quality = (changes = {}) => ({ version: 1, recognitionRevision: 2, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+const quality = (changes = {}) => ({ version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, processingComplete: true,
   language: 'ja', languageProbability: 0.99, duration: 60, processedUntil: 60, wordTimestamps: true,
   audit: { complete: true, speechSeconds: 2, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [], ...changes });
 const fingerprint = transcript => crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex');
@@ -72,7 +72,7 @@ test('relay starts only explicitly and requires private client plus bearer authe
   const f = await fixture(t);
   assert.ok(f.status.connectionCode.length >= 24);
   const status = await (await f.request('/v1/status')).json();
-  assert.deepEqual(status, { ready: true, protocol: 1, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2'] });
+  assert.deepEqual(status, { ready: true, protocol: 1, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3'] });
   assert.equal(JSON.stringify(status).includes(f.status.connectionCode), false);
   assert.equal((await fetch(f.base + '/v1/status')).status, 401);
   assert.equal((await f.request('/v1/status', { headers: { Authorization: 'Bearer ' + 'x'.repeat(32) } })).status, 401);
@@ -140,7 +140,8 @@ test('accurate uploads require lossless FLAC and forward quality options instead
   assert.equal(submitted.status, 202, await submitted.clone().text());
   const result = await finished(f, (await submitted.json()).id);
   assert.equal(result.result.transcriptionQuality.profile, 'accurate');
-  assert.equal(result.result.transcriptionQuality.recognitionRevision, 2);
+  assert.equal(result.result.transcriptionQuality.recognitionRevision, 3);
+  assert.equal(result.result.transcriptionQuality.processingComplete, true);
   assert.equal(result.result.transcript[0].words[0].probability, 0.98);
   assert.equal(result.result.transcript[0].confidence, 0.98);
   assert.equal(result.result.transcriptionQuality.complete, true);
@@ -170,7 +171,8 @@ test('accurate cached transcripts require complete large-model proof and sanitiz
   assert.equal(JSON.stringify(job).includes('host-private'), false);
   for (const changes of [{ transcriptionQuality: quality({ model: 'small' }) }, { transcriptionQuality: quality({ complete: false }) },
     { transcriptionQuality: quality({ processedUntil: 30 }) }, { transcriptionQuality: quality({ recognitionRevision: undefined }) },
-    { transcriptionQuality: quality({ recognitionRevision: 1 }) }, { transcriptSource: 'sidecar:sparse.srt' }]) {
+    { transcriptionQuality: quality({ recognitionRevision: 1 }) }, { transcriptionQuality: quality({ recognitionRevision: 2 }) },
+    { transcriptionQuality: quality({ processingComplete: false }) }, { transcriptSource: 'sidecar:sparse.srt' }]) {
     assert.equal((await f.submit({ ...original, ...changes })).status, 400);
   }
 });
@@ -195,7 +197,7 @@ test('old subtitle hosts reject accurate requests before upload while fast reque
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   const options = { dataDir, connectionCode: code, remoteUrl: `http://127.0.0.1:${server.address().port}`, subtitleLanguage: 'ko' };
   const record = { id, path: 'C:/client/neutral.mp4', ...metadata(), size: 1 };
-  for (capabilities of [['timed-subtitles-v1'], ['timed-subtitles-v1', 'subtitle-quality-v1']]) {
+  for (capabilities of [['timed-subtitles-v1'], ['timed-subtitles-v1', 'subtitle-quality-v1'], ['timed-subtitles-v1', 'subtitle-quality-v2']]) {
     await assert.rejects(sendRemoteAnalysis(record, { ...options, subtitleQuality: 'accurate' }), /분석 서버 PC도 새 버전으로 업데이트/);
   }
   assert.equal(posts, 0);
@@ -205,11 +207,17 @@ test('old subtitle hosts reject accurate requests before upload while fast reque
   assert.equal(upload.includes('"subtitleQuality"'), false);
   assert.equal(upload.includes('"transcriptionQuality"'), false);
   assert.equal(upload.includes('"words"'), false);
-  capabilities = ['timed-subtitles-v1', 'subtitle-quality-v2'];
+  for (capabilities of [['timed-subtitles-v1', 'subtitle-quality-v1'], ['timed-subtitles-v1', 'subtitle-quality-v2']]) {
+    upload = '';
+    await sendRemoteAnalysis(record, { ...options, subtitleQuality: 'fast' });
+    assert.equal(upload.includes('"subtitleQuality":"fast"'), true);
+  }
+  assert.equal(posts, 3, 'fast uploads continue to work with older v1 and v2 quality hosts');
+  capabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'];
   upload = '';
   await sendRemoteAnalysis(record, { ...options, subtitleQuality: 'accurate' });
-  assert.equal(posts, 2);
-  assert.equal(upload.includes('"subtitleQuality":"accurate"'), true, 'v2 includes quality options even when v1 is not separately advertised');
+  assert.equal(posts, 4);
+  assert.equal(upload.includes('"subtitleQuality":"accurate"'), true, 'v3 includes quality options even when v1 and v2 are not separately advertised');
 });
 
 test('discarding invalid returned cues also clears the full-transcription proof', async t => {
@@ -243,6 +251,58 @@ test('LAN round trips exact-source partial translation progress without checkpoi
   assert.equal(JSON.stringify(result).includes('checkpoint'), false);
 });
 
+test('v3 round trip preserves completed translation and full processing separately from 303 sampled audit warnings', async t => {
+  const cues = [{ id: 'opening', start: 1, end: 3, text: 'こんにちは' }, { id: 'ending', start: 3200, end: 3202, text: 'また会いましょう' }];
+  const translated = [{ id: 'opening', start: 1, end: 3, text: '안녕하세요.' }, { id: 'ending', start: 3200, end: 3202, text: '다시 만나요.' }];
+  const unresolved = Array.from({ length: 200 }, (_, index) => ({ start: 10 + index * 10, end: 11 + index * 10, reason: 'low_confidence' }));
+  const proof = quality({ duration: 3240, processedUntil: 3240, complete: false, wordTimestamps: false,
+    audit: { complete: false, unresolved, unresolvedCount: 303, unresolvedByReason: { low_confidence: 303 }, unresolvedTruncated: true } });
+  const progress = { version: 1, sourceFingerprint: fingerprint(cues), totalCues: 2, completedCues: 2, language: 'ko', complete: false,
+    sourceComplete: false, translationComplete: true, sourceProcessed: true, sourceAuditComplete: false };
+  let received;
+  const f = await fixture(t, async pkg => {
+    received = pkg;
+    assert.equal(pkg.subtitleQuality, 'accurate');
+    assert.deepEqual(await fs.readFile(pkg.audioPath), FLAC);
+    return { ...pkg.record, transcript: cues, transcriptSource: 'audio:faster-whisper large-v3', status: 'partial', subtitleError: null,
+      transcriptionQuality: { ...proof, model: 'C:/host-private/models/large-v3', apiKey: 'private-quality-key',
+        audit: { ...proof.audit, checkpointPath: 'C:/host-private/source.json' } },
+      subtitleTranslationProgress: { ...progress, checkpointPath: 'C:/host-private/translation.json', apiKey: 'private-progress-key' },
+      subtitleTranslationPartial: translated.map(cue => ({ ...cue, checkpoint: 'private-cue-key' })),
+      privateField: 'private-record-key' };
+  });
+  const id = '6'.repeat(32), frameDir = path.join(f.dataDir, 'frames', id), audioPath = path.join(f.dataDir, 'owned-audio.flac');
+  await fs.mkdir(frameDir, { recursive: true });
+  await fs.writeFile(path.join(frameDir, 'frame_001.jpg'), JPEG);
+  await fs.writeFile(audioPath, FLAC);
+  const original = { id, path: 'C:/client/neutral.mp4', size: 1,
+    ...metadata({ duration: 3240, transcript: cues, hasAudio: true, transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: proof }) };
+  const result = await sendRemoteAnalysis(original, { remoteUrl: f.base, connectionCode: f.status.connectionCode,
+    dataDir: f.dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
+  assert.equal(received.record.transcriptionQuality.processingComplete, true);
+  assert.equal(received.record.transcriptionQuality.audit.unresolvedCount, 303);
+  assert.equal(result.transcriptionQuality.recognitionRevision, 3);
+  assert.equal(result.transcriptionQuality.processingComplete, true);
+  assert.equal(result.transcriptionQuality.complete, false);
+  assert.equal(result.transcriptionQuality.audit.complete, false);
+  assert.equal(result.transcriptionQuality.audit.unresolved.length, 200);
+  assert.equal(result.transcriptionQuality.audit.unresolvedCount, 303);
+  assert.deepEqual(result.transcriptionQuality.audit.unresolvedByReason, { low_confidence: 303 });
+  assert.equal(result.transcriptionQuality.audit.unresolvedTruncated, true);
+  assert.equal(result.transcriptionQuality.model, 'large-v3');
+  assert.deepEqual(result.subtitleTranslationProgress, progress);
+  assert.deepEqual(result.subtitleTranslationPartial, translated);
+  assert.equal(result.subtitleTranslation, undefined);
+  assert.equal(result.subtitleLanguage, undefined);
+  assert.equal(result.status, 'partial');
+  assert.ok(!result.subtitleError, 'successful reviewed translation is not a translation failure');
+  assert.equal(result.id, id);
+  assert.equal(result.path, original.path);
+  const serialized = JSON.stringify(result);
+  for (const secret of ['private-', 'checkpoint', f.dataDir, f.status.connectionCode]) assert.equal(serialized.includes(secret), false, secret);
+  await assert.rejects(fs.stat(received.audioPath), { code: 'ENOENT' });
+});
+
 test('invalid translation counters, source fingerprints, prefix intervals and IDs never become completion claims', async t => {
   const cues = [{ id: 1, start: 1, end: 2, text: '原文一' }, { id: 2, start: 3, end: 4, text: '原文二' }];
   const progress = { version: 1, sourceFingerprint: fingerprint(cues), totalCues: 2, completedCues: 1, language: 'ko', complete: false, sourceComplete: true };
@@ -252,6 +312,13 @@ test('invalid translation counters, source fingerprints, prefix intervals and ID
   const cases = [{ subtitleTranslationProgress: { ...progress, totalCues: 3 } }, { subtitleTranslationProgress: { ...progress, completedCues: 3 } },
     { subtitleTranslationProgress: { ...progress, completedCues: 0 } }, { subtitleTranslationProgress: { ...progress, sourceFingerprint: '0'.repeat(64) } },
     { subtitleTranslationProgress: { ...progress, language: 'ja' } }, { subtitleTranslationProgress: { ...progress, complete: true } },
+    { subtitleTranslationProgress: { ...progress, translationComplete: true } },
+    { subtitleTranslationProgress: { ...progress, translationComplete: 'true' } },
+    { subtitleTranslationProgress: { ...progress, sourceProcessed: 'true' } },
+    { subtitleTranslationProgress: { ...progress, sourceAuditComplete: 1 } },
+    { subtitleTranslationProgress: { ...progress, completedCues: 2, complete: true, translationComplete: false },
+      subtitleTranslationPartial: undefined, subtitleLanguage: 'ko',
+      subtitleTranslation: [{ id: 1, start: 1, end: 2, text: '첫 원문' }, { id: 2, start: 3, end: 4, text: '둘째 원문' }] },
     { subtitleTranslationPartial: [{ id: 99, start: 1, end: 2, text: '첫 원문' }] },
     { subtitleTranslationPartial: [{ id: 1, start: 1, end: 2.1, text: '첫 원문' }] }];
   for (changes of cases) {

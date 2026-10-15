@@ -74,6 +74,16 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(windows, [(0, 30), (30, 60), (60, 71)])
         self.assertLessEqual(sum(end - start for start, end in windows), 71)
 
+    def test_recovery_context_plan_owns_all_samples_and_bounds_actual_decoding_to_one_point_two_passes(self):
+        for duration in (0.25, 30.1, 60, 3240, 7200):
+            plan = ASR.recovery_plan([(0, duration)], duration)
+            self.assertEqual(plan[0][2], 0)
+            self.assertEqual(plan[-1][3], duration)
+            self.assertTrue(all(left[3] == right[2] for left, right in zip(plan, plan[1:])))
+            self.assertTrue(all(start <= core_start < core_end <= end for start, end, core_start, core_end in plan))
+            self.assertLessEqual(sum(end - start for start, end, _, _ in plan), duration * 1.2 + 1e-8)
+            self.assertLessEqual(max(end - start for start, end, _, _ in plan), 36)
+
     def test_quality_processes_all_samples_without_vad_including_a_silent_tail(self):
         model = Model([[segment(1.125, 2.375)], []])
         cues, quality, events = self.run_audio(model, seconds=120, speech=[(1.125, 2.375)])
@@ -182,7 +192,7 @@ class TranscriptionTests(unittest.TestCase):
         self.assertFalse(quality['wordTimestamps'])
         self.assertTrue(quality['audit']['complete'])
         self.assertEqual(quality['audit']['unresolved'], [])
-        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(len(model.calls), 2)
         self.assertTrue(quality['warnings'])
 
     def test_language_uses_separated_windows_instead_of_only_opening_music(self):
@@ -208,7 +218,7 @@ class TranscriptionTests(unittest.TestCase):
         lines = [json.dumps(event, ensure_ascii=False, allow_nan=False) for event in events]
         decoded = [json.loads(line) for line in lines]
         self.assertEqual(decoded[-1]['quality'], quality)
-        self.assertEqual(decoded[-1]['quality']['recognitionRevision'], 2)
+        self.assertEqual(decoded[-1]['quality']['recognitionRevision'], 3)
         self.assertEqual(decoded[-3]['segments'], cues)
         self.assertEqual(decoded[-2]['phase'], 'completed')
         percentages = [event['percent'] for event in events if event['type'] == 'progress']
@@ -768,6 +778,154 @@ class TranscriptionTests(unittest.TestCase):
                                 [{'start': 1, 'end': 4, 'text': 'native'}], [(2.2, 2.6)])
         self.assertTrue(row['ambiguousFallbackTiming'])
         self.assertAlmostEqual(row['vadOverlapSeconds'], 0.4)
+
+    def test_recheck_can_resolve_no_speech_signal_without_increasing_already_high_word_probability(self):
+        original = ASR.cues_from_segment(dict(segment(1, 2, 'confirmed'), no_speech_prob=0.9), 0, 10)
+        recovered = ASR.cues_from_segment(segment(1, 2, 'confirmed'), 0, 10)
+        merged, accepted = ASR.merge_recovery(original, recovered)
+        self.assertEqual(accepted, 1)
+        self.assertFalse(ASR.needs_review(merged[0]))
+        self.assertIn('rechecked_confidence', merged[0]['qualityFlags'])
+        self.assertEqual(original[0]['noSpeechProbability'], 0.9)
+
+    def test_concordant_native_recheck_accepts_normal_log_and_silence_range_without_relaxing_low_thresholds(self):
+        original = ASR.cues_from_segment(dict(segment(1, 2, 'confirmed'), no_speech_prob=0.9), 0, 10)
+        recovered = ASR.cues_from_segment(dict(segment(1, 2, 'confirmed', logprob=-0.8), no_speech_prob=0.6), 0, 10)
+        self.assertFalse(ASR.needs_review(recovered[0]))
+        self.assertFalse(ASR.high_confidence(recovered[0]))
+        merged, accepted = ASR.merge_recovery(original, recovered)
+        self.assertEqual(accepted, 1)
+        self.assertEqual((merged[0]['start'], merged[0]['end']), (1, 2))
+        self.assertFalse(ASR.needs_review(merged[0]))
+        self.assertIn('rechecked_confidence', merged[0]['qualityFlags'])
+
+    def test_concordant_recheck_cannot_clear_a_still_low_logprob_or_weak_native_word_score(self):
+        original = ASR.cues_from_segment(dict(segment(1, 2, 'confirmed'), no_speech_prob=0.9), 0, 10)
+        for recovered in [ASR.cues_from_segment(segment(1, 2, 'confirmed', logprob=-1.2), 0, 10),
+                          ASR.cues_from_segment(segment(1, 2, 'confirmed', probability=0.65), 0, 10)]:
+            merged, accepted = ASR.merge_recovery(original, recovered)
+            self.assertEqual(accepted, 0)
+            self.assertEqual(merged, original)
+            self.assertTrue(ASR.needs_review(merged[0]))
+
+    def test_recheck_can_correct_low_logprob_without_increasing_already_high_word_probability(self):
+        original = ASR.cues_from_segment(segment(1, 2, 'uncertain', logprob=-2), 0, 10)
+        recovered = ASR.cues_from_segment(segment(1, 2, 'corrected'), 0, 10)
+        merged, accepted = ASR.merge_recovery(original, recovered)
+        self.assertEqual(accepted, 1)
+        self.assertEqual(merged[0]['text'], 'corrected')
+        self.assertFalse(ASR.needs_review(merged[0]))
+
+    def test_same_dialogue_split_into_several_native_recheck_cues_resolves_old_low_confidence(self):
+        original = ASR.cues_from_segment(segment(1, 7, 'first second', probability=0.2, logprob=-2), 0, 10)
+        recovered = ASR.cues_from_segment(segment(1, 4, 'first '), 0, 10) + ASR.cues_from_segment(segment(4, 7, 'second'), 0, 10)
+        merged, accepted = ASR.merge_recovery(original, recovered)
+        self.assertEqual(accepted, 2)
+        self.assertEqual([(cue['start'], cue['end']) for cue in merged], [(1, 4), (4, 7)])
+        self.assertEqual(''.join(cue['text'] for cue in merged), 'firstsecond')
+        self.assertFalse(any(ASR.needs_review(cue) for cue in merged))
+
+    def test_different_split_dialogue_cannot_claim_concordant_recheck(self):
+        original = ASR.cues_from_segment(segment(1, 7, 'first second', probability=0.2, logprob=-2), 0, 10)
+        recovered = ASR.cues_from_segment(segment(1, 4, 'different'), 0, 10) + ASR.cues_from_segment(segment(4, 7, 'text'), 0, 10)
+        merged, accepted = ASR.merge_recovery(original, recovered)
+        self.assertEqual(accepted, 0)
+        self.assertEqual(merged, original)
+        self.assertTrue(ASR.needs_review(merged[0]))
+
+    def test_wordless_native_cue_can_gain_real_alignment_only_for_same_rechecked_dialogue(self):
+        native = segment(1, 7, 'first second')
+        native['words'] = []
+        original = ASR.cues_from_segment(native, 0, 10)
+        recovered = ASR.cues_from_segment(segment(1, 4, 'first '), 0, 10) + ASR.cues_from_segment(segment(4, 7, 'second'), 0, 10)
+        merged, accepted = ASR.merge_recovery(original, recovered)
+        self.assertEqual(accepted, 2)
+        self.assertTrue(all(cue.get('words') for cue in merged))
+        self.assertTrue(all('rechecked_alignment' in cue['qualityFlags'] for cue in merged))
+        self.assertFalse(original[0].get('words'))
+
+    def test_rechecks_of_neighboring_cues_cannot_introduce_overlapping_subtitles(self):
+        original = ASR.cues_from_segment(segment(1, 2, 'first', probability=0.2, logprob=-2), 0, 10)
+        original += ASR.cues_from_segment(segment(3, 4, 'second', probability=0.2, logprob=-2), 0, 10)
+        recovered = ASR.cues_from_segment(segment(1, 2.6, 'first'), 0, 10)
+        recovered += ASR.cues_from_segment(segment(2.4, 4, 'second'), 0, 10)
+        merged, _ = ASR.merge_recovery(original, recovered)
+        self.assertTrue(all(left['end'] <= right['start'] + 0.02 for left, right in zip(merged, merged[1:])))
+        self.assertTrue(any(ASR.needs_review(cue) for cue in merged))
+
+    def test_fifty_four_minute_review_reaches_final_target_instead_of_exhausting_ten_minutes(self):
+        dialogue = [(start, start + 5, 'reviewed') for start in range(0, 3240, 10)]
+        class TimelineModel:
+            reviewed_until = 0
+            reviewed_seconds = 0
+            def transcribe(self, audio, **options):
+                start, end = audio.start_sample / 10, (audio.start_sample + len(audio)) / 10
+                review = 'no_speech_threshold' in options
+                if review:
+                    self.reviewed_until = max(self.reviewed_until, end)
+                    self.reviewed_seconds += len(audio) / 10
+                return iter([segment(left - start, right - start, text,
+                    probability=0.95 if review else 0.2, logprob=-0.1 if review else -2)
+                    for left, right, text in dialogue if left >= start and right <= end]), None
+        model = TimelineModel()
+        cues, quality = ASR.transcribe_audio(model, PositionedAudio(3240), sample_rate=10, language='ja',
+            speech_detector=lambda audio, rate: [(start, end) for start, end, _ in dialogue], emitter=lambda event: None)
+        self.assertGreater(model.reviewed_until, 3235)
+        self.assertEqual(len(cues), 324)
+        self.assertFalse(any(ASR.needs_review(cue) for cue in cues))
+        self.assertTrue(quality['audit']['complete'])
+        self.assertAlmostEqual(quality['audit']['recoveryBudgetSeconds'], model.reviewed_seconds)
+        self.assertAlmostEqual(quality['audit']['recheckedSeconds'], model.reviewed_seconds)
+        self.assertLessEqual(model.reviewed_seconds, 3240 * 1.2)
+
+    def test_native_word_crossing_merged_recovery_core_boundary_is_redecoded_whole_once(self):
+        dialogue = [(index * 5 + 0.1, (index + 1) * 5 - 0.1, 'part' + str(index)) for index in range(12)]
+        dialogue[5] = (25.1, 29.7, 'part5')
+        dialogue[6] = (30.3, 34.9, 'part6')
+        dialogue.append((29.8, 30.2, 'boundary'))
+        dialogue.sort()
+        class BoundaryModel:
+            rechecks = []
+            def transcribe(self, audio, **options):
+                start, end = audio.start_sample / 10, (audio.start_sample + len(audio)) / 10
+                review = 'no_speech_threshold' in options
+                if review:
+                    self.rechecks.append((start, end))
+                return iter([segment(left - start, right - start, text,
+                    probability=0.95 if review else 0.2, logprob=-0.1 if review else -2)
+                    for left, right, text in dialogue if left >= start and right <= end]), None
+        model = BoundaryModel()
+        cues, quality = ASR.transcribe_audio(model, PositionedAudio(60), sample_rate=10, language='ja',
+            speech_detector=lambda audio, rate: [(start, end) for start, end, _ in dialogue], emitter=lambda event: None)
+        self.assertEqual(model.rechecks, [(0, 33), (27, 60)])
+        observed = [word for cue in cues for word in cue['words'] if word['word'] == 'boundary']
+        self.assertEqual(len(observed), 1)
+        self.assertAlmostEqual(observed[0]['start'], 29.8)
+        self.assertAlmostEqual(observed[0]['end'], 30.2)
+        self.assertFalse(any(ASR.needs_review(cue) for cue in cues))
+        self.assertTrue(quality['audit']['complete'])
+        self.assertEqual(quality['audit']['recheckedSeconds'], 66)
+        self.assertEqual(quality['audit']['recoveryBudgetSeconds'], 66)
+
+    def test_unresolved_diagnostics_keep_true_counts_when_only_two_hundred_examples_are_exported(self):
+        dialogue = [(start, start + 1) for start in range(0, 606, 2)]
+        class PersistentlyUncertainModel:
+            def transcribe(self, audio, **options):
+                start, end = audio.start_sample / 10, (audio.start_sample + len(audio)) / 10
+                return iter([segment(left - start, right - start, 'uncertain', probability=0.2, logprob=-2)
+                             for left, right in dialogue if left >= start and right <= end]), None
+        _, quality = ASR.transcribe_audio(PersistentlyUncertainModel(), PositionedAudio(606), sample_rate=10,
+            language='ja', speech_detector=lambda audio, rate: dialogue, emitter=lambda event: None)
+        self.assertTrue(quality['processingComplete'])
+        self.assertFalse(quality['audit']['complete'])
+        self.assertEqual(len(quality['audit']['unresolved']), 200)
+        self.assertEqual(quality['audit']['unresolvedCount'], 303)
+        self.assertEqual(quality['audit']['unresolvedByReason'], {'low_confidence': 303})
+        self.assertTrue(quality['audit']['unresolvedTruncated'])
+
+    def test_fast_vad_processing_cannot_claim_every_source_sample_was_decoded(self):
+        _, quality, _ = self.run_audio(Model([[]]), profile='fast')
+        self.assertFalse(quality['processingComplete'])
 
 
 if __name__ == '__main__':

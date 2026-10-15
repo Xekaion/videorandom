@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeSubtitleQuality, normalizeTranscriptionQuality, sanitizeRichSegments, isVerifiedFullTranscription, isCurrentFullTranscription, RECOGNITION_REVISION } = require('../lib/subtitle-quality');
+const { normalizeSubtitleQuality, normalizeTranscriptionQuality, sanitizeRichSegments, isVerifiedFullTranscription, isCurrentFullTranscription,
+  isProcessedTranscription, isCurrentProcessedTranscription, RECOGNITION_REVISION } = require('../lib/subtitle-quality');
 
 const cue = () => ({ start: 1, end: 3, text: '원문', id: 'cue-1', words: [{ start: 1, end: 3, word: '원문', probability: 0.98 }], avgLogprob: -0.1, noSpeechProbability: 0.02 });
 const proof = () => ({ version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', duration: 90, processedUntil: 90, complete: true,
@@ -92,4 +93,49 @@ test('invalid boundary sums, unsupported ranges and fabricated gap exclusions ca
     assert.equal(quality.audit.complete, false, JSON.stringify(extra));
     assert.equal(isVerifiedFullTranscription({ ...record(), transcriptionQuality: quality }), false);
   }
+});
+
+test('a bounded audit sample preserves full counts and cannot hide unresolved long-video diagnostics', () => {
+  const unresolved = Array.from({ length: 200 }, (_, index) => ({ start: index * 10, end: index * 10 + 1, reason: 'low_confidence' }));
+  const input = { ...proof(), duration: 3240, processedUntil: 3240, processingComplete: true, audit: {
+    complete: true, unresolved, unresolvedCount: 303, unresolvedByReason: { low_confidence: 300, possible_missing_speech: 3 }, unresolvedTruncated: true
+  } };
+  const normalized = normalizeTranscriptionQuality(input);
+  assert.equal(normalized.processingComplete, true);
+  assert.equal(normalized.audit.unresolved.length, 200);
+  assert.equal(normalized.audit.unresolvedCount, 303);
+  assert.equal(normalized.audit.unresolvedTruncated, true);
+  assert.deepEqual(normalized.audit.unresolvedByReason, input.audit.unresolvedByReason);
+  assert.equal(normalized.audit.complete, false);
+  assert.deepEqual(normalizeTranscriptionQuality(normalized), normalized, 'transport normalization retains the full diagnostic totals');
+  assert.equal(isVerifiedFullTranscription({ ...record(), duration: 3240, transcriptionQuality: normalized }), false);
+  const noSample = normalizeTranscriptionQuality({ ...proof(), audit: { complete: true, unresolved: [], unresolvedCount: 303,
+    unresolvedByReason: { low_confidence: 303 }, unresolvedTruncated: true } });
+  assert.equal(noSample.audit.complete, false);
+  assert.equal(noSample.audit.unresolvedCount, 303);
+  for (const audit of [
+    { complete: true, unresolved: [], unresolvedCount: -1 },
+    { complete: true, unresolved: [], unresolvedCount: 1.5 },
+    { complete: true, unresolved: [], unresolvedTruncated: 'false' },
+    { complete: true, unresolved: [], unresolvedByReason: null },
+    { complete: true, unresolved: [], unresolvedCount: 0, unresolvedByReason: { low_confidence: 1 } },
+    { complete: true, unresolved: [{ start: 1, end: 2 }], unresolvedCount: 0 },
+    { complete: true, unresolved: [], unresolvedCount: 3, unresolvedTruncated: false }
+  ]) assert.equal(normalizeTranscriptionQuality({ ...proof(), audit }).audit.complete, false);
+});
+
+test('whole decoding is distinct from accurate audit proof and protects an earlier processed source only', () => {
+  const value = { ...record(), transcriptionQuality: { ...proof(), complete: false, processingComplete: true, recognitionRevision: RECOGNITION_REVISION,
+    audit: { complete: false, unresolved: [{ start: 40, end: 41, reason: 'low_confidence' }] } } };
+  assert.equal(isProcessedTranscription(value), true);
+  assert.equal(isCurrentProcessedTranscription(value), true);
+  assert.equal(isCurrentFullTranscription(value), false);
+  const older = { ...value, transcriptionQuality: { ...value.transcriptionQuality, recognitionRevision: 2, processingComplete: undefined } };
+  assert.equal(isProcessedTranscription(older), true, 'an older fully decoded source still survives a failed new attempt');
+  assert.equal(isCurrentProcessedTranscription(older), false);
+  for (const quality of [{ processingComplete: false }, { processedUntil: 40 }, { profile: 'fast' }, { source: 'unknown' }]) {
+    assert.equal(isProcessedTranscription({ ...value, transcriptionQuality: { ...value.transcriptionQuality, ...quality } }), false);
+  }
+  assert.equal(isProcessedTranscription({ ...value, transcriptSource: 'audio:faster-whisper large-v3 (partial)' }), false);
+  assert.equal(normalizeTranscriptionQuality({ ...proof(), processingComplete: true, processedUntil: 89 }).processingComplete, false);
 });
