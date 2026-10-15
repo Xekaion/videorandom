@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const crypto = require('node:crypto');
+const fingerprint = transcript => crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex');
 
 const publicDir = path.join(__dirname, '..', 'public');
 const flush = () => new Promise(setImmediate);
@@ -29,7 +31,7 @@ class Element {
   focus() {}
 }
 
-async function boot({ savedSettings, initialQueue, initialConnection = null, records = [], delayConfig = false, delayRemote = false, remoteReady = true, remoteSuperseded = false, jobResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200 } = {}) {
+async function boot({ savedSettings, initialQueue, initialConnection = null, records = [], delayConfig = false, delayRemote = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v2'], remoteSuperseded = false, jobResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, browserCrypto = crypto.webcrypto } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
@@ -42,6 +44,7 @@ async function boot({ savedSettings, initialQueue, initialConnection = null, rec
   const remoteGate = delayRemote ? new Promise(resolve => { releaseRemote = resolve; }) : Promise.resolve();
   const config = () => ({ tools: { available: true }, providers: { codex: { available: true, loggedIn: true }, speech: { available: true } }, defaultMode: 'codex', host: { running: false }, autoPick: plain(queue), connection: plain(connection) });
   const sandbox = {
+    crypto: browserCrypto, TextEncoder,
     document: { body: new Element('body'), getElementById: id => elements.get(id), createElement: tag => new Element(tag), createDocumentFragment: () => new Element('#fragment'), querySelectorAll: () => [], addEventListener: (_type, callback) => { load = callback; } },
     localStorage: { getItem: key => preferences.get(key) ?? null, setItem: (key, value) => preferences.set(key, value) },
     URL, setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; }, clearTimeout: id => timers.delete(id),
@@ -55,7 +58,7 @@ async function boot({ savedSettings, initialQueue, initialConnection = null, rec
       else if (url.endsWith('/remote/check')) {
         await remoteGate;
         if (remoteReady && !remoteSuperseded) connection = { ...body, remembered: true };
-        result = remoteSuperseded ? { ready: remoteReady } : { ready: remoteReady, connection: plain(connection) };
+        result = remoteSuperseded ? { ready: remoteReady } : { ready: remoteReady, capabilities: remoteCapabilities, connection: plain(connection) };
       }
       else if (url === '/api/analysis/connection' && method === 'DELETE') { connection = null; result = { remoteUrl: '', connectionCode: '', remembered: false }; }
       else if (/\/results\/[^/]+\/repair$/.test(url)) {
@@ -454,6 +457,16 @@ test('a failed connection check leaves the prior remembered pair intact without 
   assert(!ui.calls.some(call => call.body?.resume === true));
 });
 
+test('a reachable older host is saved but clearly requests a server update before resuming accurate subtitles', async () => {
+  const ui = await boot({ initialConnection: remembered(), remoteCapabilities: ['timed-subtitles-v1', 'subtitle-quality-v1'], savedSettings: { mode: 'remote', subtitleQuality: 'accurate' } });
+  const before = ui.calls.length;
+  await ui.elements.get('catalogRemoteCheck').dispatch('click');
+  assert(ui.elements.get('catalogRemoteStatus').textContent.includes('서버 PC도 1.6.1 이상'));
+  assert(ui.elements.get('catalogRemoteStatus').classList.contains('catalog-error'));
+  assert(ui.getConnection().remembered);
+  assert(!ui.calls.slice(before).some(call => call.url.endsWith('/auto-pick') && call.body?.resume));
+});
+
 test('a superseded connection check does not recreate a pair that the backend declined to remember', async () => {
   const ui = await boot({ initialConnection: remembered(), remoteSuperseded: true });
   await ui.elements.get('catalogRemoteCheck').dispatch('click');
@@ -625,6 +638,19 @@ test('older translated records without an automatic sidecar save do not claim on
   assert(withoutTranslation.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('hidden'));
 });
 
+test('player subtitle notices distinguish an updated default SRT from a preserved manual conflict', async () => {
+  for (const updated of [true, false]) {
+    const record = { ...timedRecord(), subtitleAutoSave: { status: 'saved', updated,
+      path: updated ? 'D:\\영상\\예제.ko.srt' : 'D:\\영상\\예제.videorandom-0123456789ab.ko.srt',
+      ...(updated ? { backupPath: 'D:\\영상\\예제.ko.srt.videorandom-0123.bak' } : {}) } };
+    const ui = await boot({ records: [record] });
+    await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+    const message = ui.elements.get('catalogSubtitleAutoSaveNotice').textContent;
+    assert(message.includes(updated ? '최신 분석으로 갱신' : '플레이어에서 위 경로의 SRT를 직접'));
+    assert(message.includes(updated ? record.subtitleAutoSave.backupPath : record.subtitleAutoSave.path));
+  }
+});
+
 test('new subtitle settings default to accurate and retain an explicit fast choice without storing connection codes', async () => {
   const ui = await boot({ savedSettings: { mode: 'remote', remoteUrl: 'http://192.168.55.166:3001' } });
   assert.equal(ui.elements.get('catalogSubtitleQuality').value, 'accurate');
@@ -689,6 +715,106 @@ test('an unfinished translated prefix shows counts without claiming all speech o
   assert(notice.includes('한국어 번역 2 / 2구간 · 진행 기록 보관됨 · 원어 인식 확인 필요'));
   assert.equal(notice.includes('2구간 완료'), false);
   assert.equal(ui.elements.get('catalogSubtitleView').value, 'original');
+});
+
+test('reviewed partial Korean cues remain visible and download explicitly as partial without hiding untranslated originals', async () => {
+  const record = { ...timedRecord(), subtitleTranslation: undefined, subtitleLanguage: undefined,
+    subtitleTranslationPartial: [{ start: 1.25, end: 3.5, text: '안녕하세요.' }],
+    subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: false, sourceFingerprint: fingerprint(timedRecord().transcript) },
+    subtitleError: '원어 인식 확인 필요' };
+  const ui = await boot({ records: [record] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+  assert.equal(ui.elements.get('catalogSubtitleDownloadLanguage').value, 'ko');
+  assert(ui.elements.get('catalogSubtitleNotice').textContent.includes('부분 자막 1 / 2구간'));
+  const lines = ui.elements.get('catalogTranscript').childNodes;
+  assert.deepEqual(lines[0].childNodes[1].childNodes.map(node => node.textContent), ['こんにちは。', '안녕하세요.']);
+  assert.deepEqual(lines[1].childNodes[1].childNodes.map(node => node.textContent), ['また明日。', '한국어 번역 대기']);
+  ui.elements.get('catalogSubtitleView').value = 'ko';
+  await ui.elements.get('catalogSubtitleView').dispatch('change');
+  assert(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes[0].textContent.includes('원문: また明日。'));
+  await ui.elements.get('catalogSubtitleSrt').dispatch('click');
+  assert(ui.calls.some(call => call.url.endsWith('/subtitles?format=srt&language=ko&partial=1')));
+  assert(ui.body.childNodes.some(element => element.download?.endsWith('.ko.partial.srt') && element.clicked));
+  assert(ui.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('hidden'));
+});
+
+function delayedBrowserHash() {
+  const pending = [];
+  const browserCrypto = { subtle: { digest: (algorithm, bytes) => {
+    assert.equal(algorithm, 'SHA-256');
+    const source = Buffer.from(bytes);
+    return new Promise(resolve => pending.push(() => resolve(crypto.createHash('sha256').update(source).digest())));
+  } } };
+  return { browserCrypto, pending };
+}
+
+test('closing a detail while its partial subtitle hash is pending never reopens it or enables stale controls', async () => {
+  const record = { ...timedRecord(), id: 'partial-hash', status: 'partial', subtitleTranslation: undefined, subtitleLanguage: undefined,
+    subtitleTranslationPartial: [{ start: 1.25, end: 3.5, text: '안녕하세요.' }],
+    subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: false, sourceFingerprint: fingerprint(timedRecord().transcript) } };
+  const other = { ...timedRecord(), ...picked('다른 합성 예제.mp4'), id: 'other-detail' };
+  const hash = delayedBrowserHash();
+  const ui = await boot({ records: [record, other], browserCrypto: hash.browserCrypto });
+  const button = name => ui.elements.get('catalogRows').childNodes.map(row => row.childNodes[1].childNodes[0]).find(item => item.textContent === name);
+  await button(other.name).dispatch('click');
+  const opening = button(record.name).dispatch('click');
+  assert.equal(hash.pending.length, 1);
+  assert.equal(ui.elements.get('catalogDetail').open, true);
+  assert.equal(ui.elements.get('catalogDetailTitle').textContent, record.name, 'the visible record changes synchronously before hashing');
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'original');
+  await ui.elements.get('catalogDetailClose').dispatch('click');
+  await ui.elements.get('catalogDetail').dispatch('close');
+  assert.equal(ui.elements.get('catalogDetail').open, false);
+  hash.pending.shift()();
+  await opening;
+  assert.equal(ui.elements.get('catalogDetail').open, false);
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'original');
+  assert.equal(ui.elements.get('catalogSubtitleDownloadLanguage').value, 'original');
+  assert.equal(ui.calls.filter(call => call.url.includes('/subtitles?')).length, 0);
+});
+
+test('a retained partial result keeps the newest repair failure visible after its delayed hash finishes', async () => {
+  const record = { ...timedRecord(), status: 'partial', subtitleTranslation: undefined, subtitleLanguage: undefined,
+    subtitleTranslationPartial: [{ start: 1.25, end: 3.5, text: '안녕하세요.' }],
+    subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: false, sourceFingerprint: fingerprint(timedRecord().transcript) } };
+  const failed = { ...record, id: 'failed-hash-repair', status: 'failed', summary: '', subtitleTranslationPartial: undefined,
+    subtitleTranslationProgress: undefined, error: '합성 복구 실패: 503 ServiceUnavailable' };
+  const hash = delayedBrowserHash();
+  const ui = await boot({ records: [record], browserCrypto: hash.browserCrypto,
+    repairResponse: { id: 'repair-hash-job', source: 'repair', repairOf: record.id, status: 'completed', total: 1, completed: 1, results: [failed] } });
+  const opening = ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(hash.pending.length, 1);
+  hash.pending.shift()();
+  await opening;
+  await ui.elements.get('catalogDetailRepair').dispatch('click');
+  assert.equal(hash.pending.length, 1, 'showing the retained result starts another independent hash check');
+  assert(ui.elements.get('catalogDetailWarnings').textContent.includes(failed.error));
+  hash.pending.shift()();
+  await flush();
+  assert.equal(ui.elements.get('catalogEditSummary').value, record.summary);
+  assert(ui.elements.get('catalogDetailWarnings').textContent.includes(`이번 복구 분석: ${failed.error}`));
+  assert.equal(ui.elements.get('catalogDetailWarnings').classList.contains('hidden'), false);
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+  assert.equal(ui.elements.get('catalogSubtitleDownloadLanguage').value, 'ko');
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/repair')).length, 1);
+});
+
+test('corrupt partial Korean timing and progress never enable Korean viewing or download', async () => {
+  for (const changes of [
+    { subtitleTranslationPartial: [{ start: 1.26, end: 3.5, text: '잘못된 시간' }] },
+    { subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 2, complete: false, sourceComplete: false, sourceFingerprint: fingerprint(timedRecord().transcript) } },
+    { subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: false, sourceFingerprint: '0'.repeat(64) } },
+    { subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: 'false', sourceFingerprint: fingerprint(timedRecord().transcript) } }
+  ]) {
+    const record = { ...timedRecord(), subtitleTranslation: undefined, subtitleLanguage: undefined,
+      subtitleTranslationPartial: [{ start: 1.25, end: 3.5, text: '안녕하세요.' }],
+      subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: false, sourceFingerprint: fingerprint(timedRecord().transcript) }, ...changes };
+    const ui = await boot({ records: [record] });
+    await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+    assert.equal(ui.elements.get('catalogSubtitleView').value, 'original');
+    assert.equal(ui.elements.get('catalogSubtitleDownloadLanguage').value, 'original');
+  }
 });
 
 test('a completed fast transcript discloses the omitted coverage audit without claiming it ran or failed', async () => {

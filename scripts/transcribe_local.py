@@ -11,6 +11,7 @@ import sys
 SAMPLE_RATE = 16000
 MAX_UNRESOLVED = 200
 MAX_BOUNDARY_RANGES = 10000
+RECOGNITION_REVISION = 2
 DLL_DIRECTORY_HANDLES = []
 DLL_DIRECTORY_PATHS = set()
 DLL_LIBRARY_HANDLES = []
@@ -270,7 +271,7 @@ def cues_from_segment(segment, offset, duration, ownership=None):
             continue
         if ownership and not ownership[0] <= (left + right) / 2 < ownership[1]:
             continue
-        if words and left < words[-1]['start']:
+        if words and (left < words[-1]['start'] or right < words[-1]['end'] - 0.02):
             invalid_words = True
             continue
         words.append({'start': left, 'end': right, 'word': word, 'probability': probability})
@@ -288,7 +289,7 @@ def cues_from_segment(segment, offset, duration, ownership=None):
     groups, group = [], []
     for word in words:
         previous_text = ''.join(item['word'] for item in group).strip()
-        if group and (word['end'] - group[0]['start'] > 6.0 or len(previous_text + word['word']) > 56
+        if group and word['start'] >= group[-1]['end'] - 1e-6 and (word['end'] - group[0]['start'] > 6.0 or len(previous_text + word['word']) > 56
                       or word['start'] - group[-1]['end'] > 0.8
                       or (previous_text.endswith(('.', '?', '!', '。', '？', '！'))
                           and group[-1]['end'] - group[0]['start'] >= 1.2)):
@@ -299,7 +300,7 @@ def cues_from_segment(segment, offset, duration, ownership=None):
         groups.append(group)
     cues = []
     for words in groups:
-        cue = {'start': words[0]['start'], 'end': words[-1]['end'],
+        cue = {'start': words[0]['start'], 'end': max(word['end'] for word in words),
                'text': ''.join(word['word'] for word in words).strip(), 'words': words, **metadata}
         if low_confidence(cue):
             cue['qualityFlags'] = ['low_confidence']
@@ -333,7 +334,7 @@ def reconcile_window_boundaries(cues):
                     filtered.append(word)
             if not filtered:
                 continue
-            cue.update(words=filtered, start=filtered[0]['start'], end=filtered[-1]['end'],
+            cue.update(words=filtered, start=filtered[0]['start'], end=max(word['end'] for word in filtered),
                        text=''.join(word['word'] for word in filtered).strip())
         elif any(text_key(cue['text']) == text_key(old['text']) and same_observation(cue, old, boundary)
                  for old in previous):
@@ -358,6 +359,86 @@ def recovery_windows(targets, duration, budget, maximum=30.0):
     return windows
 
 
+def rebuild_word_cues(words, templates, duration):
+    if not words:
+        return []
+    words = sorted(words, key=lambda word: (word['start'], word['end']))
+    raw = {'start': min(word['start'] for word in words), 'end': max(word['end'] for word in words),
+           'text': ''.join(word['word'] for word in words).strip(), 'words': words}
+    logprobs = [cue['avgLogprob'] for cue in templates if finite(cue.get('avgLogprob'))]
+    silence = [cue['noSpeechProbability'] for cue in templates if finite(cue.get('noSpeechProbability'))]
+    if logprobs:
+        raw['avg_logprob'] = min(logprobs)
+    if silence:
+        raw['no_speech_prob'] = max(silence)
+    return cues_from_segment(raw, 0, duration)
+
+
+def recovery_candidates_for_targets(cues, targets, duration):
+    """Select actual aligned words; a context cue's midpoint can miss its tail."""
+    selected = []
+    for cue in cues:
+        if any(start <= (cue['start'] + cue['end']) / 2 <= end for start, end in targets):
+            # Preserve the established full-cue recovery path. A detector can
+            # start after the actual opening word; trimming to its span would
+            # discard native decoded dialogue even though this cue is in scope.
+            selected.append(cue)
+        elif cue.get('words'):
+            words = [word for word in cue['words'] if any(
+                min(word['end'], end) - max(word['start'], start) > 0.001 for start, end in targets)]
+            selected.extend(rebuild_word_cues(words, [cue], duration))
+    return selected
+
+
+def word_time_overlap(left, right):
+    overlap = min(left['end'], right['end']) - max(left['start'], right['start'])
+    return overlap > 0.001 and overlap / min(left['end'] - left['start'], right['end'] - right['start']) > 0.35
+
+
+def merge_novel_recovery_words(result, candidate):
+    """Keep valid new words even when their decoding cue contains old context."""
+    result, novel, blocked = list(result), [], False
+    for word in candidate['words']:
+        conflict = False
+        for index, old in enumerate(result):
+            existing = old.get('words') or [{'start': old['start'], 'end': old['end']}]
+            if any(word_time_overlap(word, previous) for previous in existing):
+                conflict = True
+                break
+            if (not old.get('words') and min(old['end'], word['end'])
+                    - max(old['start'], word['start']) > 0.001):
+                # Native segment text cannot be sliced to make room for an
+                # overlapping word. Preserve it, and make this ambiguity visible.
+                flags = list(dict.fromkeys(old.get('qualityFlags', []) + ['recovery_alignment_conflict']))
+                result[index] = {**old, 'qualityFlags': flags}
+                conflict, blocked = True, True
+                break
+        if not conflict:
+            novel.append(word)
+    if not novel:
+        return result, 0, blocked
+    outside = []
+    for word in novel:
+        touching = [index for index, old in enumerate(result) if old.get('words')
+                    and min(old['end'], word['end']) - max(old['start'], word['start']) > 0.001]
+        if touching:
+            old_cues = [result.pop(index) for index in reversed(touching)]
+            words = [previous for old in old_cues for previous in old['words']] + [word]
+            result.extend(rebuild_word_cues(words, old_cues + [candidate],
+                                           max(old['end'] for old in old_cues + [candidate])))
+        else:
+            outside.append(word)
+    # Do not group added words across an existing subtitle interval. This keeps
+    # old dialogue in place and avoids introducing overlapping SRT captions.
+    buckets = {}
+    for word in outside:
+        position = sum(old['end'] <= word['start'] for old in result)
+        buckets.setdefault(position, []).append(word)
+    for words in buckets.values():
+        result.extend(rebuild_word_cues(words, [candidate], max(word['end'] for word in words)))
+    return result, len(novel), blocked
+
+
 def merge_recovery(original, candidates):
     """Keep established dialogue unless a better aligned recheck replaces it."""
     result = list(original)
@@ -370,17 +451,22 @@ def merge_recovery(original, candidates):
             overlap = max(0.0, min(cue['end'], candidate['end']) - max(cue['start'], candidate['start']))
             if overlap > 0.15 and overlap / min(cue['end'] - cue['start'], candidate['end'] - candidate['start']) > 0.35:
                 overlaps.append((index, cue, overlap))
-        if overlaps:
-            if len(overlaps) != 1:
-                continue
+        if len(overlaps) == 1:
             index, old, overlap = overlaps[0]
             old_score, new_score = cue_confidence(old), cue_confidence(candidate)
-            if (not needs_review(old) or old_score is None or new_score is None
-                    or new_score < old_score + 0.1 or overlap / (old['end'] - old['start']) < 0.7):
+            if (needs_review(old) and old_score is not None and new_score is not None
+                    and new_score >= old_score + 0.1 and overlap / (old['end'] - old['start']) >= 0.7):
+                result[index] = candidate
+                accepted += 1
                 continue
-            result[index] = candidate
-        else:
-            result.append(candidate)
+        if candidate.get('words'):
+            result, added, blocked = merge_novel_recovery_words(result, candidate)
+            if added or blocked:
+                accepted += added
+                continue
+        if overlaps:
+            continue
+        result.append(candidate)
         accepted += 1
     return sorted(result, key=lambda cue: (cue['start'], cue['end'])), accepted
 
@@ -484,8 +570,8 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
             segments, _ = model.transcribe(chunk, **retry_options)
             candidates = []
             for segment in segments:
-                candidates.extend(cue for cue in cues_from_segment(segment, start, duration)
-                                  if any(left <= (cue['start'] + cue['end']) / 2 <= right for left, right in targets))
+                candidates.extend(recovery_candidates_for_targets(
+                    cues_from_segment(segment, start, duration), targets, duration))
             # No decoded speech is valid: leave intervals empty, never fill text.
             cues, _ = merge_recovery(cues, candidates)
             rechecked += end - start
@@ -500,6 +586,8 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
                       for start, end in review_gaps(unresolved_gaps)]
         unresolved.extend({'start': cue['start'], 'end': cue['end'], 'reason': 'low_confidence'}
                           for cue in cues if needs_review(cue))
+        unresolved.extend({'start': cue['start'], 'end': cue['end'], 'reason': 'recovery_alignment_conflict'}
+                          for cue in cues if 'recovery_alignment_conflict' in cue.get('qualityFlags', []))
         if boundary_diagnostics.get('boundaryLimitExceeded'):
             unresolved.append({**boundary_diagnostics['boundaryLimitExceeded'], 'reason': 'boundary_range_limit'})
             warning = f'발화 경계 진단이 {MAX_BOUNDARY_RANGES}개를 초과했습니다. 초과 구간의 시간 합계는 미해결 시간에 포함해 보관했습니다.'
@@ -533,6 +621,7 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
              'boundaryRanges': boundary_ranges,
              'recheckedSeconds': rechecked, 'recoveryBudgetSeconds': budget, 'unresolved': unresolved[:MAX_UNRESOLVED]}
     quality = {'profile': profile, 'model': model_name, 'device': device, 'computeType': compute_type,
+               'recognitionRevision': RECOGNITION_REVISION,
                'durationSeconds': duration, 'processedSeconds': processed, 'wordTimestamps': all(bool(cue.get('words')) for cue in cues),
                'audit': audit, 'warnings': warnings}
     emitter({'type': 'transcript', 'segments': cues})

@@ -8,7 +8,7 @@ const { reuseCachedExtraction } = require('../lib/cached-extraction');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const sourceId = 'a'.repeat(32), attemptId = 'b'.repeat(32);
-const completeAccurate = () => ({ version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+const completeAccurate = () => ({ version: 1, recognitionRevision: 2, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
   language: 'ja', duration: 60, processedUntil: 60, wordTimestamps: true,
   audit: { complete: true, speechSeconds: 4, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] });
 
@@ -39,7 +39,7 @@ async function fixture(t) {
   };
   const providerImpl = { async analyzeExtracted(record) { calls.provider++; return { ...record, summary: '새 요약', plot: '새 줄거리', status: 'completed' }; } };
   const lanImpl = {
-    async checkRemoteServer() { calls.connection++; return { ready: true, capabilities: ['subtitle-quality-v1'] }; },
+    async checkRemoteServer() { calls.connection++; return { ready: true, capabilities: ['subtitle-quality-v1', 'subtitle-quality-v2'] }; },
     async sendRemoteAnalysis(record, receivedOptions) {
       calls.remote++; assert.equal(receivedOptions.audioPath, undefined);
       const { extractionReusedFrom, ...transportRecord } = record;
@@ -159,6 +159,7 @@ test('cancelled cached repair propagates abort without re-extraction or modifyin
 
 test('accurate Korean repair refuses sidecars, small-model and incomplete cached recognition', async t => {
   const variations = [{}, { transcriptionQuality: { ...completeAccurate(), model: 'small' } },
+    { transcriptionQuality: { ...completeAccurate(), recognitionRevision: undefined } }, { transcriptionQuality: { ...completeAccurate(), recognitionRevision: 1 } },
     { transcriptionQuality: { ...completeAccurate(), profile: 'fast' } }, { transcriptionQuality: { ...completeAccurate(), complete: false } },
     { transcriptionQuality: { ...completeAccurate(), processedUntil: 20 } },
     { transcriptionQuality: completeAccurate(), transcriptSource: 'sidecar:neutral.ja.srt' },
@@ -216,7 +217,7 @@ test('a new accurate Korean analysis sends whole lossless audio even when extern
     },
     providerImpl: {},
     lanImpl: {
-      checkRemoteServer: async () => ({ ready: true, capabilities: ['subtitle-quality-v1'] }),
+      checkRemoteServer: async () => ({ ready: true, capabilities: ['subtitle-quality-v1', 'subtitle-quality-v2'] }),
       sendRemoteAnalysis: async (record, options) => {
         remote++;
         assert.equal(options.subtitleQuality, 'accurate');
@@ -235,7 +236,7 @@ test('a new accurate Korean analysis sends whole lossless audio even when extern
 
 test('an old server is rejected before a long accurate audio extraction begins', async t => {
   const f = await fixture(t);
-  let decoded = 0, uploads = 0;
+  let decoded = 0, uploads = 0, capabilities = ['timed-subtitles-v1'];
   const engine = createCatalogEngine({
     extractionImpl: {
       analyzeVideo: async file => ({ ...f.saved, ...file, status: 'completed', error: null }),
@@ -243,15 +244,17 @@ test('an old server is rejected before a long accurate audio extraction begins',
       runProcess: async () => { decoded++; }
     },
     providerImpl: {},
-    lanImpl: { checkRemoteServer: async () => ({ ready: true, capabilities: ['timed-subtitles-v1'] }),
+    lanImpl: { checkRemoteServer: async () => ({ ready: true, capabilities }),
       sendRemoteAnalysis: async () => { uploads++; } }
   });
-  const result = await engine.analyzeVideo(f.file, { mode: 'remote', subtitleLanguage: 'ko', subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
-  assert.equal(result.status, 'partial');
-  assert.match(result.error, /분석 서버 PC도 새 버전으로 업데이트/);
+  for (capabilities of [['timed-subtitles-v1'], ['timed-subtitles-v1', 'subtitle-quality-v1']]) {
+    const result = await engine.analyzeVideo(f.file, { mode: 'remote', subtitleLanguage: 'ko', subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
+    assert.equal(result.status, 'partial');
+    assert.match(result.error, /분석 서버 PC도 새 버전으로 업데이트/);
+    assert.deepEqual(result.transcript, f.saved.transcript);
+  }
   assert.equal(decoded, 0);
   assert.equal(uploads, 0);
-  assert.deepEqual(result.transcript, f.saved.transcript);
 });
 
 test('accurate source identity rejects replaced files but preserves cached recovery for missing originals and legacy fast mode', async t => {

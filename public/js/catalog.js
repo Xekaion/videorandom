@@ -6,10 +6,11 @@
   const MAX_BATCH = 1000;
   const SORT_STORAGE_KEY = 'video_catalog_sort';
   const catalogSort = window.videoCatalogSort;
+  const verifiedPartialSources = new WeakMap();
   const state = {
     scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0,
     config: null, job: null, pollTimer: null, starting: false, exporting: false,
-    refreshing: false, detailId: null, saving: false, subtitleDownloading: false, hasModePreference: false,
+    refreshing: false, detailId: null, detailRequest: 0, saving: false, subtitleDownloading: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
     autoPick: null, autoTimer: null, autoSettingsTimer: null,
     autoPolling: false, autoBusy: false, autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
@@ -672,6 +673,11 @@
       // the check was in flight stays untouched and is not resumed automatically.
       applyConnection(result.connection);
       if (state.connectionRevision === revision) {
+        if (subtitleQuality($('catalogSubtitleQuality').value) === 'accurate' && !result.capabilities?.includes('subtitle-quality-v2')) {
+          $('catalogRemoteStatus').textContent = '연결 정보는 저장했습니다. 최신 자막 누락 검수를 사용하려면 분석 서버 PC도 1.6.1 이상으로 업데이트하고 새 버전을 실행해 주세요.';
+          $('catalogRemoteStatus').classList.add('catalog-error');
+          return;
+        }
         $('catalogRemoteStatus').textContent = '연결 완료 · 이 PC에 저장했습니다. 다음 실행과 업데이트에도 자동으로 연결합니다.';
         await syncAutoPick({ resume: true });
       } else $('catalogRemoteStatus').textContent = '확인한 연결을 저장했습니다. 새로 입력한 연결은 연결 확인을 눌러 주세요.';
@@ -953,10 +959,11 @@
 
   function findRecord(id) { return [...state.records.values()].find(record => record.id === id); }
 
-  function openDetail(id) {
+  async function openDetail(id) {
     const record = findRecord(id);
     if (!record) return;
     state.detailId = id;
+    const detailRequest = ++state.detailRequest;
     $('catalogDetailTitle').textContent = record.name || '영상 상세';
     $('catalogDetailPath').textContent = record.path;
     const analyzedAt = record.analyzedAt ? new Date(record.analyzedAt) : null;
@@ -993,20 +1000,51 @@
     });
     if (!frames(record).length) gallery.append(make('p', 'catalog-muted', '추출된 대표 이미지가 없습니다. 분석 상태와 안내를 확인해 주세요.'));
     $('catalogGallery').replaceChildren(gallery);
-    const translated = hasTranslatedSubtitles(record);
+    const translated = hasTranslatedSubtitles(record) || partialTranslatedSubtitles(record).length > 0;
     $('catalogSubtitleView').value = translated ? 'both' : 'original';
     $('catalogSubtitleDownloadLanguage').value = translated ? 'ko' : 'original';
     renderTranscript(record);
     if (!$('catalogDetail').open) $('catalogDetail').showModal();
     $('catalogDetail').scrollTop = 0;
+    if (Array.isArray(record.subtitleTranslationPartial) && window.crypto?.subtle) {
+      try {
+        const source = JSON.stringify(record.transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]));
+        const digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+        verifiedPartialSources.set(record, Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''));
+      } catch (_) { verifiedPartialSources.delete(record); }
+      if (state.detailId !== id || state.detailRequest !== detailRequest || !$('catalogDetail').open) return;
+      if (!hasTranslatedSubtitles(record) && partialTranslatedSubtitles(record).length) {
+        $('catalogSubtitleView').value = 'both';
+        $('catalogSubtitleDownloadLanguage').value = 'ko';
+      }
+      // Update only subtitle controls: a later repair warning or a closed dialog
+      // must not be overwritten by completion of this asynchronous hash check.
+      renderTranscript(record);
+    }
   }
 
   function hasTranslatedSubtitles(record) {
     const original = Array.isArray(record?.transcript) ? record.transcript : [];
     const translated = record?.subtitleTranslation;
-    return original.length > 0 && Array.isArray(translated) && translated.length === original.length
+    return record?.subtitleLanguage === 'ko' && record.subtitleTranslationProgress?.complete !== false
+      && original.length > 0 && Array.isArray(translated) && translated.length === original.length
       && translated.every((cue, index) => cue && typeof cue.text === 'string' && cue.text.trim()
         && cue.start === original[index].start && cue.end === original[index].end);
+  }
+
+  function partialTranslatedSubtitles(record) {
+    const source = record?.transcript;
+    const partial = record?.subtitleTranslationPartial;
+    const progress = record?.subtitleTranslationProgress;
+    if (!Array.isArray(source) || source.length > 50000 || !Array.isArray(partial) || !partial.length || partial.length > source.length
+      || progress?.version !== 1 || progress.language !== 'ko' || progress.complete !== false
+      || typeof progress.sourceComplete !== 'boolean' || typeof progress.sourceFingerprint !== 'string'
+      || verifiedPartialSources.get(record) !== progress.sourceFingerprint.toLowerCase()
+      || progress.totalCues !== source.length || progress.completedCues !== partial.length) return [];
+    return partial.every((cue, index) => cue && typeof cue.text === 'string' && cue.text.trim()
+      && cue.text.length <= 10000 && Number.isFinite(cue.start) && Number.isFinite(cue.end) && cue.start >= 0 && cue.end > cue.start
+      && cue.start === source[index]?.start && cue.end === source[index]?.end
+      && (cue.id === undefined || cue.id === source[index]?.id)) ? partial : [];
   }
 
   function renderTranscript(record = findRecord(state.detailId)) {
@@ -1014,10 +1052,13 @@
     const sourceNames = { sidecar: '동반 자막 파일', embedded: '영상 내 텍스트 자막', audio: '전체 오디오 음성 인식', none: '대사 / 자막 없음' };
     const languageNames = { ja: '일본어', zh: '중국어', ko: '한국어', en: '영어' };
     const transcript = Array.isArray(record.transcript) ? record.transcript : [];
-    const translated = hasTranslatedSubtitles(record);
+    const completeTranslation = hasTranslatedSubtitles(record);
+    const translations = completeTranslation ? record.subtitleTranslation : partialTranslatedSubtitles(record);
+    const translated = translations.length > 0;
+    const partial = translated && !completeTranslation;
     const sourceKind = String(record.transcriptSource || '').split(':')[0];
     const language = record.transcriptLanguage && record.transcriptLanguage !== 'auto' ? ` · 원문 ${languageNames[record.transcriptLanguage] || record.transcriptLanguage}` : '';
-    $('catalogTranscriptSource').textContent = `출처: ${sourceNames[sourceKind] || record.transcriptSource || '없음'} · ${transcript.length.toLocaleString()}구간${language}${translated ? ' · 한국어 번역 있음' : ''}`;
+    $('catalogTranscriptSource').textContent = `출처: ${sourceNames[sourceKind] || record.transcriptSource || '없음'} · ${transcript.length.toLocaleString()}구간${language}${translated ? partial ? ' · 한국어 부분 번역 있음' : ' · 한국어 번역 있음' : ''}`;
     const view = translated ? $('catalogSubtitleView').value : 'original';
     if (!translated) {
       $('catalogSubtitleView').value = 'original';
@@ -1026,22 +1067,27 @@
     $('catalogSubtitleView').querySelector('option[value="ko"]').disabled = !translated;
     $('catalogSubtitleView').querySelector('option[value="both"]').disabled = !translated;
     $('catalogSubtitleDownloadLanguage').querySelector('option[value="ko"]').disabled = !translated;
+    $('catalogSubtitleDownloadLanguage').querySelector('option[value="ko"]').textContent = partial ? `한국어 부분 번역 (${translations.length} / ${transcript.length}구간)` : '한국어 번역';
     $('catalogSubtitleSrt').disabled = !transcript.length || state.subtitleDownloading;
     $('catalogSubtitleVtt').disabled = !transcript.length || state.subtitleDownloading;
-    const message = record.subtitleError ? `한국어 자막 생성 실패 · ${record.subtitleError} 원문 자막은 그대로 보관됩니다.`
+    const message = partial ? `검수된 한국어 부분 자막 ${translations.length.toLocaleString()} / ${transcript.length.toLocaleString()}구간을 표시합니다. 원어 인식이나 번역 확인이 남아 있어 전체 영상 자막이 아닙니다. 부분 SRT / VTT로 직접 저장할 수 있습니다.${record.subtitleError ? `\n${record.subtitleError}` : ''}`
+      : record.subtitleError ? `한국어 자막 생성 실패 · ${record.subtitleError} 원문 자막은 그대로 보관됩니다.`
       : translated ? '한국어 번역은 원문 자막의 시작·종료 시각을 그대로 사용합니다. SRT / VTT를 영상과 함께 사용할 수 있습니다.'
       : '한국어 번역 자막은 아직 없습니다. 자동 요약 방식에서 ‘한국어 번역 자막도 생성’을 켜고 복구 / 다시 분석하세요. 원문 SRT / VTT는 바로 저장할 수 있습니다.';
     $('catalogSubtitleNotice').textContent = message;
     $('catalogSubtitleNotice').classList.remove('hidden');
     $('catalogSubtitleNotice').classList.toggle('catalog-error', !!record.subtitleError);
     renderSubtitleQuality(record);
-    renderSubtitleAutoSave(record, translated);
+    renderSubtitleAutoSave(record, completeTranslation);
     const lines = document.createDocumentFragment();
     transcript.forEach((segment, index) => {
       const line = make('div', 'catalog-transcript-line');
       const body = make('div', 'catalog-transcript-text');
       if (view !== 'ko') body.append(make('p', translated && view === 'both' ? 'catalog-transcript-original' : '', segment.text));
-      if (translated && view !== 'original') body.append(make('p', 'catalog-transcript-translation', record.subtitleTranslation[index].text));
+      if (translated && view !== 'original') {
+        if (translations[index]) body.append(make('p', 'catalog-transcript-translation', translations[index].text));
+        else body.append(make('p', 'catalog-muted', `한국어 번역 대기${view === 'ko' ? ` · 원문: ${segment.text}` : ''}`));
+      }
       line.append(make('span', 'catalog-transcript-time', `${subtitleTime(segment.start)}${segment.end != null ? ` – ${subtitleTime(segment.end)}` : ''}`), body);
       lines.append(line);
     });
@@ -1054,10 +1100,14 @@
     const saved = record.subtitleAutoSave;
     const path = typeof saved?.path === 'string' && saved.path ? `\n${saved.path}` : '';
     const error = typeof saved?.error === 'string' && saved.error ? saved.error : '원본 영상 폴더에 자막 파일을 쓰지 못했습니다.';
-    const message = saved?.status === 'saved' ? `한국어 SRT를 원본 영상 옆에 자동 저장했습니다.${path}`
+    let message = saved?.status === 'saved' ? saved.updated === true ? `플레이어용 한국어 SRT를 최신 분석으로 갱신했습니다.${path}${typeof saved.backupPath === 'string' ? `\n이전 자막 백업: ${saved.backupPath}` : ''}` : `한국어 SRT를 원본 영상 옆에 자동 저장했습니다.${path}`
       : saved?.status === 'unchanged' ? `동일한 한국어 SRT가 원본 영상 옆에 있어 그대로 사용합니다.${path}`
       : saved?.status === 'failed' ? `영상 폴더에 한국어 SRT 자동 저장 실패 · ${error}${path}\n저장된 번역 자막은 계속 사용할 수 있습니다. 아래 SRT 저장 버튼으로 내려받으세요.`
       : translated ? '이 기록에는 원본 영상 폴더의 SRT 자동 저장 내역이 없습니다. 아래 SRT 저장 버튼으로 내려받을 수 있습니다.' : '';
+    if (saved?.status === 'failed' && typeof saved.backupPath === 'string') message += `\n보존한 자막 백업: ${saved.backupPath}`;
+    if (['saved', 'unchanged'].includes(saved?.status)) message += /\.videorandom-[a-f0-9]/i.test(saved.path || '')
+      ? '\n기존 자막을 보존해 별도 이름으로 저장했습니다. 플레이어에서 위 경로의 SRT를 직접 불러오세요.'
+      : '\n이미 재생 중인 플레이어에서는 자막을 다시 불러오거나 영상을 다시 여세요.';
     notice.textContent = message;
     notice.classList.toggle('hidden', !message);
     notice.classList.toggle('catalog-error', saved?.status === 'failed');
@@ -1082,6 +1132,7 @@
     const processed = Number.isFinite(quality.processedUntil) ? time(quality.processedUntil) : '확인 중';
     const duration = Number.isFinite(quality.duration) ? time(quality.duration) : time(record.duration);
     const lines = [`음성 인식: ${quality.model || '모델 미상'} · ${quality.profile === 'accurate' ? '정확도 우선' : '빠름'} · 처리 ${processed} / ${duration}`];
+    if (quality.profile === 'accurate' && quality.recognitionRevision !== 2) lines.push('이전 인식 방식으로 저장한 결과입니다. 최신 누락 검수를 적용하려면 정확도 우선으로 복구 / 다시 분석하세요.');
     const unauditedFast = quality.profile === 'fast' && quality.complete === true && audit.complete !== true && !unresolved.length;
     lines.push(unauditedFast ? '빠르게 모드는 발화 누락 검사를 생략합니다. 자막을 더 정확히 만들려면 정확도 우선으로 다시 분석하세요.' : quality.complete === true && audit.complete === true && !unresolved.length
       ? '전체 음성 처리와 발화 누락 점검을 마쳤습니다. 인식과 번역의 정확성은 원문과 대조해 확인할 수 있습니다.'
@@ -1097,10 +1148,11 @@
     const record = findRecord(state.detailId);
     if (!record || state.subtitleDownloading) return;
     const language = $('catalogSubtitleDownloadLanguage').value === 'ko' ? 'ko' : 'original';
+    const partial = language === 'ko' && !hasTranslatedSubtitles(record) && partialTranslatedSubtitles(record).length > 0;
     state.subtitleDownloading = true;
     renderTranscript(record);
     try {
-      const response = await fetch(`/api/analysis/results/${encodeURIComponent(record.id)}/subtitles?format=${format}&language=${language}`);
+      const response = await fetch(`/api/analysis/results/${encodeURIComponent(record.id)}/subtitles?format=${format}&language=${language}${partial ? '&partial=1' : ''}`);
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.error || `자막 저장 실패 (${response.status})`);
@@ -1110,13 +1162,13 @@
       const anchor = make('a');
       const basename = String(record.name || '영상').replace(/\.[^.]+$/, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_');
       anchor.href = url;
-      anchor.download = `${basename}.${language === 'ko' ? 'ko' : 'original'}.${format}`;
+      anchor.download = `${basename}.${language === 'ko' ? 'ko' : 'original'}${partial ? '.partial' : ''}.${format}`;
       document.body.append(anchor);
       anchor.click();
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url), 30000);
       if (state.detailId === record.id) {
-        $('catalogSubtitleNotice').textContent = `${language === 'ko' ? '한국어 번역' : '원문'} ${format.toUpperCase()} 자막을 저장했습니다.`;
+        $('catalogSubtitleNotice').textContent = partial ? `한국어 부분 ${format.toUpperCase()} 자막을 저장했습니다. 원어 인식이나 번역 확인이 남아 있습니다. 복구 / 다시 분석으로 이어서 완성하세요.` : `${language === 'ko' ? '한국어 번역' : '원문'} ${format.toUpperCase()} 자막을 저장했습니다.`;
         $('catalogSubtitleNotice').classList.remove('catalog-error');
       }
     } catch (error) {
@@ -1229,6 +1281,7 @@
     $('catalogSubtitleSrt').addEventListener('click', () => downloadSubtitles('srt'));
     $('catalogSubtitleVtt').addEventListener('click', () => downloadSubtitles('vtt'));
     $('catalogDetail').addEventListener('close', () => {
+      state.detailRequest++;
       const origin = [...document.querySelectorAll('.catalog-file-name')].find(element => element.dataset.recordId === String(state.detailId));
       (origin || $('catalogRefresh')).focus();
     });

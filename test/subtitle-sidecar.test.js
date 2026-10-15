@@ -35,6 +35,167 @@ async function noTemporaryFiles(root) {
   assert.equal((await fs.readdir(root)).some(name => name.endsWith('.tmp')), false);
 }
 
+function revisedRecord(record) {
+  return { ...record, id: 'fedcba9876543210fedcba9876543210', subtitleTranslation: record.subtitleTranslation.map((cue, index) =>
+    ({ ...cue, text: index ? '오늘은 날씨가 아주 좋습니다.' : '다시 안녕하세요.' })) };
+}
+
+async function ownedPrevious(f) {
+  const previous = await saveKoreanSubtitle(f.record);
+  assert.equal(previous.path, f.normal);
+  return [{ path: previous.path, sha256: previous.sha256 }];
+}
+
+test('trusted generated Korean subtitles update the canonical player filename and preserve the exact former bytes in a unique backup', async t => {
+  const f = await fixture(t);
+  const generatedSubtitleFiles = await ownedPrevious(f);
+  const revision = revisedRecord(f.record);
+  const result = await saveKoreanSubtitle(revision, { generatedSubtitleFiles });
+  assert.equal(result.status, 'saved');
+  assert.equal(result.path, f.normal);
+  assert.equal(result.updated, true);
+  assert.match(result.backupPath, /\.ko\.srt\.videorandom-[a-f0-9]{32}\.bak$/);
+  assert.deepEqual(await fs.readFile(result.backupPath), f.bytes);
+  assert.equal((await fs.readFile(result.path, 'utf8')), subtitleText(revision, { language: 'ko' }));
+  assert.equal(result.sha256, crypto.createHash('sha256').update(await fs.readFile(result.path)).digest('hex'));
+  await noTemporaryFiles(f.root);
+});
+
+test('missing, mismatched, relative or edited provenance never authorizes replacing an existing subtitle', async t => {
+  for (const mode of ['missing', 'mismatched', 'relative', 'edited', 'record-only']) {
+    const f = await fixture(t);
+    let generatedSubtitleFiles = await ownedPrevious(f);
+    if (mode === 'missing' || mode === 'record-only') generatedSubtitleFiles = [];
+    if (mode === 'mismatched') generatedSubtitleFiles = [{ path: f.normal, sha256: '0'.repeat(64) }];
+    if (mode === 'relative') generatedSubtitleFiles = [{ path: path.basename(f.normal), sha256: generatedSubtitleFiles[0].sha256 }];
+    if (mode === 'edited') await fs.writeFile(f.normal, 'manual edited subtitles');
+    const before = await fs.readFile(f.normal);
+    const result = await saveKoreanSubtitle({ ...revisedRecord(f.record), generatedSubtitleFiles: [{ path: f.normal, sha256: crypto.createHash('sha256').update(before).digest('hex') }] }, { generatedSubtitleFiles });
+    assert.equal(result.status, 'saved', mode);
+    assert.notEqual(result.path, f.normal, mode);
+    assert.equal(result.updated, undefined);
+    assert.deepEqual(await fs.readFile(f.normal), before);
+    assert.equal((await fs.readdir(f.root)).some(name => name.endsWith('.bak')), false);
+    await noTemporaryFiles(f.root);
+  }
+});
+
+test('a backup-name collision is preserved and a fresh random backup name is used', async t => {
+  const f = await fixture(t);
+  const generatedSubtitleFiles = await ownedPrevious(f);
+  let collision;
+  const io = { ...fs, lstat: async filename => {
+    if (!collision && filename.endsWith('.bak')) { collision = filename; await fs.writeFile(filename, 'user backup'); }
+    return fs.lstat(filename);
+  } };
+  const result = await saveKoreanSubtitle(revisedRecord(f.record), { generatedSubtitleFiles, io });
+  assert.equal(result.updated, true);
+  assert.notEqual(result.backupPath, collision);
+  assert.equal(await fs.readFile(collision, 'utf8'), 'user backup');
+  assert.deepEqual(await fs.readFile(result.backupPath), f.bytes);
+  await noTemporaryFiles(f.root);
+});
+
+test('an edit racing the backup move is restored without replacing its contents and the new subtitles use an alternate', async t => {
+  const f = await fixture(t);
+  const generatedSubtitleFiles = await ownedPrevious(f);
+  const io = { ...fs, rename: async (source, destination) => {
+    if (source === f.normal) await fs.writeFile(source, 'manual concurrent edit');
+    return fs.rename(source, destination);
+  } };
+  const revision = revisedRecord(f.record);
+  const result = await saveKoreanSubtitle(revision, { generatedSubtitleFiles, io });
+  assert.equal(result.status, 'saved');
+  assert.notEqual(result.path, f.normal);
+  assert.equal(result.updated, undefined);
+  assert.equal(await fs.readFile(f.normal, 'utf8'), 'manual concurrent edit');
+  assert.equal(await fs.readFile(result.path, 'utf8'), subtitleText(revision, { language: 'ko' }));
+  const backups = (await fs.readdir(f.root)).filter(name => name.endsWith('.bak'));
+  assert.equal(backups.length, 1);
+  assert.equal(await fs.readFile(path.join(f.root, backups[0]), 'utf8'), 'manual concurrent edit');
+  await noTemporaryFiles(f.root);
+});
+
+test('a new canonical subtitle created between backup and publication is never overwritten', async t => {
+  const f = await fixture(t);
+  const generatedSubtitleFiles = await ownedPrevious(f);
+  let raced = false;
+  const io = { ...fs, link: async (source, destination) => {
+    if (!raced && destination === f.normal && source.endsWith('.tmp')) { raced = true; await fs.writeFile(destination, 'another application wrote this'); }
+    return fs.link(source, destination);
+  } };
+  const result = await saveKoreanSubtitle(revisedRecord(f.record), { generatedSubtitleFiles, io });
+  assert.equal(result.status, 'saved');
+  assert.notEqual(result.path, f.normal);
+  assert.equal(await fs.readFile(f.normal, 'utf8'), 'another application wrote this');
+  const backups = (await fs.readdir(f.root)).filter(name => name.endsWith('.bak'));
+  assert.deepEqual(await fs.readFile(path.join(f.root, backups[0])), f.bytes);
+  await noTemporaryFiles(f.root);
+});
+
+test('cancellation before or after updated publication restores the former canonical file and preserves backup bytes', async t => {
+  for (const phase of ['backup', 'publish']) {
+    const f = await fixture(t);
+    const generatedSubtitleFiles = await ownedPrevious(f);
+    const controller = new AbortController();
+    const io = { ...fs, rename: async (source, destination) => {
+      await fs.rename(source, destination);
+      if (phase === 'backup' && source === f.normal) controller.abort();
+    }, link: async (source, destination) => {
+      await fs.link(source, destination);
+      if (phase === 'publish' && destination === f.normal && source.endsWith('.tmp')) controller.abort();
+    } };
+    assert.equal(await saveKoreanSubtitle(revisedRecord(f.record), { generatedSubtitleFiles, signal: controller.signal, io }), null);
+    assert.deepEqual(await fs.readFile(f.normal), f.bytes, phase);
+    const backups = (await fs.readdir(f.root)).filter(name => name.endsWith('.bak'));
+    assert.ok(backups.length >= 1);
+    assert.ok((await Promise.all(backups.map(name => fs.readFile(path.join(f.root, name))))).some(bytes => bytes.equals(f.bytes)));
+    await noTemporaryFiles(f.root);
+  }
+});
+
+test('a failed update restores the canonical original and returns the retained backup location', async t => {
+  const f = await fixture(t);
+  const generatedSubtitleFiles = await ownedPrevious(f);
+  const io = { ...fs, link: async (source, destination) => {
+    if (destination === f.normal && source.endsWith('.tmp')) throw Object.assign(new Error('fixture denied publish'), { code: 'EACCES' });
+    return fs.link(source, destination);
+  } };
+  const result = await saveKoreanSubtitle(revisedRecord(f.record), { generatedSubtitleFiles, io });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.code, 'EACCES');
+  assert.deepEqual(await fs.readFile(f.normal), f.bytes);
+  assert.deepEqual(await fs.readFile(result.backupPath), f.bytes);
+  await noTemporaryFiles(f.root);
+});
+
+test('concurrent editing after a hard-linked publication never saves altered bytes under the expected generated hash', async t => {
+  const f = await fixture(t);
+  const generatedSubtitleFiles = await ownedPrevious(f);
+  const io = { ...fs, link: async (source, destination) => {
+    await fs.link(source, destination);
+    if (destination === f.normal && source.endsWith('.tmp')) await fs.writeFile(destination, 'user edited the new subtitle');
+  } };
+  const result = await saveKoreanSubtitle(revisedRecord(f.record), { generatedSubtitleFiles, io });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.code, 'SUBTITLE_CHANGED');
+  assert.equal(await fs.readFile(f.normal, 'utf8'), 'user edited the new subtitle');
+  assert.deepEqual(await fs.readFile(result.backupPath), f.bytes);
+  await noTemporaryFiles(f.root);
+});
+
+test('trusted canonical updates work on exFAT-like filesystems using exclusive copy', async t => {
+  const f = await fixture(t);
+  const generatedSubtitleFiles = await ownedPrevious(f);
+  const io = { ...fs, link: async () => { throw Object.assign(new Error('fixture unsupported hard link'), { code: 'ENOTSUP' }); },
+    copyFile: async (source, destination, flags) => { assert.equal(flags, COPYFILE_EXCL); await fs.copyFile(source, destination, flags); } };
+  const result = await saveKoreanSubtitle(revisedRecord(f.record), { generatedSubtitleFiles, io });
+  assert.equal(result.updated, true);
+  assert.equal(result.path, f.normal);
+  assert.deepEqual(await fs.readFile(result.backupPath), f.bytes);
+  await noTemporaryFiles(f.root);
+});
+
 test('writes Korean UTF-8 SRT beside the actual source with exact times and a byte hash, then reuses it', async t => {
   const f = await fixture(t);
   const saved = await saveKoreanSubtitle(f.record);

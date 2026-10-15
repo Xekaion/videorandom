@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const express = require('express');
 const { createAnalysisService } = require('../lib/analysis-service');
 const { createLanAnalysis, sendRemoteAnalysis } = require('../lib/lan-analysis');
@@ -110,6 +111,28 @@ test('repair reuses an identical SRT and passes only trusted persisted provenanc
   assert.deepEqual(await fs.readFile(path.join(f.dataDir, 'results', first.id + '.json')), oldJson);
 });
 
+test('repair updates the trusted player subtitle at the same path and retains the previous bytes as a backup', async t => {
+  const f = await fixture(t);
+  let attempts = 0;
+  const client = await f.mount({ analyze: async file => {
+    const record = translated(file);
+    if (++attempts > 1) record.subtitleTranslation[1].text = '뒤쪽에서 인식한 다음 열차 안내입니다.';
+    return record;
+  } });
+  const first = (await finish(client, (await start(client, f.video)).id)).results[0];
+  const previous = await fs.readFile(first.subtitleAutoSave.path);
+  const repair = await client.request(`/results/${first.id}/repair`, { options: { mode: 'codex', subtitleLanguage: 'ko' } });
+  const record = (await finish(client, repair.id)).results[0];
+  assert.equal(record.subtitleAutoSave.status, 'saved');
+  assert.equal(record.subtitleAutoSave.updated, true);
+  assert.equal(record.subtitleAutoSave.generated, true);
+  assert.equal(record.subtitleAutoSave.path, first.subtitleAutoSave.path);
+  assert.match(record.subtitleAutoSave.backupPath, /\.bak$/);
+  assert.deepEqual(await fs.readFile(record.subtitleAutoSave.backupPath), previous);
+  assert.equal(await fs.readFile(record.subtitleAutoSave.path, 'utf8'), subtitleText(record, { language: 'ko' }));
+  assert.notEqual(record.subtitleAutoSave.sha256, first.subtitleAutoSave.sha256);
+});
+
 test('automatic random picks also save Korean SRT without a manual analysis click', async t => {
   const f = await fixture(t), client = await f.mount();
   await client.request('/auto-pick', { options: { mode: 'codex', subtitleLanguage: 'ko' } }, 'PUT');
@@ -118,6 +141,31 @@ test('automatic random picks also save Korean SRT without a manual analysis clic
   assert.equal(record.analysisMode, 'codex');
   assert.equal(record.subtitleAutoSave.path, path.join(f.mediaDir, '열차 안내.ko.srt'));
   assert(await fs.readFile(record.subtitleAutoSave.path, 'utf8'));
+});
+
+test('reviewed partial Korean subtitles require explicit manual export and never replace a player sidecar', async t => {
+  const f = await fixture(t);
+  const playerSubtitle = path.join(f.mediaDir, '열차 안내.ko.srt');
+  await fs.writeFile(playerSubtitle, 'existing player subtitles');
+  const client = await f.mount({ analyze: async file => {
+    const record = translated(file);
+    delete record.subtitleLanguage; delete record.subtitleTranslation;
+    return { ...record, status: 'partial', subtitleError: '원어 일부 구간 확인 필요',
+      subtitleTranslationPartial: [{ ...transcript[0], text: korean[0] }],
+      subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: false,
+        sourceFingerprint: crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex') } };
+  } });
+  const record = (await finish(client, (await start(client, f.video)).id)).results[0];
+  assert.equal(record.subtitleAutoSave, undefined);
+  assert.equal(await fs.readFile(playerSubtitle, 'utf8'), 'existing player subtitles');
+  assert.equal((await client.raw(`/results/${record.id}/subtitles?language=ko`)).status, 400);
+  const response = await client.raw(`/results/${record.id}/subtitles?language=ko&partial=1`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-disposition'), /ko-partial\.srt/);
+  const text = await response.text();
+  assert.match(text, /00:00:00,525 --> 00:00:03,250\n역으로 갑시다\./);
+  assert.equal(text.includes('다음 열차'), false);
+  assert.equal(await fs.readFile(playerSubtitle, 'utf8'), 'existing player subtitles');
 });
 
 test('reusing an identical user-authored Korean SRT does not claim it as generated input', async t => {

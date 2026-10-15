@@ -10,7 +10,7 @@ const { createLanAnalysis, sendRemoteAnalysis, checkRemoteServer, privateAddress
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const MP3 = Buffer.from('ID3tiny-transport-fixture');
 const FLAC = Buffer.from('fLaCtiny-lossless-transport-fixture');
-const quality = (changes = {}) => ({ version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+const quality = (changes = {}) => ({ version: 1, recognitionRevision: 2, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
   language: 'ja', languageProbability: 0.99, duration: 60, processedUntil: 60, wordTimestamps: true,
   audit: { complete: true, speechSeconds: 2, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [], ...changes });
 const fingerprint = transcript => crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex');
@@ -72,7 +72,7 @@ test('relay starts only explicitly and requires private client plus bearer authe
   const f = await fixture(t);
   assert.ok(f.status.connectionCode.length >= 24);
   const status = await (await f.request('/v1/status')).json();
-  assert.deepEqual(status, { ready: true, protocol: 1, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1'] });
+  assert.deepEqual(status, { ready: true, protocol: 1, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2'] });
   assert.equal(JSON.stringify(status).includes(f.status.connectionCode), false);
   assert.equal((await fetch(f.base + '/v1/status')).status, 401);
   assert.equal((await f.request('/v1/status', { headers: { Authorization: 'Bearer ' + 'x'.repeat(32) } })).status, 401);
@@ -140,6 +140,7 @@ test('accurate uploads require lossless FLAC and forward quality options instead
   assert.equal(submitted.status, 202, await submitted.clone().text());
   const result = await finished(f, (await submitted.json()).id);
   assert.equal(result.result.transcriptionQuality.profile, 'accurate');
+  assert.equal(result.result.transcriptionQuality.recognitionRevision, 2);
   assert.equal(result.result.transcript[0].words[0].probability, 0.98);
   assert.equal(result.result.transcript[0].confidence, 0.98);
   assert.equal(result.result.transcriptionQuality.complete, true);
@@ -168,7 +169,8 @@ test('accurate cached transcripts require complete large-model proof and sanitiz
   assert.equal(JSON.stringify(job).includes('private-'), false);
   assert.equal(JSON.stringify(job).includes('host-private'), false);
   for (const changes of [{ transcriptionQuality: quality({ model: 'small' }) }, { transcriptionQuality: quality({ complete: false }) },
-    { transcriptionQuality: quality({ processedUntil: 30 }) }, { transcriptSource: 'sidecar:sparse.srt' }]) {
+    { transcriptionQuality: quality({ processedUntil: 30 }) }, { transcriptionQuality: quality({ recognitionRevision: undefined }) },
+    { transcriptionQuality: quality({ recognitionRevision: 1 }) }, { transcriptSource: 'sidecar:sparse.srt' }]) {
     assert.equal((await f.submit({ ...original, ...changes })).status, 400);
   }
 });
@@ -179,9 +181,9 @@ test('old subtitle hosts reject accurate requests before upload while fast reque
   const id = 'c'.repeat(32), jobId = 'd'.repeat(32), code = 'e'.repeat(32);
   const framesDir = path.join(dataDir, 'frames', id);
   await fs.mkdir(framesDir, { recursive: true }); await fs.writeFile(path.join(framesDir, 'frame_001.jpg'), JPEG);
-  let posts = 0, upload = '';
+  let posts = 0, upload = '', capabilities = ['timed-subtitles-v1'];
   const server = http.createServer(async (req, res) => {
-    if (req.url === '/v1/status') { res.end(JSON.stringify({ ready: true, protocol: 1, capabilities: ['timed-subtitles-v1'] })); return; }
+    if (req.url === '/v1/status') { res.end(JSON.stringify({ ready: true, protocol: 1, capabilities })); return; }
     if (req.url === '/v1/jobs') {
       posts++; for await (const bytes of req) upload += bytes.toString('utf8');
       res.end(JSON.stringify({ id: jobId, status: 'completed', result: { ...metadata(), status: 'completed', summary: '기존 서버 검증' } })); return;
@@ -193,13 +195,21 @@ test('old subtitle hosts reject accurate requests before upload while fast reque
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   const options = { dataDir, connectionCode: code, remoteUrl: `http://127.0.0.1:${server.address().port}`, subtitleLanguage: 'ko' };
   const record = { id, path: 'C:/client/neutral.mp4', ...metadata(), size: 1 };
-  await assert.rejects(sendRemoteAnalysis(record, { ...options, subtitleQuality: 'accurate' }), /분석 서버 PC도 새 버전으로 업데이트/);
+  for (capabilities of [['timed-subtitles-v1'], ['timed-subtitles-v1', 'subtitle-quality-v1']]) {
+    await assert.rejects(sendRemoteAnalysis(record, { ...options, subtitleQuality: 'accurate' }), /분석 서버 PC도 새 버전으로 업데이트/);
+  }
   assert.equal(posts, 0);
+  capabilities = ['timed-subtitles-v1'];
   await sendRemoteAnalysis({ ...record, transcript: [{ start: 1, end: 3, text: '대사', words: [{ start: 1, end: 3, word: '대사', probability: 0.9 }] }] }, { ...options, subtitleQuality: 'fast' });
   assert.equal(posts, 1);
   assert.equal(upload.includes('"subtitleQuality"'), false);
   assert.equal(upload.includes('"transcriptionQuality"'), false);
   assert.equal(upload.includes('"words"'), false);
+  capabilities = ['timed-subtitles-v1', 'subtitle-quality-v2'];
+  upload = '';
+  await sendRemoteAnalysis(record, { ...options, subtitleQuality: 'accurate' });
+  assert.equal(posts, 2);
+  assert.equal(upload.includes('"subtitleQuality":"accurate"'), true, 'v2 includes quality options even when v1 is not separately advertised');
 });
 
 test('discarding invalid returned cues also clears the full-transcription proof', async t => {
@@ -276,6 +286,106 @@ test('partial and full translations share one bounded payload budget with rich o
     assert.match(job.result.subtitleError, /응답 크기 제한/);
     assert.ok(Buffer.byteLength(JSON.stringify(job.result.transcript)) < 4 * 1024 * 1024);
   }
+});
+
+test('long rich transcripts keep every timed cue and Korean subtitle by omitting optional diagnostics first', async t => {
+  const cues = Array.from({ length: 2400 }, (_, index) => ({ id: index, start: index * 3, end: index * 3 + 2.9, text: 'あ'.repeat(24),
+    words: Array.from({ length: 24 }, (_, word) => ({ start: index * 3 + word * 0.12, end: index * 3 + word * 0.12 + 0.11, word: 'あ', probability: 0.987654321 })) }));
+  const korean = cues.map(cue => ({ start: cue.start, end: cue.end, text: '안녕하세요 오늘 날씨가 좋습니다.' }));
+  assert.ok(Buffer.byteLength(JSON.stringify(cues)) > 4 * 1024 * 1024);
+  let partial = false;
+  const f = await fixture(t, async ({ record }) => ({ ...record, status: partial ? 'partial' : 'completed', transcriptSource: 'audio:faster-whisper large-v3',
+    transcript: cues, transcriptionQuality: quality({ duration: 7200, processedUntil: 7200, complete: !partial }),
+    ...(partial ? { subtitleTranslationPartial: korean, subtitleTranslationProgress: { version: 1, sourceFingerprint: fingerprint(cues),
+      totalCues: cues.length, completedCues: cues.length, language: 'ko', complete: false, sourceComplete: false } }
+      : { subtitleLanguage: 'ko', subtitleTranslation: korean }) }));
+  const id = '8'.repeat(32), framesDir = path.join(f.dataDir, 'frames', id);
+  await fs.mkdir(framesDir, { recursive: true }); await fs.writeFile(path.join(framesDir, 'frame_001.jpg'), JPEG);
+  for (partial of [false, true]) {
+    const result = await sendRemoteAnalysis({ id, path: 'C:/client/neutral.mp4', size: 1, ...metadata({ duration: 7200, transcript: [] }) }, {
+      remoteUrl: f.base, connectionCode: f.status.connectionCode, dataDir: f.dataDir
+    });
+    assert.deepEqual(result.transcript.map(({ id, start, end, text }) => ({ id, start, end, text })), cues.map(({ id, start, end, text }) => ({ id, start, end, text })));
+    assert.equal(result.transcript[0].words, undefined);
+    assert.match(result.warnings.join('\n'), /단어별 진단/);
+    assert.equal(result.warnings.some(warning => /대사 기록이 응답 크기 제한/.test(warning)), false);
+    assert.equal(result.transcriptionQuality.complete, !partial);
+    if (partial) {
+      assert.deepEqual(result.subtitleTranslationPartial.map(({ start, end, text }) => ({ start, end, text })), korean);
+      assert.equal(result.subtitleTranslationProgress.sourceComplete, false);
+      assert.equal(result.subtitleTranslationProgress.complete, false);
+      assert.equal(result.subtitleLanguage, undefined);
+    } else {
+      assert.deepEqual(result.subtitleTranslation, korean);
+      assert.equal(result.subtitleLanguage, 'ko');
+      assert.equal(result.status, 'completed');
+    }
+    const contentBytes = Buffer.byteLength(JSON.stringify(result.transcript)) + Buffer.byteLength(JSON.stringify(partial ? result.subtitleTranslationPartial : result.subtitleTranslation));
+    assert.ok(contentBytes <= 4 * 1024 * 1024);
+  }
+  assert.equal(cues[0].words.length, 24, 'transport compaction never mutates the provider result');
+});
+
+test('outgoing invalid or over-limit cues cannot be normalized into a complete shorter source', async t => {
+  let processed = 0;
+  const f = await fixture(t, async ({ record }) => { processed++; return record; });
+  const cues = Array.from({ length: 50001 }, (_, index) => ({ id: index, start: index / 10, end: index / 10 + 0.09, text: 'あ' }));
+  const original = { id: '9'.repeat(32), path: 'C:/client/neutral.mp4', size: 1,
+    ...metadata({ duration: 6000, transcript: cues, hasAudio: true, transcriptSource: 'audio:faster-whisper large-v3',
+      transcriptionQuality: quality({ duration: 6000, processedUntil: 6000 }) }) };
+  const options = { remoteUrl: f.base, connectionCode: f.status.connectionCode, dataDir: f.dataDir, subtitleLanguage: 'ko', subtitleQuality: 'accurate' };
+  await assert.rejects(sendRemoteAnalysis(original, options), /50,000개 제한/);
+  await assert.rejects(sendRemoteAnalysis({ ...original, transcript: [{ start: 1, end: 2, text: '유효한 대사' }, { start: 4, end: 3, text: '잘못된 시점' }] }, options), /유효하지 않은 구간/);
+  assert.equal(processed, 0);
+  assert.equal(cues.length, 50001);
+});
+
+test('the exact content byte limit keeps the last cue, while the returned cue count limit is explicit and never complete', async t => {
+  const limit = 4 * 1024 * 1024;
+  const exact = Array.from({ length: 417 }, (_, index) => ({ start: index, end: index + 0.5, text: 'x'.repeat(10000) }));
+  exact.push({ start: 417, end: 417.5, text: '' });
+  const remaining = limit - Buffer.byteLength(JSON.stringify(exact));
+  assert.ok(remaining > 0 && remaining <= 10000);
+  exact.at(-1).text = 'x'.repeat(remaining);
+  assert.equal(Buffer.byteLength(JSON.stringify(exact)), limit);
+  let overCount = false;
+  const dense = Array.from({ length: 50001 }, (_, index) => ({ start: index / 100, end: index / 100 + 0.009, text: 'あ' }));
+  const f = await fixture(t, async ({ record }) => ({ ...record, duration: 1000, status: 'completed', transcript: overCount ? dense : exact,
+    transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: quality({ duration: 1000, processedUntil: 1000 }) }));
+  for (overCount of [false, true]) {
+    const submitted = await f.submit(metadata({ duration: 1000, transcript: [] }));
+    const job = await finished(f, (await submitted.json()).id);
+    assert.equal(job.result.transcript.length, overCount ? 50000 : exact.length);
+    if (overCount) {
+      assert.equal(job.result.status, 'partial');
+      assert.equal(job.result.transcriptionQuality.complete, false);
+      assert.match(job.result.warnings.join('\n'), /50,001개가 50,000개 제한/);
+    } else {
+      assert.deepEqual(job.result.transcript.at(-1), exact.at(-1));
+      assert.equal(job.result.status, 'completed');
+      assert.equal(job.result.transcriptionQuality.complete, true);
+    }
+  }
+});
+
+test('outgoing rich diagnostics cannot exhaust metadata space needed by complete timed text', async t => {
+  const cues = Array.from({ length: 2400 }, (_, index) => ({ id: index, start: index * 3, end: index * 3 + 2.9, text: 'あ'.repeat(48),
+    words: Array.from({ length: 48 }, (_, word) => ({ start: index * 3 + word * 0.06, end: index * 3 + word * 0.06 + 0.05, word: 'あ', probability: 0.987654321 })) }));
+  assert.ok(Buffer.byteLength(JSON.stringify(cues)) > 8 * 1024 * 1024);
+  let received;
+  const f = await fixture(t, async ({ record }) => { received = record; return { ...record, summary: '온전한 대사 자료', status: 'completed' }; });
+  const id = '7'.repeat(32), framesDir = path.join(f.dataDir, 'frames', id);
+  await fs.mkdir(framesDir, { recursive: true }); await fs.writeFile(path.join(framesDir, 'frame_001.jpg'), JPEG);
+  const result = await sendRemoteAnalysis({ id, path: 'C:/client/neutral.mp4', size: 1, ...metadata({ duration: 7200, transcript: cues }) }, {
+    remoteUrl: f.base, connectionCode: f.status.connectionCode, dataDir: f.dataDir
+  });
+  assert.equal(received.transcript.length, cues.length);
+  assert.equal(received.transcript.at(-1).end, cues.at(-1).end);
+  assert.equal(received.transcript[0].words, undefined);
+  assert.equal(result.transcript.length, cues.length);
+  assert.equal(result.status, 'completed');
+  assert.match(result.warnings.join('\n'), /단어별 진단.*업로드/);
+  assert.equal(cues[0].words.length, 48);
 });
 
 test('invalid media and metadata are rejected and uploaded temporary files cleaned', async t => {

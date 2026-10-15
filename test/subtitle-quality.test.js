@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeSubtitleQuality, normalizeTranscriptionQuality, sanitizeRichSegments, isVerifiedFullTranscription } = require('../lib/subtitle-quality');
+const { normalizeSubtitleQuality, normalizeTranscriptionQuality, sanitizeRichSegments, isVerifiedFullTranscription, isCurrentFullTranscription, RECOGNITION_REVISION } = require('../lib/subtitle-quality');
 
 const cue = () => ({ start: 1, end: 3, text: '원문', id: 'cue-1', words: [{ start: 1, end: 3, word: '원문', probability: 0.98 }], avgLogprob: -0.1, noSpeechProbability: 0.02 });
 const proof = () => ({ version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', duration: 90, processedUntil: 90, complete: true,
@@ -11,6 +11,17 @@ test('quality defaults preserve legacy requests and reject invalid profiles', ()
   assert.equal(normalizeSubtitleQuality(), 'fast');
   assert.equal(normalizeSubtitleQuality('accurate'), 'accurate');
   for (const value of [null, 'large', '--flag', 1]) assert.throws(() => normalizeSubtitleQuality(value));
+});
+
+test('older recognition proofs stay readable but accurate repair requires the current omission fixes', () => {
+  assert.equal(isVerifiedFullTranscription(record()), true);
+  assert.equal(isCurrentFullTranscription(record(), 'accurate'), false);
+  const current = { ...record(), transcriptionQuality: { ...proof(), recognitionRevision: RECOGNITION_REVISION } };
+  assert.equal(isCurrentFullTranscription(current, 'accurate'), true);
+  assert.equal(normalizeTranscriptionQuality(current.transcriptionQuality).recognitionRevision, RECOGNITION_REVISION);
+  assert.equal(isCurrentFullTranscription({ ...current, transcriptionQuality: { ...current.transcriptionQuality, recognitionRevision: 1 } }, 'accurate'), false);
+  assert.equal(isCurrentFullTranscription(record(), 'fast'), true);
+  for (const invalid of [-1, NaN, 1.2, '2', 10001]) assert.equal(normalizeTranscriptionQuality({ ...proof(), recognitionRevision: invalid }).recognitionRevision, undefined);
 });
 
 test('rich cues retain original IDs, word alignment and confidence without copying arbitrary fields', () => {

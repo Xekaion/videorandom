@@ -235,7 +235,7 @@ test('desktop executable and shared Python runtime are discovered without readin
 });
 
 function fullQuality(duration = 90, extra = {}) {
-    return { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, duration, processedUntil: duration,
+    return { version: 1, recognitionRevision: 2, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, duration, processedUntil: duration,
         wordTimestamps: true, language: 'ja', languageProbability: 0.99,
         audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [], ...extra };
 }
@@ -287,22 +287,95 @@ test('complete accurate audio is reused but explicit small overrides cannot qual
     assert.equal(isVerifiedFullTranscription({ ...record, transcriptionQuality: fullQuality(90, { audit: { complete: true, unresolved: [{ start: 40, end: 43, reason: 'speech gap' }] } }) }), false);
 });
 
-test('uncertain full-range recognition preserves its source but never claims a completed accurate Korean subtitle', async t => {
+test('accurate repair retranscribes an older recognition revision and preserves the current worker revision', async t => {
+    const { dataDir, record } = await fixture(t, { transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
+        transcript: [{ start: 1, end: 3, text: '古い認識結果' }], transcriptionQuality: fullQuality(90, { recognitionRevision: 1 }) });
+    const audioPath = path.join(dataDir, 'current-audio.flac'); await fs.promises.writeFile(audioPath, 'fLaCmock');
+    const mocked = mockSpawn(async call => {
+        if (call.args.includes('--audio')) call.child.stdout.write([{ type: 'info', language: 'ja', duration: 90, model: 'large-v3' },
+            { type: 'segment', start: 1, end: 3, text: 'こんにちは。' }, { type: 'complete', segments: 1, quality: fullQuality() }
+        ].map(event => JSON.stringify(event)).join('\n') + '\n');
+        else {
+            const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
+            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+        }
+    });
+    const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
+    assert.equal(mocked.calls.filter(call => call.args.includes('--audio')).length, 1);
+    assert.equal(result.transcriptionQuality.recognitionRevision, 2);
+    assert.equal(result.transcript[0].text, 'こんにちは。');
+    assert.equal(result.subtitleLanguage, 'ko', result.subtitleError);
+});
+
+test('an unresolved audio span still exposes reviewed Korean for recognized cues without claiming complete subtitles', async t => {
     const { dataDir, record } = await fixture(t, { transcript: [], transcriptLanguage: 'ja' });
     const audioPath = path.join(dataDir, 'source.flac'); await fs.promises.writeFile(audioPath, 'fLaCmock');
     const mocked = mockSpawn(async call => {
         if (call.args.includes('--audio')) call.child.stdout.write([{ type: 'info', duration: 90, language: 'ja' },
             { type: 'segment', start: 1, end: 3, text: 'こんにちは。' }, { type: 'complete', segments: 1,
                 quality: fullQuality(90, { complete: false, audit: { complete: false, unresolved: [{ start: 50, end: 55, reason: 'uncovered speech' }] } }) }].map(JSON.stringify).join('\n') + '\n');
-        else await writeResponse(call, summary());
+        else {
+            const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
+            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+        }
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
     assert.equal(result.status, 'partial');
     assert.equal(result.transcript[0].text, 'こんにちは。');
     assert.equal(result.transcriptionQuality.audit.unresolved.length, 1);
     assert.equal(result.subtitleLanguage, undefined);
-    assert.match(result.subtitleError, /全|전체/);
-    assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, 1, 'the valid ASR can be summarized but incomplete audio never produces a final Korean subtitle');
+    assert.match(result.subtitleError, /일부 구간|완성본/);
+    assert.equal(result.subtitleTranslationPartial.length, 1);
+    assert.equal(result.subtitleTranslationPartial[0].text, '안녕하세요.');
+    assert.deepEqual([result.subtitleTranslationPartial[0].start, result.subtitleTranslationPartial[0].end], [1, 3]);
+    assert.equal(result.subtitleTranslationProgress.completedCues, 1);
+    assert.equal(result.subtitleTranslationProgress.complete, false);
+    assert.equal(result.subtitleTranslationProgress.sourceComplete, false);
+    assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, 3, 'recognized dialogue is translated and reviewed; unknown speech is never fabricated');
+});
+
+test('a Korean language hint never labels Japanese dialogue as already translated Korean', async t => {
+    for (const [text, needsTranslation] of [['こんにちは。', true], ['안녕하세요.', false]]) {
+        const { dataDir, record } = await fixture(t, { transcriptLanguage: 'ko', transcript: [{ start: 1, end: 3, text }] });
+        const mocked = mockSpawn(async call => {
+            const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
+            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+        });
+        const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko', subtitleQuality: 'fast' });
+        assert.equal(result.subtitleLanguage, 'ko', result.subtitleError);
+        assert.equal(result.subtitleTranslation[0].text, '안녕하세요.');
+        assert.equal(result.transcript[0].text, text);
+        assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, needsTranslation ? 2 : 1);
+    }
+});
+
+test('failed audio preparation translates only preserved valid dialogue and never invents a source when none remains', async t => {
+    for (const hasOriginal of [true, false]) {
+        const original = hasOriginal ? [{ start: 1, end: 3, text: 'こんにちは。' }] : [];
+        const { dataDir, record } = await fixture(t, { transcript: original, transcriptLanguage: 'ja' });
+        const mocked = mockSpawn(async call => {
+            if (call.binary === 'mock-ffmpeg') throw Object.assign(new Error('audio decoder failed'), { exitCode: 1 });
+            const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
+            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+        });
+        const result = await provider(mocked.spawnImpl).analyzeExtracted(record,
+            { dataDir, ffmpegPath: 'mock-ffmpeg', subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
+        assert.deepEqual(result.transcript, original);
+        assert.equal(result.status, 'partial');
+        assert.equal(result.subtitleLanguage, undefined);
+        assert.equal(result.subtitleTranslation, undefined);
+        if (hasOriginal) {
+            assert.equal(result.subtitleTranslationPartial.length, 1);
+            assert.equal(result.subtitleTranslationPartial[0].text, '안녕하세요.');
+            assert.equal(result.subtitleTranslationProgress.complete, false);
+            assert.equal(result.subtitleTranslationProgress.sourceComplete, false);
+            assert.ok(result.warnings.some(warning => /audio decoder failed/.test(warning)));
+        } else {
+            assert.equal(result.subtitleTranslationPartial, undefined);
+            assert.match(result.error, /audio decoder failed/);
+        }
+        assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, hasOriginal ? 3 : 0);
+    }
 });
 
 test('summary refusal cannot translate or expose stale Korean output and leaves a full source checkpoint', async t => {

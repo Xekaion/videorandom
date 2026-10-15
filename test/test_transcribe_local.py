@@ -11,6 +11,9 @@ SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'scripts' / 'transcribe_l
 SPEC = importlib.util.spec_from_file_location('transcribe_local', SOURCE)
 ASR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ASR)
+BENCH_SPEC = importlib.util.spec_from_file_location('coverage_benchmark', SOURCE.with_name('benchmark_subtitle_coverage.py'))
+BENCH = importlib.util.module_from_spec(BENCH_SPEC)
+BENCH_SPEC.loader.exec_module(BENCH)
 
 
 def segment(start, end, text='こんにちは。', probability=0.95, logprob=-0.1):
@@ -205,6 +208,7 @@ class TranscriptionTests(unittest.TestCase):
         lines = [json.dumps(event, ensure_ascii=False, allow_nan=False) for event in events]
         decoded = [json.loads(line) for line in lines]
         self.assertEqual(decoded[-1]['quality'], quality)
+        self.assertEqual(decoded[-1]['quality']['recognitionRevision'], 2)
         self.assertEqual(decoded[-3]['segments'], cues)
         self.assertEqual(decoded[-2]['phase'], 'completed')
         percentages = [event['percent'] for event in events if event['type'] == 'progress']
@@ -623,6 +627,147 @@ class TranscriptionTests(unittest.TestCase):
                 sum(end - start for start, end in remaining) + sum(item['end'] - item['start'] for item in boundary))
         finally:
             ASR.MAX_BOUNDARY_RANGES = previous
+
+    def test_recovery_target_selects_new_tail_word_even_if_context_cue_midpoint_is_outside(self):
+        raw = segment(4, 5.4, 'old new')
+        raw['words'] = [{'start': 4, 'end': 4.4, 'word': 'old ', 'probability': 0.95},
+                        {'start': 5.1, 'end': 5.4, 'word': 'new', 'probability': 0.95}]
+        cues = ASR.cues_from_segment(raw, 0, 20)
+        selected = ASR.recovery_candidates_for_targets(cues, [(5, 6)], 20)
+        self.assertEqual([(cue['start'], cue['end'], cue['text']) for cue in selected], [(5.1, 5.4, 'new')])
+
+    def test_recovery_preserves_full_native_cue_when_vad_target_starts_after_its_first_word(self):
+        raw = segment(2.54, 6.56, 'first next')
+        raw['words'] = [{'start': 2.54, 'end': 2.86, 'word': 'first ', 'probability': 0.95},
+                        {'start': 2.86, 'end': 6.56, 'word': 'next', 'probability': 0.95}]
+        native = ASR.cues_from_segment(raw, 0, 20)
+        selected = ASR.recovery_candidates_for_targets(native, [(2.968, 9)], 20)
+        self.assertEqual(selected[0]['text'], 'first next')
+        self.assertEqual([(word['start'], word['end']) for word in selected[0]['words']], [(2.54, 2.86), (2.86, 6.56)])
+
+    def test_recovery_new_word_survives_confident_context_overlap_without_duplicate_prefix(self):
+        old = ASR.cues_from_segment(segment(4, 5.2, 'old'), 0, 20)
+        raw = segment(4.5, 6, 'old new')
+        raw['words'] = [{'start': 4.5, 'end': 5, 'word': 'old ', 'probability': 0.95},
+                        {'start': 5.5, 'end': 6, 'word': 'new', 'probability': 0.95}]
+        recovered = ASR.cues_from_segment(raw, 0, 20)
+        merged, accepted = ASR.merge_recovery(old, recovered)
+        self.assertEqual([cue['text'] for cue in merged], ['old', 'new'])
+        self.assertEqual([(cue['start'], cue['end']) for cue in merged], [(4, 5.2), (5.5, 6)])
+        self.assertEqual(accepted, 1)
+
+    def test_recovered_words_inside_an_existing_caption_are_inserted_without_overlapping_captions(self):
+        raw = segment(2, 4, 'old next')
+        raw['words'] = [{'start': 2, 'end': 2.6, 'word': 'old ', 'probability': 0.95},
+                        {'start': 3.4, 'end': 4, 'word': 'next', 'probability': 0.95}]
+        original = ASR.cues_from_segment(raw, 0, 20)
+        candidate = ASR.cues_from_segment(segment(2.8, 3.2, 'new '), 0, 20)
+        merged, accepted = ASR.merge_recovery(original, candidate)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]['text'], 'old new next')
+        self.assertEqual([(word['start'], word['end']) for word in merged[0]['words']], [(2, 2.6), (2.8, 3.2), (3.4, 4)])
+        self.assertEqual(accepted, 1)
+
+    def test_recovery_keeps_a_real_adjacent_repeat_but_does_not_repeat_its_known_context(self):
+        original = ASR.cues_from_segment(segment(1, 1.3, 'はい'), 0, 10)
+        raw = segment(1, 1.7, 'はいはい')
+        raw['words'] = [{'start': 1, 'end': 1.3, 'word': 'はい', 'probability': 0.95},
+                        {'start': 1.4, 'end': 1.7, 'word': 'はい', 'probability': 0.95}]
+        recovered = ASR.cues_from_segment(raw, 0, 10)
+        merged, accepted = ASR.merge_recovery(original, recovered)
+        self.assertEqual(''.join(cue['text'] for cue in merged), 'はいはい')
+        self.assertEqual([(word['start'], word['end']) for cue in merged for word in cue['words']], [(1, 1.3), (1.4, 1.7)])
+        self.assertEqual(accepted, 1)
+
+    def test_nested_word_end_order_falls_back_to_native_segment_without_truncating_dialogue(self):
+        raw = segment(1, 10, 'first second')
+        raw['words'] = [{'start': 1, 'end': 8, 'word': 'first ', 'probability': 0.95},
+                        {'start': 3, 'end': 4, 'word': 'second', 'probability': 0.95}]
+        cue = ASR.cues_from_segment(raw, 0, 20)[0]
+        self.assertEqual((cue['start'], cue['end']), (1, 10))
+        self.assertEqual(cue['text'], 'first second')
+        self.assertIn('invalid_word_timestamps', cue['qualityFlags'])
+        self.assertFalse(cue.get('words'))
+
+    def test_wordless_recovery_keeps_native_times_and_never_guesses_text_slices(self):
+        raw = segment(4, 5.4, 'full native text')
+        raw['words'] = []
+        cues = ASR.cues_from_segment(raw, 0, 20)
+        self.assertEqual(ASR.recovery_candidates_for_targets(cues, [(5, 6)], 20), [])
+        selected = ASR.recovery_candidates_for_targets(cues, [(4, 6)], 20)
+        self.assertEqual((selected[0]['start'], selected[0]['end'], selected[0]['text']), (4, 5.4, 'full native text'))
+
+    def test_partially_overlapping_new_word_expands_native_caption_without_overlapping_srt_cues(self):
+        raw = segment(4, 5.2, 'old tail')
+        raw['words'] = [{'start': 4, 'end': 4.8, 'word': 'old ', 'probability': 0.95},
+                        {'start': 5, 'end': 5.2, 'word': 'tail ', 'probability': 0.95}]
+        old = ASR.cues_from_segment(raw, 0, 20)
+        recovered = ASR.cues_from_segment(segment(5.15, 5.6, 'new'), 0, 20)
+        merged, accepted = ASR.merge_recovery(old, recovered)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual((merged[0]['start'], merged[0]['end']), (4, 5.6))
+        self.assertEqual(merged[0]['text'], 'old tail new')
+        self.assertEqual(accepted, 1)
+
+    def test_overlap_at_a_reading_break_keeps_adjacent_actual_word_times_in_one_caption(self):
+        raw = segment(1, 8, 'old new')
+        raw['words'] = [{'start': 1, 'end': 7, 'word': 'old ', 'probability': 0.95},
+                        {'start': 6.95, 'end': 8, 'word': 'new', 'probability': 0.95}]
+        cues = ASR.cues_from_segment(raw, 0, 20)
+        self.assertEqual(len(cues), 1)
+        self.assertEqual((cues[0]['start'], cues[0]['end']), (1, 8))
+
+    def test_partial_recovery_overlap_with_wordless_native_cue_is_not_split_or_duplicated(self):
+        native = segment(4, 5.2, 'native segment')
+        native['words'] = []
+        original = ASR.cues_from_segment(native, 0, 20)
+        recovered = ASR.cues_from_segment(segment(5.15, 5.6, 'new'), 0, 20)
+        merged, accepted = ASR.merge_recovery(original, recovered)
+        self.assertEqual(accepted, 0)
+        self.assertEqual([(cue['start'], cue['end'], cue['text']) for cue in merged], [(4, 5.2, 'native segment')])
+        self.assertIn('recovery_alignment_conflict', merged[0]['qualityFlags'])
+        self.assertNotIn('recovery_alignment_conflict', original[0]['qualityFlags'])
+
+    def test_wordless_overlap_keeps_unresolved_alignment_diagnostic_in_full_audit(self):
+        native = segment(4, 5.2, 'native segment')
+        native['words'] = []
+        # The recheck window starts at 3.95; its native [1.2,1.65]
+        # word therefore overlaps the unsplittable original by 0.05 seconds.
+        recovery = segment(1.2, 1.65, 'new')
+        cues, quality, _ = self.run_audio(Model([[native], [recovery]]), speech=[(4, 6)])
+        self.assertEqual(len(cues), 1)
+        self.assertFalse(quality['audit']['complete'])
+        self.assertTrue(any(item['reason'] == 'recovery_alignment_conflict' for item in quality['audit']['unresolved']))
+
+    def test_better_recovery_replaces_low_confidence_word_before_adding_its_new_tail(self):
+        old = ASR.cues_from_segment(segment(1, 2, 'wrong', probability=0.2, logprob=-2), 0, 10)
+        raw = segment(1, 3, 'correct tail')
+        raw['words'] = [{'start': 1, 'end': 2, 'word': 'correct ', 'probability': 0.95},
+                        {'start': 2.3, 'end': 3, 'word': 'tail', 'probability': 0.95}]
+        recovered = ASR.cues_from_segment(raw, 0, 10)
+        merged, accepted = ASR.merge_recovery(old, recovered)
+        self.assertEqual([cue['text'] for cue in merged], ['correct tail'])
+        self.assertEqual([(word['start'], word['end']) for word in merged[0]['words']], [(1, 2), (2.3, 3)])
+        self.assertEqual(accepted, 1)
+
+    def test_tolerated_native_word_end_jitter_cannot_shorten_the_caption_envelope(self):
+        raw = segment(0, 1, 'first last')
+        raw['words'] = [{'start': 0, 'end': 1, 'word': 'first ', 'probability': 0.95},
+                        {'start': 0.9, 'end': 0.99, 'word': 'last', 'probability': 0.95}]
+        cue = ASR.cues_from_segment(raw, 0, 10)[0]
+        self.assertEqual(cue['end'], 1)
+        reconciled = ASR.reconcile_window_boundaries([{**cue, '_window': 0, '_boundary': 0}])
+        self.assertEqual(reconciled[0]['end'], 1)
+
+    def test_benchmark_reports_omission_and_insertion_separately(self):
+        self.assertEqual(BENCH.character_errors('また', 'ま')['deletions'], 1)
+        self.assertEqual(BENCH.character_errors('また', 'またまた')['insertions'], 2)
+
+    def test_benchmark_does_not_claim_precise_block_timing_for_crossing_wordless_cue(self):
+        row = BENCH.block_result({'start': 2, 'end': 3, 'reference': 'native'},
+                                [{'start': 1, 'end': 4, 'text': 'native'}], [(2.2, 2.6)])
+        self.assertTrue(row['ambiguousFallbackTiming'])
+        self.assertAlmostEqual(row['vadOverlapSeconds'], 0.4)
 
 
 if __name__ == '__main__':

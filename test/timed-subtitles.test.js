@@ -6,6 +6,7 @@ const os = require('node:os');
 const http = require('node:http');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
+const crypto = require('node:crypto');
 const { createNoKeyProvider } = require('../lib/no-key-provider');
 const { normalizeLanguageHint, normalizeSubtitleLanguage, subtitleText, validateTranslation } = require('../lib/subtitle-utils');
 const { createLanAnalysis, sendRemoteAnalysis, validateMetadata } = require('../lib/lan-analysis');
@@ -64,6 +65,27 @@ test('subtitle options reject unknown language hints and formats', () => {
   for (const value of ['ja', 'zh', null, 1]) assert.throws(() => normalizeSubtitleLanguage(value));
   assert.throws(() => subtitleText({ transcript: source() }, { format: 'html' }));
   assert.throws(() => subtitleText({ transcript: [] }));
+});
+
+test('only an explicitly requested reviewed partial Korean prefix can be exported with its original timing', () => {
+  const transcript = source().map((cue, index) => ({ ...cue, id: index + 1 }));
+  const record = { transcript, subtitleTranslationPartial: [{ ...transcript[0], text: '안녕하세요.' }],
+    subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 1, complete: false, sourceComplete: false,
+      sourceFingerprint: crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex') } };
+  assert.throws(() => subtitleText(record, { language: 'ko' }));
+  const text = subtitleText(record, { language: 'ko', partial: true });
+  assert.match(text, /00:00:01,125 --> 00:00:02,400\n안녕하세요\./);
+  assert.equal(text.includes('00:00:08'), false);
+  assert.match(subtitleText(record, { language: 'ko', partial: true, format: 'vtt' }), /^WEBVTT/);
+  assert.throws(() => subtitleText(record, { partial: true }));
+  for (const changes of [
+    { subtitleTranslationPartial: [{ ...record.subtitleTranslationPartial[0], id: 2 }] },
+    { subtitleTranslationPartial: [{ ...record.subtitleTranslationPartial[0], end: 2.5 }] },
+    { subtitleTranslationProgress: { ...record.subtitleTranslationProgress, completedCues: 2 } },
+    { subtitleTranslationProgress: { ...record.subtitleTranslationProgress, complete: true } },
+    { subtitleTranslationProgress: { ...record.subtitleTranslationProgress, sourceFingerprint: '0'.repeat(64) } },
+    { subtitleTranslationProgress: { ...record.subtitleTranslationProgress, sourceComplete: 'false' } }
+  ]) assert.throws(() => subtitleText({ ...record, ...changes }, { language: 'ko', partial: true }));
 });
 
 test('SRT and VTT preserve nonuniform original timings and escape cue markup', () => {
