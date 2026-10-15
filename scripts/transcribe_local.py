@@ -714,7 +714,7 @@ def main():
     audio = decode_audio(os.path.abspath(args.audio), sampling_rate=SAMPLE_RATE)
 
     def speech_detector(waveform, rate):
-        options = VadOptions(threshold=0.2, min_speech_duration_ms=80,
+        options = VadOptions(threshold=0.2, min_speech_duration_ms=200,
                              min_silence_duration_ms=500, speech_pad_ms=0)
         return [(item['start'] / rate, item['end'] / rate)
                 for item in get_speech_timestamps(waveform, options, sampling_rate=rate)]
