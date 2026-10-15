@@ -474,6 +474,12 @@
         </div>
       </div>
 
+      <div class="catalog-job hidden" id="catalogInterrupted" aria-live="polite">
+        <strong>중단된 분석 작업이 있습니다</strong>
+        <p>저장된 결과는 유지합니다. 현재 분석 설정으로 남은 영상을 다시 시작할 수 있습니다. 처리 중이던 영상은 처음부터 다시 분석합니다.</p>
+        <p id="catalogInterruptedError" class="catalog-error hidden"></p>
+        <div id="catalogInterruptedItems"></div>
+      </div>
       <div class="catalog-job hidden" id="catalogJob" aria-live="polite">
         <div class="catalog-job-heading"><strong id="catalogJobTitle">분석 중</strong><button id="catalogCancel" class="btn btn-secondary" type="button">분석 중지</button></div>
         <progress id="catalogJobProgress" max="100" value="0" aria-label="영상 분석 전체 진행률"></progress>
@@ -507,6 +513,7 @@
     <div class="catalog-detail-body">
       <p class="catalog-detail-path" id="catalogDetailPath"></p>
       <p class="catalog-detail-meta" id="catalogDetailMeta"></p>
+      <p class="catalog-section-note hidden" id="catalogAnalysisTimings"></p>
       <div class="catalog-repair-panel"><div><strong id="catalogDetailHealth"></strong><p id="catalogDetailRepairNote" class="catalog-section-note"></p><progress id="catalogDetailProgress" class="catalog-detail-progress hidden" max="100" aria-label="이 영상의 분석 진행률"></progress></div><button id="catalogDetailRepair" class="btn btn-secondary" type="button">복구 / 다시 분석</button></div>
       <p class="catalog-notice hidden" id="catalogDetailWarnings"></p>
       <form id="catalogEditForm">

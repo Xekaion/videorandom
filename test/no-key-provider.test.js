@@ -7,7 +7,7 @@ const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
 const { createNoKeyProvider, isVerifiedFullTranscription } = require('../lib/no-key-provider');
 
-function mockSpawn(handler) {
+function mockSpawn(handler, { statusHandler } = {}) {
     const calls = [];
     const spawnImpl = (binary, args, options) => {
         const child = new EventEmitter();
@@ -27,7 +27,8 @@ function mockSpawn(handler) {
         child.stdin.on('finish', () => queueMicrotask(async () => {
             call.input = Buffer.concat(chunks).toString('utf8');
             try {
-                if (args.includes('login')) child.stderr.write('Logged in using ChatGPT\n');
+                if (statusHandler && (args.includes('login') || args.includes('import faster_whisper; print("ready")'))) await statusHandler(call);
+                else if (args.includes('login')) child.stderr.write('Logged in using ChatGPT\n');
                 else if (args.includes('import faster_whisper; print("ready")')) child.stdout.write('ready\n');
                 else await handler(call);
                 if (!child.killed) child.emit('close', 0);
@@ -83,6 +84,79 @@ test('status uses ChatGPT login and local speech dependency checks without API c
         assert.equal(call.options.windowsHide, true);
     }
     assert.deepEqual(mocked.calls[0].args, ['-c', 'forced_login_method="chatgpt"', 'login', 'status']);
+});
+
+test('eight concurrent status requests share two probes while zero TTL still refreshes the next request', async () => {
+    const mocked = mockSpawn(() => {});
+    const instance = provider(mocked.spawnImpl);
+    const dataDir = path.join(os.tmpdir(), 'videorandom-synthetic-status');
+    const statuses = await Promise.all(Array.from({ length: 8 }, () => instance.getProviderStatus(dataDir)));
+    assert.equal(mocked.calls.length, 2, 'one ChatGPT login probe and one speech import serve all concurrent requests');
+    assert.ok(statuses.every(status => status === statuses[0]));
+    assert.equal(statuses[0].speech.available, true);
+    await instance.getProviderStatus(dataDir);
+    assert.equal(mocked.calls.length, 4, 'statusCacheMs: 0 does not retain a finished probe');
+});
+
+test('status cache and shared pending probes remain independent for each data directory', async () => {
+    const mocked = mockSpawn(() => {});
+    const instance = createNoKeyProvider({ spawnImpl: mocked.spawnImpl, environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' },
+        platform: 'win32', statusCacheMs: 60000 });
+    const first = path.join(os.tmpdir(), 'videorandom-synthetic-status-one'), second = path.join(os.tmpdir(), 'videorandom-synthetic-status-two');
+    const statuses = await Promise.all([instance.getProviderStatus(first), instance.getProviderStatus(second),
+        instance.getProviderStatus(first), instance.getProviderStatus(second)]);
+    assert.equal(mocked.calls.length, 4);
+    assert.equal(statuses[0], statuses[2]);
+    assert.equal(statuses[1], statuses[3]);
+    assert.notEqual(statuses[0], statuses[1]);
+    assert.equal(await instance.getProviderStatus(first), statuses[0]);
+    assert.equal(await instance.getProviderStatus(second), statuses[1]);
+    assert.equal(mocked.calls.length, 4, 'completed results still use the configured positive TTL');
+});
+
+test('status probes run again after their positive TTL expires', async () => {
+    const mocked = mockSpawn(() => {});
+    const instance = createNoKeyProvider({ spawnImpl: mocked.spawnImpl, environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' },
+        platform: 'win32', statusCacheMs: 1 });
+    const dataDir = path.join(os.tmpdir(), 'videorandom-synthetic-status-expiry');
+    await instance.getProviderStatus(dataDir);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await instance.getProviderStatus(dataDir);
+    assert.equal(mocked.calls.length, 4);
+});
+
+test('a failed shared speech probe can recover on the next uncached status check', async () => {
+    let unavailable = true;
+    const mocked = mockSpawn(() => {}, { statusHandler(call) {
+        if (call.args.includes('login')) call.child.stderr.write('Logged in using ChatGPT\n');
+        else if (unavailable) throw Object.assign(new Error('owned dependency check unavailable'), { exitCode: 1 });
+        else call.child.stdout.write('ready\n');
+    } });
+    const instance = provider(mocked.spawnImpl), dataDir = path.join(os.tmpdir(), 'videorandom-synthetic-status-recovery');
+    const statuses = await Promise.all(Array.from({ length: 8 }, () => instance.getProviderStatus(dataDir)));
+    assert.equal(mocked.calls.length, 2);
+    assert.ok(statuses.every(status => !status.speech.available));
+    unavailable = false;
+    assert.equal((await instance.getProviderStatus(dataDir)).speech.available, true);
+    assert.equal(mocked.calls.length, 4);
+});
+
+test('a rejected status computation releases its shared pending entry without caching the rejection', async () => {
+    let failLookup = false;
+    const environment = { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python',
+        get VIDEORANDOM_WHISPER_MODEL() { if (failLookup) throw new Error('owned model lookup failed'); return 'small'; } };
+    const mocked = mockSpawn(() => {});
+    const instance = createNoKeyProvider({ spawnImpl: mocked.spawnImpl, environment, platform: 'win32', statusCacheMs: 60000 });
+    const dataDir = path.join(os.tmpdir(), 'videorandom-synthetic-status-rejection');
+    failLookup = true;
+    const statuses = await Promise.allSettled(Array.from({ length: 8 }, () => instance.getProviderStatus(dataDir)));
+    assert.equal(mocked.calls.length, 2);
+    assert.ok(statuses.every(status => status.status === 'rejected' && /owned model lookup failed/.test(status.reason.message)));
+    failLookup = false;
+    assert.equal((await instance.getProviderStatus(dataDir)).speech.available, true);
+    assert.equal(mocked.calls.length, 4);
+    await instance.getProviderStatus(dataDir);
+    assert.equal(mocked.calls.length, 4, 'only the successful retry populates the TTL cache');
 });
 
 test('existing subtitles are retained and fixed isolated Codex invocation annotates every frame', async t => {

@@ -34,7 +34,7 @@ class Element {
   focus() {}
 }
 
-async function boot({ savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
+async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
@@ -47,7 +47,7 @@ async function boot({ savedSettings, initialQueue, initialActiveJob = null, init
   const remoteGate = delayRemote ? new Promise(resolve => { releaseRemote = resolve; }) : Promise.resolve();
   const repairGate = delayRepair ? new Promise(resolve => { releaseRepair = resolve; }) : Promise.resolve();
   const folderSaveGate = delayFolderSave ? new Promise(resolve => { releaseFolderSave = resolve; }) : Promise.resolve();
-  const config = () => ({ tools: { available: true }, providers: providerStatus, defaultMode: 'codex', host: { running: false }, activeJob: plain(initialActiveJob), autoPick: plain(queue), connection: plain(connection) });
+  const config = () => ({ interruptedJobs: plain(interruptedJobs), tools: { available: true }, providers: providerStatus, defaultMode: 'codex', host: { running: false }, activeJob: plain(initialActiveJob), autoPick: plain(queue), connection: plain(connection) });
   const sandbox = {
     crypto: browserCrypto, TextEncoder,
     document: { body: new Element('body'), getElementById: id => elements.get(id), createElement: tag => new Element(tag), createDocumentFragment: () => new Element('#fragment'), querySelectorAll: () => [], addEventListener: (_type, callback) => { load = callback; } },
@@ -55,11 +55,12 @@ async function boot({ savedSettings, initialQueue, initialActiveJob = null, init
     URL, setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; }, clearTimeout: id => timers.delete(id),
     fetch: async (url, options = {}) => {
       const method = options.method || 'GET';
+      const route = url.split('?')[0];
       const body = options.body ? JSON.parse(options.body) : null;
       calls.push({ url, method, body });
       let result;
-      if (url.endsWith('/config')) { const snapshot = config(); await configGate; result = snapshot; }
-      else if (url.endsWith('/results')) result = { results: records };
+      if (route.endsWith('/config')) { const snapshot = config(); await configGate; result = snapshot; }
+      else if (route.endsWith('/results')) result = { results: records };
       else if (url.endsWith('/remote/check')) {
         await remoteGate;
         if (remoteReady && !remoteSuperseded) connection = { ...body, remembered: true };
@@ -82,8 +83,12 @@ async function boot({ savedSettings, initialQueue, initialActiveJob = null, init
       else if (/\/results\/[^/]+\/subtitles\?/.test(url)) {
         return { ok: subtitleStatus < 400, status: subtitleStatus, json: async () => ({ error: subtitleResponse || '저장된 한국어 번역 자막이 없습니다.' }), blob: async () => new Blob([subtitleResponse || '1\n00:00:01,250 --> 00:00:03,500\n안녕하세요.\n'], { type: 'text/plain;charset=utf-8' }) };
       }
+      else if (/\/jobs\/[^/]+\/dismiss$/.test(route)) result = { status: 'cancelled' };
+      else if (/\/jobs\/[^/]+\/resume$/.test(route)) {
+        return { ok: resumeStatus < 400, status: resumeStatus, json: async () => plain(resumeResponse || { id: 'resumed-job', source: 'manual', status: 'running', total: 2, completed: 0, results: [] }) };
+      }
       else if (url === '/api/analysis/jobs') result = { job: plain(manualResponse || { id: 'manual', source: 'manual', status: 'completed', total: body.files.length, completed: body.files.length, results: [] }) };
-      else if (url === '/api/analysis/auto-pick') {
+      else if (route === '/api/analysis/auto-pick') {
         if (method === 'PUT') {
           if (body.options) {
             const { connectionCode: _connectionCode, ...safe } = body.options;
@@ -102,7 +107,7 @@ async function boot({ savedSettings, initialQueue, initialActiveJob = null, init
           }
           result = { status, queue: plain(queue) };
         } else result = plain(queue);
-      } else if (url.startsWith('/api/analysis/jobs/')) result = { job: plain(jobResponse ? await jobResponse(url) : queue.activeJob) };
+      } else if (url.startsWith('/api/analysis/jobs/')) result = { job: plain(jobResponse ? await jobResponse(route) : queue.activeJob) };
       else throw new Error(`Unexpected UI request: ${method} ${url}`);
       return { ok: true, json: async () => result };
     }
@@ -292,12 +297,12 @@ test('queue polling detects sequential jobs through the cheap snapshot and expli
   await ui.runTimers(3000);
   assert.equal(ui.elements.get('catalogJobTitle').textContent, '뽑은 영상 자동 분석 중');
   assert(ui.elements.get('catalogAutoStatus').textContent.includes('대기 1개'));
-  assert.equal(ui.calls.filter(call => call.url.endsWith('/config')).length, 1);
+  assert.equal(ui.calls.filter(call => call.url.split('?')[0].endsWith('/config')).length, 1);
   const second = { ...job, id: 'auto-two', currentFile: '다음 영상.mp4' };
   ui.setQueue({ ...queue, paused: false, pendingCount: 0, pending: [], activeAutoPath: picked('다음 영상.mp4').path, activeJob: second });
   await ui.runTimers(3000);
   assert(ui.elements.get('catalogJobText').textContent.includes('다음 영상.mp4'));
-  assert.equal(ui.calls.filter(call => call.url.endsWith('/config')).length, 1);
+  assert.equal(ui.calls.filter(call => call.url.split('?')[0].endsWith('/config')).length, 1);
 });
 
 test('the saved record count refreshes all completed jobs even when a fast job was never observed running', async () => {
@@ -311,10 +316,10 @@ test('the saved record count refreshes all completed jobs even when a fast job w
   const firstRow = ui.elements.get('catalogRows').childNodes[0];
   assert.equal(firstRow.childNodes[1].childNodes[0].textContent, picked().name);
   assert.equal(firstRow.childNodes[2].childNodes[0].textContent, '저장된 첫 분석');
-  assert.equal(ui.calls.filter(call => call.url.endsWith('/results')).length, 2);
+  assert.equal(ui.calls.filter(call => call.url.split('?')[0].endsWith('/results')).length, 2);
   await ui.runTimers(3000);
-  assert.equal(ui.calls.filter(call => call.url.endsWith('/results')).length, 2);
-  assert.equal(ui.calls.filter(call => call.url.endsWith('/config')).length, 1);
+  assert.equal(ui.calls.filter(call => call.url.split('?')[0].endsWith('/results')).length, 2);
+  assert.equal(ui.calls.filter(call => call.url.split('?')[0].endsWith('/config')).length, 1);
 });
 
 test('a delayed old job response merges its durable result without taking over the next active job', async () => {
@@ -1386,4 +1391,152 @@ test('a completed fast transcript discloses the omitted coverage audit without c
   assert(notice.textContent.includes('발화 누락 검사를 생략'));
   assert.equal(notice.classList.contains('catalog-error'), false);
   assert.equal(notice.textContent.includes('발화 누락 점검을 마쳤습니다'), false);
+});
+
+test('catalog requests compact metadata and loads one full transcript only when its detail opens', async () => {
+  const full = timedRecord();
+  const summary = require('../lib/catalog-record').catalogRecord(full);
+  const ui = await boot({ records: [summary] });
+  assert(ui.calls.some(call => call.url === '/api/analysis/results?view=summary'));
+  assert(ui.calls.some(call => call.url === '/api/analysis/config?view=summary'));
+  let reads = 0;
+  const fetch = ui.sandbox.fetch;
+  ui.sandbox.fetch = async (url, options) => {
+    if (url === '/api/analysis/results/timed') { reads++; return { ok: true, json: async () => plain(full) }; }
+    return fetch(url, options);
+  };
+  assert.equal(reads, 0);
+  const open = () => ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  await open();
+  assert.equal(reads, 1);
+  assert.equal(ui.elements.get('catalogEditSummary').value, full.summary || '');
+  assert.equal(ui.elements.get('catalogTranscript').childNodes.length, full.transcript.length);
+  assert.equal(ui.elements.get('catalogSave').disabled, false, 'loaded details can be edited and saved');
+  await ui.elements.get('catalogRefresh').dispatch('click');
+  assert.equal(ui.elements.get('catalogSubtitleSaveFolder').disabled, false, 'an unchanged summary refresh preserves loaded subtitles');
+  await ui.elements.get('catalogDetailClose').dispatch('click');
+  await ui.elements.get('catalogDetail').dispatch('close');
+  await open();
+  assert.equal(reads, 1, 'reuse the loaded full record until a changed saved revision replaces it');
+});
+
+test('an older full-detail response cannot replace a newer same-ID summary or enable an empty editor', async () => {
+  const old = { ...timedRecord(), savedAt: '2026-10-16T01:00:00Z' };
+  const current = { ...old, summary: '새로 저장한 안내', savedAt: '2026-10-16T01:01:00Z' };
+  const projection = require('../lib/catalog-record').catalogRecord;
+  const records = [projection(old)];
+  const ui = await boot({ records });
+  const fetch = ui.sandbox.fetch;
+  let release, reads = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  ui.sandbox.fetch = async (url, options) => {
+    if (url === '/api/analysis/results/timed') {
+      const first = ++reads === 1; if (first) await gate;
+      return { ok: true, json: async () => plain(first ? old : current) };
+    }
+    return fetch(url, options);
+  };
+  const open = () => ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const pending = open(); await flush();
+  records[0] = projection(current);
+  await ui.elements.get('catalogRefresh').dispatch('click');
+  release(); await pending;
+  assert.equal(reads, 1, 'a stale reply does not create an unbounded retry loop');
+  assert.equal(ui.elements.get('catalogSave').disabled, true);
+  assert(ui.elements.get('catalogSaveStatus').textContent.includes('결과가 갱신'));
+  assert.equal(ui.elements.get('catalogRows').childNodes[0].childNodes[2].childNodes[0].textContent, current.summary);
+  await ui.elements.get('catalogDetailClose').dispatch('click');
+  await ui.elements.get('catalogDetail').dispatch('close');
+  await open();
+  assert.equal(reads, 2);
+  assert.equal(ui.elements.get('catalogEditSummary').value, current.summary);
+  assert.equal(ui.elements.get('catalogSave').disabled, false);
+});
+
+test('delayed compact detail cannot overwrite a closed dialog or submit its empty loading form', async () => {
+  const full = timedRecord();
+  const ui = await boot({ records: [require('../lib/catalog-record').catalogRecord(full)] });
+  const fetch = ui.sandbox.fetch;
+  let release, reads = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  ui.sandbox.fetch = async (url, options) => {
+    if (url === '/api/analysis/results/timed') { reads++; await gate; return { ok: true, json: async () => plain(full) }; }
+    return fetch(url, options);
+  };
+  const opening = ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  await flush();
+  assert.equal(ui.elements.get('catalogDetail').open, true);
+  assert.equal(ui.elements.get('catalogSave').disabled, true);
+  await ui.elements.get('catalogEditForm').dispatch('submit');
+  assert(!ui.calls.some(call => call.method === 'PUT' && /\/results\//.test(call.url)));
+  await ui.elements.get('catalogDetailClose').dispatch('click');
+  await ui.elements.get('catalogDetail').dispatch('close');
+  release(); await opening;
+  assert.equal(reads, 1);
+  assert.equal(ui.elements.get('catalogDetail').open, false);
+  assert.equal(ui.elements.get('catalogEditSummary').value, '');
+});
+
+test('large subtitle details render incrementally while retaining all source cues', async () => {
+  const full = { ...timedRecord(), subtitleTranslation: undefined, subtitleLanguage: undefined,
+    transcript: Array.from({ length: 450 }, (_, index) => ({ start: index * 2, end: index * 2 + 1, text: `일반 안내 ${index}` })) };
+  const ui = await boot({ records: [full] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const transcript = ui.elements.get('catalogTranscript');
+  assert.equal(transcript.childNodes.length, 201);
+  assert(transcript.childNodes.at(-1).textContent.includes('200 / 450'));
+  await transcript.childNodes.at(-1).dispatch('click');
+  assert.equal(transcript.childNodes.length, 401);
+  await transcript.childNodes.at(-1).dispatch('click');
+  assert.equal(transcript.childNodes.length, 450);
+  assert(transcript.childNodes.at(-1).childNodes[1].childNodes[0].textContent.includes('449'));
+});
+
+test('interrupted manual work waits for an explicit resume and sends current validated settings', async () => {
+  const old = { id: 'interrupted-example', source: 'manual', total: 3, completed: 1, remainingCount: 2 };
+  const ui = await boot({ savedSettings: { mode: 'local', frameCount: 10 }, interruptedJobs: [old] });
+  assert.equal(ui.elements.get('catalogInterrupted').classList.contains('hidden'), false);
+  assert(!ui.calls.some(call => call.url.endsWith('/resume')));
+  const row = ui.elements.get('catalogInterruptedItems').childNodes[0];
+  assert(row.childNodes[0].textContent.includes('남은 2개'));
+  await row.childNodes[1].dispatch('click');
+  const posted = ui.calls.filter(call => call.url.endsWith('/resume'));
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].url, '/api/analysis/jobs/interrupted-example/resume');
+  assert.equal(posted[0].body.options.mode, 'local');
+  assert.equal(ui.elements.get('catalogInterrupted').classList.contains('hidden'), true);
+  assert(ui.elements.get('catalogJobTitle').textContent.includes('분석 중'));
+});
+
+test('failed interrupted-work resume remains available with its error and cannot start during another job', async () => {
+  const old = { id: 'interrupted-example', source: 'manual', total: 3, completed: 1, remainingCount: 2 };
+  const ui = await boot({ interruptedJobs: [old], resumeStatus: 409, resumeResponse: { error: '원본 파일이 변경되었습니다.' } });
+  await ui.elements.get('catalogInterruptedItems').childNodes[0].childNodes[1].dispatch('click');
+  assert.equal(ui.elements.get('catalogInterrupted').classList.contains('hidden'), false);
+  assert.equal(ui.elements.get('catalogInterruptedItems').childNodes[0].childNodes[1].disabled, false);
+  assert(ui.elements.get('catalogNotice').textContent.includes('원본 파일이 변경되었습니다.'));
+  const busy = await boot({ interruptedJobs: [old], initialActiveJob: { id: 'busy', source: 'manual', status: 'running', total: 1, completed: 0, results: [] } });
+  assert.equal(busy.elements.get('catalogInterruptedItems').childNodes[0].childNodes[1].disabled, true);
+  await busy.elements.get('catalogInterruptedItems').childNodes[0].childNodes[1].dispatch('click');
+  assert(!busy.calls.some(call => call.url.endsWith('/resume')));
+});
+
+test('job progress shows measured total and current-stage elapsed time without estimating completion', async () => {
+  const ui = await boot({ initialActiveJob: { id: 'timed-job', source: 'manual', status: 'running', total: 1, completed: 0,
+    stage: '음성 인식', elapsedMs: 125000, stageElapsedMs: 65000, results: [] } });
+  const text = ui.elements.get('catalogJobText').textContent;
+  assert(text.includes('경과 00:02:05'));
+  assert(text.includes('현재 단계 00:01:05'));
+  assert(!text.includes('예상'));
+});
+
+test('an unusable interrupted waiting job can be dismissed without starting analysis or removing results', async () => {
+  const record = timedRecord();
+  const ui = await boot({ records: [record], interruptedJobs: [{ id: 'old-waiting', source: 'manual', total: 2, completed: 1, remainingCount: 1 }] });
+  await ui.elements.get('catalogInterruptedItems').childNodes[0].childNodes[2].dispatch('click');
+  assert.equal(ui.elements.get('catalogInterrupted').classList.contains('hidden'), true);
+  assert(ui.calls.some(call => call.method === 'POST' && call.url === '/api/analysis/jobs/old-waiting/dismiss'));
+  assert(!ui.calls.some(call => call.url.endsWith('/resume') || call.url === '/api/analysis/jobs'));
+  assert.equal(ui.elements.get('catalogRows').childNodes.length, 1);
+  assert(ui.elements.get('catalogNotice').textContent.includes('원본 영상은 그대로 유지'));
 });

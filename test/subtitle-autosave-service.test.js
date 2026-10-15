@@ -8,6 +8,7 @@ const express = require('express');
 const { createAnalysisService } = require('../lib/analysis-service');
 const { createLanAnalysis, sendRemoteAnalysis } = require('../lib/lan-analysis');
 const { subtitleText } = require('../lib/subtitle-utils');
+const { httpFixtureResponse } = require('./http-json-fixture');
 
 const transcript = [{ start: 0.525, end: 3.25, text: '駅へ行きましょう。' }, { start: 7.125, end: 10.875, text: '次の列車です。' }];
 const korean = ['역으로 갑시다.', '다음 열차입니다.'];
@@ -52,7 +53,7 @@ async function fixture(t) {
     const client = {
       service, calls,
       raw(endpoint, body, method = body === undefined ? 'GET' : 'POST') {
-        return fetch(base + endpoint, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+        return httpFixtureResponse(base + endpoint, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
       },
       async request(endpoint, body, method) {
         const response = await this.raw(endpoint, body, method);

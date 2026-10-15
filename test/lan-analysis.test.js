@@ -123,6 +123,79 @@ test('uploads process authenticated data without host paths and retains JPEG fra
   assert.equal((await f.request('/api/library')).status, 404);
 });
 
+test('completed and failed snapshots are published only after uploaded-audio cleanup finishes', async t => {
+  for (const fails of [false, true]) await t.test(fails ? 'failed processor' : 'completed processor', async t => {
+    const f = await fixture(t, async ({ record }) => {
+      if (fails) throw new Error('owned processor failure');
+      return { ...record, summary: '정리 완료 뒤 공개할 합성 결과' };
+    });
+    let releaseCleanup, notifyCleanup;
+    const cleanupGate = new Promise(resolve => { releaseCleanup = resolve; });
+    const cleanupEntered = new Promise(resolve => { notifyCleanup = resolve; });
+    const originalRemove = fs.rm;
+    fs.rm = async (filename, ...args) => {
+      if (typeof filename === 'string' && filename.startsWith(path.join(f.dataDir, 'remote', 'jobs') + path.sep) && path.basename(filename) === 'audio.mp3') {
+        notifyCleanup(filename);
+        await cleanupGate;
+      }
+      return originalRemove(filename, ...args);
+    };
+    try {
+      const response = await f.submit(metadata({ transcribeAudio: true }), [
+        { field: 'frames', name: 'frame_001.jpg', type: 'image/jpeg', bytes: JPEG },
+        { field: 'audio', name: 'audio.mp3', type: 'audio/mpeg', bytes: MP3 }
+      ]);
+      const submitted = await response.json();
+      const audioPath = await cleanupEntered;
+      const pending = await (await f.request('/v1/jobs/' + submitted.id)).json();
+      assert.equal(pending.status, 'running');
+      assert.equal(pending.finishedAt, null);
+      assert.equal(pending.result, null, 'a final result must not escape before its cleanup boundary');
+      assert.equal((await fs.stat(audioPath)).isFile(), true);
+      releaseCleanup();
+      const done = await finished(f, submitted.id);
+      assert.equal(done.status, fails ? 'failed' : 'completed');
+      assert.ok(done.finishedAt);
+      if (fails) assert.match(done.error, /owned processor failure/);
+      else assert.equal(done.result.summary, '정리 완료 뒤 공개할 합성 결과');
+      await assert.rejects(fs.stat(audioPath), { code: 'ENOENT' });
+    } finally { releaseCleanup(); fs.rm = originalRemove; }
+  });
+});
+
+test('queued cancellation remains nonterminal until its uploaded audio is removed', async t => {
+  let releaseActive;
+  const activeGate = new Promise(resolve => { releaseActive = resolve; });
+  const f = await fixture(t, async ({ record }) => { await activeGate; return record; });
+  await f.submit();
+  const submitted = await (await f.submit(metadata({ transcribeAudio: true }), [
+    { field: 'frames', name: 'frame_001.jpg', type: 'image/jpeg', bytes: JPEG },
+    { field: 'audio', name: 'audio.mp3', type: 'audio/mpeg', bytes: MP3 }
+  ])).json();
+  const audioPath = path.join(f.dataDir, 'remote', 'jobs', submitted.id, 'audio.mp3');
+  let releaseCleanup, notifyCleanup;
+  const cleanupGate = new Promise(resolve => { releaseCleanup = resolve; });
+  const cleanupEntered = new Promise(resolve => { notifyCleanup = resolve; });
+  const originalRemove = fs.rm;
+  fs.rm = async (filename, ...args) => {
+    if (filename === audioPath) { notifyCleanup(); await cleanupGate; }
+    return originalRemove(filename, ...args);
+  };
+  try {
+    const cancelling = f.request('/v1/jobs/' + submitted.id + '/cancel', { method: 'POST' });
+    await cleanupEntered;
+    const pending = await (await f.request('/v1/jobs/' + submitted.id)).json();
+    assert.equal(pending.status, 'cancelling');
+    assert.equal(pending.finishedAt, null);
+    assert.equal((await fs.stat(audioPath)).isFile(), true);
+    releaseCleanup();
+    const done = await (await cancelling).json();
+    assert.equal(done.status, 'cancelled');
+    assert.ok(done.finishedAt);
+    await assert.rejects(fs.stat(audioPath), { code: 'ENOENT' });
+  } finally { releaseCleanup(); releaseActive(); fs.rm = originalRemove; }
+});
+
 test('accurate uploads require lossless FLAC and forward quality options instead of trusting sparse sidecars', async t => {
   let received;
   const f = await fixture(t, async pkg => {

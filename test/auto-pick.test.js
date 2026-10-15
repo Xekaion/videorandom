@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const express = require('express');
 const { createAnalysisService } = require('../lib/analysis-service');
+const { httpJsonFixture } = require('./http-json-fixture');
 
 const localOptions = { mode: 'local', frameCount: 10 };
 const remoteOptions = { mode: 'remote', frameCount: 10, remoteUrl: 'http://192.168.1.10:3001', connectionCode: 'private-code-do-not-persist' };
@@ -40,22 +41,28 @@ async function fixture(t, analyze, toolsAvailable = true) {
     app.use('/api/analysis', service.router);
     const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
     const base = `http://127.0.0.1:${server.address().port}/api/analysis`;
-    const request = async (url, body, method = body === undefined ? 'GET' : 'POST') => {
-      const response = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
-      return { status: response.status, data: await response.json() };
-    };
+    const request = (url, body, method) => httpJsonFixture(base, url, body, method);
     let closed = false;
     const close = async () => {
       if (closed) return;
       closed = true;
-      await service.stop();
-      await until(async () => !(await request('/auto-pick')).data.activeJob);
-      await new Promise(resolve => server.close(resolve));
+      try {
+        await service.stop();
+        await until(async () => !(await request('/auto-pick')).data.activeJob);
+      } finally {
+        await new Promise(resolve => { server.close(resolve); server.closeAllConnections?.(); });
+      }
     };
     closers.push(close);
     return { service, request, close };
   }
-  t.after(async () => { for (const close of closers) await close(); await fs.rm(dataDir, { recursive: true, force: true }); });
+  t.after(async () => {
+    try { for (const close of closers) await close(); }
+    finally {
+      assert.equal(path.dirname(dataDir), path.resolve(os.tmpdir())); assert(path.basename(dataDir).startsWith('videorandom-auto-'));
+      await fs.rm(dataDir, { recursive: true, force: true });
+    }
+  });
   return { ...await open(), open, files, dataDir, engine, calls };
 }
 

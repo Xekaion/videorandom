@@ -8,8 +8,8 @@
   const catalogSort = window.videoCatalogSort;
   const verifiedPartialSources = new WeakMap();
   const state = {
-    scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0,
-    config: null, job: null, pollTimer: null, starting: false, exporting: false,
+    scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0, detailLoading: false, transcriptLimit: 200,
+    config: null, job: null, pollTimer: null, starting: false, exporting: false, interruptedJobs: [], jobRecoveryError: '',
     pendingRequest: null, requestFailure: null, jobTargets: { id: '', keys: new Set() }, detailActivityPath: '',
     refreshing: false, detailId: null, detailPath: '', detailRequest: 0, saving: false, subtitleDownloading: false, subtitleFolderSaving: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
@@ -69,7 +69,7 @@
   const recordFor = file => state.records.get(pathKey(file.path));
   const frameUrl = (record, frame) => `/api/analysis/frames/${encodeURIComponent(record.id)}/${encodeURIComponent(frame.filename)}`;
   const isActive = job => job && ['running', 'cancelling', 'queued'].includes(job.status);
-  const hasResult = record => record && (record.status !== 'failed' || frames(record).length > 0 || record.transcript?.length > 0);
+  const hasResult = record => record && (record.status !== 'failed' || frames(record).length > 0 || (record.transcriptCount ?? record.transcript?.length ?? 0) > 0);
   const hasSummary = record => !![record?.summary, record?.plot].some(value => typeof value === 'string' && value.trim());
   const transcriptLanguage = value => ['auto', 'ja', 'zh'].includes(value) ? value : 'auto';
   const subtitleQuality = value => value === 'fast' ? 'fast' : 'accurate';
@@ -204,7 +204,7 @@
     state.autoResultsLoading = true;
     let loaded = false;
     try {
-      mergeRecords((await request('/api/analysis/results')).results);
+      mergeRecords((await request('/api/analysis/results?view=summary')).results);
       state.autoSavedCount = savedCount;
       loaded = true;
       render();
@@ -217,14 +217,14 @@
 
   async function recoverPreviousJob(id) {
     try {
-      const data = await request(`/api/analysis/jobs/${encodeURIComponent(id)}`);
+      const data = await request(`/api/analysis/jobs/${encodeURIComponent(id)}?view=summary`);
       mergeRecords((data.job || data).results);
     } catch (error) {
       if (error.status !== 404) {
         autoNotice(`이전 분석 결과 확인 재시도 필요 · ${error.message}`, true);
         return;
       }
-      try { mergeRecords((await request('/api/analysis/results')).results); }
+      try { mergeRecords((await request('/api/analysis/results?view=summary')).results); }
       catch (failure) { autoNotice(`저장된 결과 확인 실패 · ${failure.message}`, true); }
     }
     render();
@@ -234,7 +234,7 @@
     if (state.autoPolling) return;
     state.autoPolling = true;
     try {
-      const result = await request('/api/analysis/auto-pick');
+      const result = await request('/api/analysis/auto-pick?view=summary');
       if (state.autoTransportError) autoNotice();
       state.autoTransportError = false;
       applyAutoPick(result);
@@ -302,7 +302,7 @@
       if (state.winnerRequest === requestId) state.winnerStatus = result.status || 'queued';
       applyAutoPick(result);
       if (result.status === 'already-completed' && !state.records.get(pathKey(winner.path))) {
-        const saved = await request('/api/analysis/results');
+        const saved = await request('/api/analysis/results?view=summary');
         mergeRecords(saved.results);
         render();
       }
@@ -321,6 +321,8 @@
       if (!record || !record.id || !record.path) return;
       const key = pathKey(record.path);
       const previous = state.records.get(key);
+      if (record.catalogView === 'summary' && previous?.catalogView !== 'summary' && previous?.id === record.id
+          && previous.savedAt === record.savedAt && previous.editedAt === record.editedAt) return;
       // Keep a prior usable summary when a retry fails, while allowing a newer
       // partial summary to repair an older result that only claimed completion.
       const priority = result => hasSummary(result) ? result.status === 'completed' ? 4 : 3
@@ -329,8 +331,10 @@
       const savedTime = result => {
         const savedAt = Date.parse(result?.savedAt || '');
         const analyzedAt = Date.parse(result?.analyzedAt || '');
-        return Math.max(Number.isFinite(savedAt) ? savedAt : 0, Number.isFinite(analyzedAt) ? analyzedAt : 0);
+        const editedAt = Date.parse(result?.editedAt || '');
+        return Math.max(Number.isFinite(savedAt) ? savedAt : 0, Number.isFinite(analyzedAt) ? analyzedAt : 0, Number.isFinite(editedAt) ? editedAt : 0);
       };
+      if (previous?.id === record.id && savedTime(record) < savedTime(previous)) return;
       if (!previous || previous.id === record.id || priority(record) > priority(previous)
           || (priority(record) === priority(previous) && savedTime(record) > savedTime(previous))) {
         state.records.set(key, record);
@@ -427,6 +431,7 @@
   }
 
   function renderDetailActivity() {
+    if (state.detailLoading) return;
     if (!$('catalogDetail').open) return;
     const record = findRecord(state.detailId);
     if (!record) {
@@ -434,6 +439,7 @@
       if (latest) openDetail(latest.id);
       return;
     }
+    if (record.catalogView === 'summary') { openDetail(record.id); return; }
     const activity = fileActivity(record);
     $('catalogDetailRepair').textContent = activity?.active ? activity.label : '복구 / 다시 분석';
     $('catalogDetailHealth').classList.toggle('catalog-activity-health', activity?.active === true);
@@ -473,9 +479,13 @@
     const detail = findRecord(state.detailId);
     $('catalogSubtitleSaveFolder').disabled = state.subtitleFolderSaving || state.subtitleDownloading || state.starting || isActive(state.job)
       || !detail || !(hasTranslatedSubtitles(detail) || partialTranslatedSubtitles(detail).length);
+    if (state.detailLoading) {
+      for (const key of ['catalogSave', 'catalogDetailRepair', 'catalogSubtitleSrt', 'catalogSubtitleVtt', 'catalogSubtitleSaveFolder']) $(key).disabled = true;
+    }
   }
 
   function render() {
+    renderInterruptedJobs();
     state.filtered = catalogSort.sortFiles(filteredFiles(), recordFor, $('catalogSort').value);
     const pageCount = Math.max(1, Math.ceil(state.filtered.length / PAGE_SIZE));
     state.page = Math.min(state.page, pageCount - 1);
@@ -552,7 +562,7 @@
       if (!tags.childNodes.length) tags.append(make('span', 'catalog-muted', '—'));
       labelsCell.append(tags);
       const dialogueCell = make('td');
-      dialogueCell.append(make('p', 'catalog-text-clamp', record?.dialogueSummary || (record?.transcript?.length ? `대사 / 자막 ${record.transcript.length.toLocaleString()}구간 · 상세에서 확인` : '—')));
+      dialogueCell.append(make('p', 'catalog-text-clamp', record?.dialogueSummary || ((record?.transcriptCount ?? record?.transcript?.length) ? `대사 / 자막 ${(record.transcriptCount ?? record.transcript.length).toLocaleString()}구간 · 상세에서 확인` : '—')));
 
       const framesCell = make('td');
       const strip = make('div', 'catalog-frame-strip');
@@ -829,11 +839,13 @@
     state.refreshing = true;
     const connectionVersion = state.connectionVersion;
     $('catalogRefresh').disabled = true;
-    const results = await Promise.allSettled([request('/api/analysis/config'), request('/api/analysis/results')]);
+    const results = await Promise.allSettled([request('/api/analysis/config?view=summary'), request('/api/analysis/results?view=summary')]);
     state.refreshing = false;
     $('catalogRefresh').disabled = false;
     if (results[0].status === 'fulfilled') {
       const config = state.config = results[0].value;
+      state.interruptedJobs = Array.isArray(config.interruptedJobs) ? config.interruptedJobs : [];
+      state.jobRecoveryError = typeof config.jobRecoveryError === 'string' ? config.jobRecoveryError : '';
       $('catalogMode').querySelector('option[value="codex"]').disabled = !codexReady();
       const firstLoad = !state.settingsReady;
       const persistedOptions = config.autoPick?.options;
@@ -875,7 +887,8 @@
       $('catalogToolStatus').textContent = '분석 설정을 확인하지 못했습니다. 결과 불러오기로 재시도하세요.';
     }
     if (results[1].status === 'fulfilled') {
-      state.records.clear();
+      const savedIds = new Set((results[1].value.results || []).map(record => record.id));
+      for (const [key, record] of state.records) if (!savedIds.has(record.id)) state.records.delete(key);
       mergeRecords(results[1].value.results);
       state.resultsReady = true;
       state.autoSavedCount = Number.isInteger(state.autoPick?.savedCount) ? state.autoPick.savedCount : (results[1].value.results || []).length;
@@ -903,6 +916,57 @@
       subtitleLanguage: mode !== 'local' && $('catalogTranslateSubtitles').checked ? 'ko' : 'original',
       subtitleQuality: mode === 'local' ? 'fast' : subtitleQuality($('catalogSubtitleQuality').value),
       ...(mode === 'remote' ? remoteOptions() : {}) };
+  }
+
+  function renderInterruptedJobs() {
+    const jobs = state.interruptedJobs.filter(job => job?.id && job.remainingCount > 0);
+    $('catalogInterrupted').classList.toggle('hidden', !jobs.length && !state.jobRecoveryError);
+    $('catalogInterruptedError').textContent = state.jobRecoveryError;
+    $('catalogInterruptedError').classList.toggle('hidden', !state.jobRecoveryError);
+    const fragment = document.createDocumentFragment();
+    for (const job of jobs) {
+      const row = make('p');
+      row.append(make('span', '', `${job.source === 'repair' ? '복구 분석' : '선택 분석'} · ${job.completed || 0}/${job.total || 0}개 저장 · 남은 ${job.remainingCount}개 `));
+      const button = make('button', 'btn-mini', '남은 영상 분석 재개');
+      button.type = 'button';
+      button.disabled = state.starting || isActive(state.job) || !state.settingsReady;
+      button.addEventListener('click', () => resumeInterruptedJob(job.id));
+      row.append(button);
+      const dismiss = make('button', 'btn-mini', '이 대기 작업 취소');
+      dismiss.type = 'button';
+      dismiss.disabled = state.starting || isActive(state.job);
+      dismiss.addEventListener('click', () => dismissInterruptedJob(job.id));
+      row.append(dismiss);
+      fragment.append(row);
+    }
+    $('catalogInterruptedItems').replaceChildren(fragment);
+  }
+
+  async function resumeInterruptedJob(id) {
+    if (state.starting || isActive(state.job)) return;
+    try {
+      const options = analysisOptions();
+      state.starting = true;
+      render();
+      notice('저장된 결과를 유지하고 미완료 영상의 분석을 다시 시작합니다. 처리 중이던 영상은 처음부터 분석합니다.');
+      const result = await request(`/api/analysis/jobs/${encodeURIComponent(id)}/resume`, jsonOptions('POST', { options }));
+      state.interruptedJobs = state.interruptedJobs.filter(job => job.id !== id);
+      trackJob(result.job || result);
+    } catch (error) {
+      notice(`중단 작업 재개 실패 · ${error.message}`, true);
+    } finally { state.starting = false; render(); }
+  }
+
+  async function dismissInterruptedJob(id) {
+    if (state.starting || isActive(state.job)) return;
+    state.starting = true;
+    render();
+    try {
+      await request(`/api/analysis/jobs/${encodeURIComponent(id)}/dismiss`, jsonOptions('POST', {}));
+      state.interruptedJobs = state.interruptedJobs.filter(job => job.id !== id);
+      notice('이 대기 작업을 취소했습니다. 저장된 분석 결과와 원본 영상은 그대로 유지합니다.');
+    } catch (error) { notice(`대기 작업 취소 실패 · ${error.message}`, true); }
+    finally { state.starting = false; render(); }
   }
 
   async function repairResult(id) {
@@ -964,7 +1028,8 @@
     const jobTitle = ({ completed: '분석 완료', cancelled: '분석 중지됨', failed: '분석 작업 실패', cancelling: '분석 중지 중…' })[job.status] || '영상 분석 중';
     $('catalogJobTitle').textContent = job.source === 'auto-pick' ? `뽑은 영상 자동 ${jobTitle.replace(/^영상 /, '')}` : job.source === 'repair' ? `복구 · ${jobTitle}` : jobTitle;
     $('catalogJobProgress').value = overall;
-    $('catalogJobText').textContent = `${completed}/${total}개 처리${job.currentFile ? ` · ${job.currentFile}` : ''}${active && job.stage ? ` · ${job.stage}` : ''}${job.error ? ` · ${job.error}` : ''}`;
+    const timing = Number.isFinite(job.elapsedMs) ? ` · 경과 ${time(job.elapsedMs / 1000)}${active && Number.isFinite(job.stageElapsedMs) ? ` · 현재 단계 ${time(job.stageElapsedMs / 1000)}` : ''}` : '';
+    $('catalogJobText').textContent = `${completed}/${total}개 처리${job.currentFile ? ` · ${job.currentFile}` : ''}${active && job.stage ? ` · ${job.stage}` : ''}${timing}${job.error ? ` · ${job.error}` : ''}`;
     $('catalogCancel').classList.toggle('hidden', !active);
     $('catalogCancel').disabled = job.status === 'cancelling';
   }
@@ -1017,7 +1082,7 @@
   async function pollJob(id) {
     if (state.job?.id !== id) return;
     try {
-      const result = await request(`/api/analysis/jobs/${encodeURIComponent(id)}`);
+      const result = await request(`/api/analysis/jobs/${encodeURIComponent(id)}?view=summary`);
       if (state.job?.id !== id) {
         mergeRecords((result.job || result).results);
         render();
@@ -1091,6 +1156,45 @@
   async function openDetail(id) {
     const record = findRecord(id);
     if (!record) return;
+    if (record.catalogView === 'summary') {
+      state.detailLoading = true;
+      state.detailId = id;
+      state.detailPath = record.path;
+      const token = ++state.detailRequest;
+      $('catalogDetailTitle').textContent = record.name || '영상 상세';
+      $('catalogDetailPath').textContent = record.path;
+      $('catalogDetailMeta').textContent = '저장된 상세 내용 불러오는 중…';
+      $('catalogAnalysisTimings').classList.add('hidden');
+      $('catalogTranscriptSource').textContent = '전체 대사 불러오는 중…';
+      $('catalogDetailHealth').textContent = healthLabel(record);
+      $('catalogDetailWarnings').classList.add('hidden');
+      $('catalogDetailRepairNote').textContent = '목록에는 필요한 정보만 불러옵니다. 전체 대사와 자막을 이 PC에서 읽고 있습니다.';
+      for (const key of ['catalogEditSummary', 'catalogEditPlot', 'catalogEditLabels', 'catalogEditDialogue']) $(key).value = '';
+      for (const key of ['catalogGallery', 'catalogTranscript']) $(key).replaceChildren();
+      for (const key of ['catalogSubtitleNotice', 'catalogSubtitleQualityNotice', 'catalogSubtitleAutoSaveNotice']) $(key).classList.add('hidden');
+      for (const key of ['catalogSave', 'catalogDetailRepair', 'catalogSubtitleSrt', 'catalogSubtitleVtt', 'catalogSubtitleSaveFolder']) $(key).disabled = true;
+      $('catalogDetailProgress').classList.add('hidden');
+      $('catalogGalleryCount').textContent = `(${record.frameCount || 0}장)`;
+      $('catalogSaveStatus').textContent = '';
+      if (!$('catalogDetail').open) $('catalogDetail').showModal();
+      try {
+        const full = await request(`/api/analysis/results/${encodeURIComponent(id)}`);
+        if (state.detailRequest !== token || state.detailId !== id || !$('catalogDetail').open) return;
+        if (full.id !== id || full.path !== record.path || full.catalogView === 'summary') throw new Error('상세 결과가 일치하지 않습니다. 결과를 다시 불러와 주세요.');
+        mergeRecords([full]);
+        const latest = recordFor(full);
+        if (latest?.id === id && latest.catalogView === 'summary') throw new Error('상세 내용을 읽는 동안 결과가 갱신됐습니다. 상세 보기를 다시 열어 주세요.');
+        state.detailLoading = false;
+        return openDetail(latest?.id || id);
+      } catch (error) {
+        if (state.detailRequest !== token || state.detailId !== id || !$('catalogDetail').open) return;
+        $('catalogDetailMeta').textContent = '상세 내용을 불러오지 못했습니다.';
+        $('catalogSaveStatus').textContent = `${error.message} 창을 닫고 상세 보기를 다시 누르면 재시도합니다.`;
+      }
+      return;
+    }
+    state.detailLoading = false;
+    state.transcriptLimit = 200;
     state.detailId = id;
     state.detailPath = record.path;
     const detailRequest = ++state.detailRequest;
@@ -1099,6 +1203,11 @@
     const analyzedAt = record.analyzedAt ? new Date(record.analyzedAt) : null;
     const savedAt = record.savedAt ? new Date(record.savedAt) : null;
     $('catalogDetailMeta').textContent = `길이 ${time(record.duration)} · 이미지 ${frames(record).length}장${analyzedAt && !Number.isNaN(analyzedAt.getTime()) ? ` · 정리 ${analyzedAt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` : ''}${savedAt && !Number.isNaN(savedAt.getTime()) ? ` · 이 PC에 저장 ${savedAt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` : ''}`;
+    const metrics = record.analysisMetrics;
+    const timedStages = (Array.isArray(metrics?.stages) ? metrics.stages : []).filter(stage => typeof stage?.label === 'string' && Number.isFinite(stage.durationMs) && stage.durationMs >= 0);
+    const measured = Number.isFinite(metrics?.totalMs) && metrics.totalMs >= 0;
+    $('catalogAnalysisTimings').textContent = measured ? `이번 분석 소요 ${time(metrics.totalMs / 1000)}${timedStages.length ? ` · ${timedStages.map(stage => `${stage.label} ${time(stage.durationMs / 1000)}`).join(' / ')}` : ''}` : '';
+    $('catalogAnalysisTimings').classList.toggle('hidden', !measured);
     $('catalogDetailHealth').textContent = healthLabel(record);
     $('catalogDetailRepairNote').textContent = `${healthFor(record).reason} 현재 분석 설정으로 다시 분석하며 기존 결과는 보존합니다.`;
     $('catalogDetailRepair').classList.toggle('hidden', healthFor(record).repairable === false);
@@ -1111,6 +1220,7 @@
     $('catalogEditLabels').value = labels(record).join(', ');
     $('catalogEditDialogue').value = record.dialogueSummary || '';
     $('catalogSaveStatus').textContent = isActive(state.job) ? '분석이 끝나면 수정 내용을 저장할 수 있습니다.' : '';
+    $('catalogSave').disabled = state.saving || isActive(state.job);
     $('catalogGalleryCount').textContent = `(${frames(record).length}장)`;
     const gallery = document.createDocumentFragment();
     frames(record).forEach(frame => {
@@ -1213,7 +1323,7 @@
     renderSubtitleQuality(record);
     renderSubtitleAutoSave(record, translated);
     const lines = document.createDocumentFragment();
-    transcript.forEach((segment, index) => {
+    transcript.slice(0, state.transcriptLimit).forEach((segment, index) => {
       const line = make('div', 'catalog-transcript-line');
       const body = make('div', 'catalog-transcript-text');
       if (view !== 'ko') body.append(make('p', translated && view === 'both' ? 'catalog-transcript-original' : '', segment.text));
@@ -1224,6 +1334,12 @@
       line.append(make('span', 'catalog-transcript-time', `${subtitleTime(segment.start)}${segment.end != null ? ` – ${subtitleTime(segment.end)}` : ''}`), body);
       lines.append(line);
     });
+    if (transcript.length > state.transcriptLimit) {
+      const more = make('button', 'btn btn-secondary', `${state.transcriptLimit.toLocaleString()} / ${transcript.length.toLocaleString()}구간 표시 · 대사 더 보기`);
+      more.type = 'button';
+      more.addEventListener('click', () => { state.transcriptLimit += 200; renderTranscript(record); });
+      lines.append(more);
+    }
     if (!transcript.length) lines.append(make('p', 'catalog-muted', '대사가 추출되지 않았습니다. 자막 / 음성 인식 오류 안내를 확인하고 복구 / 다시 분석하세요.'));
     $('catalogTranscript').replaceChildren(lines);
   }
@@ -1289,6 +1405,7 @@
   }
 
   async function downloadSubtitles(format) {
+    if (state.detailLoading) return;
     const record = findRecord(state.detailId);
     if (!record || state.subtitleDownloading) return;
     const language = $('catalogSubtitleDownloadLanguage').value === 'ko' ? 'ko' : 'original';
@@ -1329,6 +1446,7 @@
   }
 
   async function saveSubtitlesInFolder() {
+    if (state.detailLoading) return;
     const record = findRecord(state.detailId);
     if (!record || state.subtitleFolderSaving || state.subtitleDownloading || state.starting || isActive(state.job)
         || !(hasTranslatedSubtitles(record) || partialTranslatedSubtitles(record).length)) return;
@@ -1362,6 +1480,7 @@
 
   async function saveDetail(event) {
     event.preventDefault();
+    if (state.detailLoading) return;
     if (!state.detailId || state.saving || isActive(state.job)) return;
     const id = state.detailId;
     state.saving = true;
@@ -1377,7 +1496,7 @@
       render();
       $('catalogSaveStatus').textContent = '저장했습니다. 엑셀에도 수정한 내용이 반영됩니다.';
     } catch (error) { $('catalogSaveStatus').textContent = `저장 실패 · ${error.message}`; }
-    finally { state.saving = false; $('catalogSave').disabled = isActive(state.job); }
+    finally { state.saving = false; $('catalogSave').disabled = state.detailLoading || isActive(state.job); }
   }
 
   function onScan(files) {
@@ -1452,6 +1571,7 @@
     $('catalogSubtitleSaveFolder').addEventListener('click', saveSubtitlesInFolder);
     $('catalogDetail').addEventListener('close', () => {
       state.detailRequest++;
+      state.detailLoading = false;
       const origin = [...document.querySelectorAll('.catalog-file-name')].find(element => element.dataset.recordId === String(state.detailId));
       (origin || $('catalogRefresh')).focus();
     });

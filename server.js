@@ -8,6 +8,8 @@ const { createAnalysisService, defaultDataDir } = require('./lib/analysis-servic
 const { createHistoryService } = require('./lib/history-service');
 const { recoverRecentVideos } = require('./lib/windows-recent');
 const { startLocalServer, startExistingAnalysisHost } = require('./lib/app-server');
+const { asyncRoute, apiErrorHandler, requestObject, filePathInput, scanInput } = require('./lib/http-route-utils');
+const { acquireDataDirLease, dataStoreId, assertCompatibleInstances } = require('./lib/data-dir-lease');
 
 const app = express();
 const APP_VERSION = require('./package.json').version;
@@ -16,8 +18,12 @@ let PORT = requestedPort;
 let startupInfo = { requestedPort, port: PORT, portConflict: false };
 // A second launch may reuse an existing app. It must not submit that app's
 // restored analysis queue before local server ownership is decided.
-const analysisService = createAnalysisService({ deferAutoStart: true });
-const historyService = createHistoryService({ dataDir: defaultDataDir() });
+const dataDir = path.resolve(defaultDataDir());
+const storeId = dataStoreId(dataDir);
+let analysisService = null;
+let historyService = null;
+let initialized = false;
+let dataLease = null;
 
 // Middleware
 app.use('/api/history/import-json', express.json({ limit: '64mb' }));
@@ -39,20 +45,24 @@ app.use('/api', (req, res, next) => {
   }
   next();
 });
+app.use('/api', (req, res, next) => {
+  if (initialized || req.path === '/app-info') return next();
+  res.status(503).json({ error: '프로그램을 시작하고 있습니다. 잠시 후 다시 시도해 주세요.' });
+});
 app.use(express.static(path.join(__dirname, 'public'), { setHeaders: res => res.setHeader('Cache-Control', 'no-cache') }));
-app.use('/api/analysis', analysisService.router);
-app.use('/api/history', historyService.router);
+app.use('/api/analysis', (req, res, next) => analysisService.router(req, res, next));
+app.use('/api/history', (req, res, next) => historyService.router(req, res, next));
 app.get('/api/app-info', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ application: 'videorandom', version: APP_VERSION, features: ['catalog', 'history'], ...startupInfo });
+  res.json({ application: 'videorandom', version: APP_VERSION, features: ['catalog', 'history'], dataStoreId: storeId, ready: initialized, ...startupInfo });
 });
-app.post('/api/history/recover-windows', async (req, res) => {
+app.post('/api/history/recover-windows', asyncRoute(async (req, res) => {
   try {
     const recovered = await recoverRecentVideos();
     const result = await historyService.importWindowsRecent(recovered.entries);
     res.json({ ...result, warnings: [...(result.warnings || []), ...recovered.warnings] });
   } catch (error) { res.status(500).json({ error: 'Windows 최근 영상 흔적을 읽지 못했습니다: ' + error.message }); }
-});
+}));
 
 // Video file extensions to search
 const VIDEO_EXTENSIONS = new Set([
@@ -101,7 +111,7 @@ function runCommandWithTimeout(command, timeoutMs = 2000) {
  * GET /api/drives
  * Detects all active local and external drives asynchronously in a non-blocking way
  */
-app.get('/api/drives', async (req, res) => {
+app.get('/api/drives', asyncRoute(async (req, res) => {
   console.log('Detecting drives requested...');
   
   try {
@@ -157,13 +167,13 @@ app.get('/api/drives', async (req, res) => {
     
     return res.json(drives);
   }
-});
+}));
 
 /**
  * POST /api/browse
  * Opens native Windows folder browser dialog via PowerShell and returns the selected path
  */
-app.post('/api/browse', async (req, res) => {
+app.post('/api/browse', asyncRoute(async (req, res) => {
   console.log('Opening native folder browser dialog...');
   
   // Script uses [System.Windows.Forms.FolderBrowserDialog] in STA mode
@@ -184,21 +194,17 @@ app.post('/api/browse', async (req, res) => {
     console.warn('Folder dialog cancelled or failed:', err.message);
     return res.json({ selectedPath: null });
   }
-});
+}));
 
 /**
  * POST /api/scan
  * Recursively scans the given directory asynchronously for video files without blocking the server
  */
-app.post('/api/scan', async (req, res) => {
-  const { directory, excludeDirs } = req.body;
-
-  if (!directory) {
-    return res.status(400).json({ error: '디렉터리 경로가 필요합니다.' });
-  }
+app.post('/api/scan', asyncRoute(async (req, res) => {
+  const { paths, excludeDirs } = scanInput(req.body);
 
   // Parse custom exclusions
-  const userExcludeDirs = Array.isArray(excludeDirs) ? excludeDirs : [];
+  const userExcludeDirs = excludeDirs;
   const customExcludeNames = new Set();
   const customExcludePaths = [];
 
@@ -210,15 +216,6 @@ app.post('/api/scan', async (req, res) => {
     } else {
       customExcludeNames.add(trimmed.toLowerCase());
     }
-  }
-
-  // Parse comma-separated paths (e.g. "D:\, E:\")
-  const paths = typeof directory === 'string'
-    ? directory.split(',').map(d => d.trim()).filter(Boolean)
-    : [directory];
-
-  if (paths.length === 0) {
-    return res.status(400).json({ error: '유효한 디렉터리 경로가 없습니다.' });
   }
 
   const validDirs = [];
@@ -345,18 +342,14 @@ app.post('/api/scan', async (req, res) => {
     console.error('Scan error:', err);
     return res.status(500).json({ error: '스캔 작업 중 에러가 발생했습니다: ' + err.message });
   }
-});
+}));
 
 /**
  * POST /api/open
  * Opens the file's parent folder and highlights the file in Windows Explorer
  */
-app.post('/api/open', async (req, res) => {
-  const { filePath } = req.body;
-
-  if (!filePath) {
-    return res.status(400).json({ error: '파일 경로가 누락되었습니다.' });
-  }
+app.post('/api/open', asyncRoute(async (req, res) => {
+  const filePath = filePathInput(requestObject(req.body).filePath);
 
   // Standardize to Windows backslashes and normalize
   const winPath = path.normalize(filePath).replace(/\//g, '\\');
@@ -377,18 +370,14 @@ app.post('/api/open', async (req, res) => {
   });
 
   return res.json({ success: true });
-});
+}));
 
 /**
  * POST /api/play
  * Plays the video using Windows default media player
  */
-app.post('/api/play', async (req, res) => {
-  const { filePath } = req.body;
-
-  if (!filePath) {
-    return res.status(400).json({ error: '파일 경로가 누락되었습니다.' });
-  }
+app.post('/api/play', asyncRoute(async (req, res) => {
+  const filePath = filePathInput(requestObject(req.body).filePath);
 
   // Standardize to Windows backslashes and normalize
   const winPath = path.normalize(filePath).replace(/\//g, '\\');
@@ -411,19 +400,33 @@ app.post('/api/play', async (req, res) => {
   } catch (error) {
     return res.json({ success: true, historySaved: false, warning: '재생은 실행했지만 기록을 저장하지 못했습니다. 저장 폴더를 확인해 주세요.' });
   }
-});
+}));
+
+app.use(apiErrorHandler);
 
 // Start Server
 async function start() {
-  const result = await startLocalServer(app, { port: requestedPort, version: APP_VERSION });
+  const result = await startLocalServer(app, { port: requestedPort, version: APP_VERSION, dataStoreId: storeId });
   PORT = result.port;
   startupInfo = { requestedPort, port: PORT, portConflict: result.portConflict };
   if (result.server) result.server.on('error', error => console.error('프로그램 서버 오류:', error.message));
   if (result.server) {
-    await analysisService.ready;
-    await analysisService.activateAutoAnalysis();
-  } else {
-    await analysisService.stop();
+    try {
+      assertCompatibleInstances(result.conflicts, storeId);
+      dataLease = acquireDataDirLease(dataDir, { version: APP_VERSION });
+      process.once('exit', () => { try { dataLease?.release(); } catch (_) {} });
+      analysisService = createAnalysisService({ dataDir, deferAutoStart: true });
+      historyService = createHistoryService({ dataDir });
+      await Promise.all([analysisService.ready, historyService.ready]);
+      initialized = true;
+      await analysisService.activateAutoAnalysis();
+    } catch (error) {
+      initialized = false;
+      if (analysisService) await analysisService.stop().catch(() => {});
+      await new Promise(resolve => result.server.close(resolve));
+      dataLease?.release();
+      throw error;
+    }
   }
   const localUrl = `http://localhost:${PORT}`;
   console.log(`===================================================`);
@@ -432,10 +435,10 @@ async function start() {
   console.log(`===================================================`);
 
   try {
-    if (result.portConflict) console.log('기존 프로그램이 사용 중인 포트를 피해 새 버전을 열었습니다. 이전 브라우저 기록은 기존 프로그램 종료 후 같은 브라우저의 localhost:3000에서 가져올 수 있습니다.');
+    if (result.portConflict) console.log(`${requestedPort}번 포트가 사용 중이어서 ${PORT}번 포트로 열었습니다. 다른 PC에 입력한 분석 서버 주소는 변경할 필요가 없습니다.`);
     try {
       const hostPreference = process.env.VIDEORANDOM_START_HOST;
-      const shouldStartHost = hostPreference === '1' || (hostPreference !== '0' && await analysisService.getHostAutoStart());
+      const shouldStartHost = hostPreference === '1' || (hostPreference !== '0' && analysisService && await analysisService.getHostAutoStart());
       if (shouldStartHost) {
         const host = result.reused ? await startExistingAnalysisHost(PORT) : await analysisService.startHost();
         console.log('분석 서버 시작:', host.addresses.join(', '));
