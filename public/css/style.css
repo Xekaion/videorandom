@@ -1506,6 +1506,13 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-status-completed { background: rgba(16,185,129,.09); color: #6ee7b7; }
 .catalog-status-partial { background: rgba(245,158,11,.1); color: #fcd34d; }
 .catalog-status-failed { background: rgba(244,63,94,.1); color: #fda4af; }
+.catalog-status-active { background: rgba(6,182,212,.14); color: #67e8f9; }
+.catalog-table tbody tr.catalog-row-active { background: rgba(6,182,212,.045); }
+.catalog-row-stage, .catalog-row-previous { display: block; font-size: 10px; line-height: 1.7; margin-top: 7px; overflow-wrap: anywhere; }
+.catalog-row-stage { color: #a5e6ef; }
+.catalog-row-previous { color: var(--color-text-muted); }
+.catalog-row-progress, .catalog-detail-progress { display: block; width: 100%; height: 6px; margin-top: 9px; accent-color: var(--color-accent); }
+.catalog-repair-panel .catalog-activity-health { color: #67e8f9; }
 .catalog-row-warning { display: block; color: #e5bd6c; font-size: 10px; margin-top: 7px; }
 .catalog-empty { text-align: center; padding: 50px 20px !important; }
 .catalog-empty strong { font-size: 15px; }

@@ -21,6 +21,7 @@ class Element {
   append(...items) { for (const item of items) this.childNodes.push(...(item.tag === '#fragment' ? item.childNodes : [item])); }
   replaceChildren(...items) { this.childNodes = []; this.append(...items); }
   setAttribute() {}
+  removeAttribute(name) { delete this[name]; }
   addEventListener(type, callback) { const callbacks = this.listeners.get(type) || []; callbacks.push(callback); this.listeners.set(type, callbacks); }
   async dispatch(type) { for (const callback of this.listeners.get(type) || []) await callback({ target: this, preventDefault() {} }); }
   querySelector() { return new Element('option'); }
@@ -31,7 +32,7 @@ class Element {
   focus() {}
 }
 
-async function boot({ savedSettings, initialQueue, initialConnection = null, records = [], delayConfig = false, delayRemote = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v2'], remoteSuperseded = false, jobResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
+async function boot({ savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v2'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
@@ -39,10 +40,11 @@ async function boot({ savedSettings, initialQueue, initialConnection = null, rec
   let connection = initialConnection;
   const preferences = new Map(savedSettings ? [['video_catalog_settings', JSON.stringify(savedSettings)]] : []);
   const calls = [], timers = new Map();
-  let load, releaseConfig, releaseRemote, timerId = 0;
+  let load, releaseConfig, releaseRemote, releaseRepair, timerId = 0;
   const configGate = delayConfig ? new Promise(resolve => { releaseConfig = resolve; }) : Promise.resolve();
   const remoteGate = delayRemote ? new Promise(resolve => { releaseRemote = resolve; }) : Promise.resolve();
-  const config = () => ({ tools: { available: true }, providers: providerStatus, defaultMode: 'codex', host: { running: false }, autoPick: plain(queue), connection: plain(connection) });
+  const repairGate = delayRepair ? new Promise(resolve => { releaseRepair = resolve; }) : Promise.resolve();
+  const config = () => ({ tools: { available: true }, providers: providerStatus, defaultMode: 'codex', host: { running: false }, activeJob: plain(initialActiveJob), autoPick: plain(queue), connection: plain(connection) });
   const sandbox = {
     crypto: browserCrypto, TextEncoder,
     document: { body: new Element('body'), getElementById: id => elements.get(id), createElement: tag => new Element(tag), createDocumentFragment: () => new Element('#fragment'), querySelectorAll: () => [], addEventListener: (_type, callback) => { load = callback; } },
@@ -62,13 +64,14 @@ async function boot({ savedSettings, initialQueue, initialConnection = null, rec
       }
       else if (url === '/api/analysis/connection' && method === 'DELETE') { connection = null; result = { remoteUrl: '', connectionCode: '', remembered: false }; }
       else if (/\/results\/[^/]+\/repair$/.test(url)) {
+        await repairGate;
         result = repairResponse || { id: 'repair-job', source: 'repair', repairOf: decodeURIComponent(url.split('/').at(-2)), status: 'running', total: 1, completed: 0, results: [] };
         return { ok: repairStatus < 400, status: repairStatus, json: async () => plain(result) };
       }
       else if (/\/results\/[^/]+\/subtitles\?/.test(url)) {
         return { ok: subtitleStatus < 400, status: subtitleStatus, json: async () => ({ error: subtitleResponse || '저장된 한국어 번역 자막이 없습니다.' }), blob: async () => new Blob([subtitleResponse || '1\n00:00:01,250 --> 00:00:03,500\n안녕하세요.\n'], { type: 'text/plain;charset=utf-8' }) };
       }
-      else if (url === '/api/analysis/jobs') result = { job: { id: 'manual', source: 'manual', status: 'completed', total: body.files.length, completed: body.files.length, results: [] } };
+      else if (url === '/api/analysis/jobs') result = { job: plain(manualResponse || { id: 'manual', source: 'manual', status: 'completed', total: body.files.length, completed: body.files.length, results: [] }) };
       else if (url === '/api/analysis/auto-pick') {
         if (method === 'PUT') {
           if (body.options) {
@@ -103,7 +106,7 @@ async function boot({ savedSettings, initialQueue, initialConnection = null, rec
     for (const [id, timer] of ready) { timers.delete(id); await timer.callback(); }
     await flush();
   };
-  return { sandbox, elements, calls, preferences, runTimers, releaseConfig, releaseRemote, body: sandbox.document.body, getConnection: () => connection, setQueue: next => { queue = next; }, getQueue: () => queue };
+  return { sandbox, elements, calls, preferences, runTimers, releaseConfig, releaseRemote, releaseRepair, body: sandbox.document.body, getConnection: () => connection, setQueue: next => { queue = next; }, getQueue: () => queue };
 }
 
 test('revealing a winner records the pick and queues analysis without replaying or changing selections', () => {
@@ -595,6 +598,295 @@ test('a provider refusal is displayed as a failed repair without an automatic re
   await ui.runTimers(1500);
   assert.equal(ui.calls.filter(call => call.url.endsWith('/repair')).length, 1);
   assert.equal(ui.calls.filter(call => call.url === '/api/analysis/jobs').length, 0);
+});
+
+function descendants(element) {
+  return [element, ...(element.childNodes || []).flatMap(descendants)];
+}
+
+function classNode(element, name) {
+  return descendants(element).find(node => String(node.className || '').split(/\s+/).includes(name));
+}
+
+function catalogRow(ui, filePath) {
+  const row = ui.elements.get('catalogRows').childNodes.find(candidate => classNode(candidate, 'catalog-file-path')?.textContent === filePath);
+  assert(row, `Expected a row for synthetic path ${filePath}`);
+  return row;
+}
+
+const processingRecord = (id = 'processing-fixture', folder = '첫째') => ({
+  id, name: '합성_UI_영상.mp4', path: `Z:\\합성_UI_전용\\${folder}\\합성_UI_영상.mp4`, status: 'partial', frames: [], summary: '기존 합성 줄거리',
+  health: { code: 'partial', repairable: true, reason: '합성 복구가 필요한 결과입니다.' }
+});
+
+const processingJob = (record, changes = {}) => ({
+  id: 'processing-job', source: 'repair', repairOf: record.id, status: 'running', total: 1, completed: 0,
+  currentFile: record.name, currentFilePath: record.path, stage: '합성 대사 인식 중', percent: 37, results: [], ...changes
+});
+
+function assertRowProcessing(ui, record, label, stage, percent) {
+  const row = catalogRow(ui, record.path);
+  assert.match(classNode(row, 'catalog-status').textContent, label);
+  const button = classNode(row, 'catalog-repair-button');
+  assert.match(button.textContent, label);
+  assert.equal(button.disabled, true);
+  if (stage) {
+    const progressText = classNode(row, 'catalog-row-stage')?.textContent || '';
+    assert(progressText.includes(stage), progressText);
+    assert(progressText.includes(`${percent}%`), progressText);
+    const progress = descendants(row).find(node => node.tag === 'progress');
+    assert(progress, 'The active synthetic row exposes its own progress.');
+    assert.equal(Number(progress.value), percent);
+  }
+}
+
+function assertRowIdle(ui, record) {
+  const row = catalogRow(ui, record.path);
+  assert.doesNotMatch(classNode(row, 'catalog-status').textContent, /(?:복구|분석)(?: 요청| 중지)? 중(?:…|\s|$)/);
+  assert.doesNotMatch(classNode(row, 'catalog-row-stage')?.textContent || '', /합성 대사 인식 중|합성 줄거리 정리 중|합성 두 번째 영상 처리|합성 경로 미상 처리|\d+%/);
+  assert.equal(descendants(row).some(node => node.tag === 'progress'), false);
+}
+
+test('repair requests immediately mark only the clicked row and detail, survive a rerender, and keep duplicate clicks out while awaiting HTTP', async () => {
+  const record = processingRecord();
+  const other = processingRecord('same-name-other-path', '둘째');
+  const job = processingJob(record);
+  const ui = await boot({ records: [record, other], delayRepair: true, repairResponse: job });
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  const starting = classNode(catalogRow(ui, record.path), 'catalog-repair-button').dispatch('click');
+  await flush();
+  assertRowProcessing(ui, record, /^복구 요청 중/);
+  assertRowIdle(ui, other);
+  assert.match(ui.elements.get('catalogDetailHealth').textContent, /^복구 요청 중/);
+  assert.match(ui.elements.get('catalogDetailRepair').textContent, /^복구 요청 중/);
+  assert.equal(ui.elements.get('catalogDetailRepair').disabled, true);
+  assert.equal(ui.elements.get('catalogDetailProgress').classList.contains('hidden'), false);
+  assert.match(ui.elements.get('catalogDetailRepairNote').textContent, /요청|응답|기다/);
+
+  await ui.elements.get('catalogSearch').dispatch('input');
+  assertRowProcessing(ui, record, /^복구 요청 중/);
+  await classNode(catalogRow(ui, record.path), 'catalog-repair-button').dispatch('click');
+  await ui.elements.get('catalogDetailRepair').dispatch('click');
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/repair')).length, 1);
+
+  ui.releaseRepair(); await starting;
+  assertRowProcessing(ui, record, /^복구 중/, job.stage, job.percent);
+  assertRowIdle(ui, other);
+  assert.match(ui.elements.get('catalogDetailHealth').textContent, /^복구 중/);
+  assert.match(ui.elements.get('catalogDetailRepair').textContent, /^복구 중/);
+  assert(ui.elements.get('catalogDetailRepairNote').textContent.includes(job.stage));
+  assert(ui.elements.get('catalogDetailRepairNote').textContent.includes('37%'));
+  assert.equal(Number(ui.elements.get('catalogDetailProgress').value), job.percent);
+});
+
+test('a failed repair HTTP request clears the row and detail busy state after a pending rerender and allows an explicit retry', async () => {
+  const record = processingRecord();
+  const error = '합성 복구 요청 실패: 서버 연결 오류';
+  const ui = await boot({ records: [record], delayRepair: true, repairStatus: 503, repairResponse: { error } });
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  const starting = ui.elements.get('catalogDetailRepair').dispatch('click');
+  await flush();
+  assertRowProcessing(ui, record, /^복구 요청 중/);
+  await ui.elements.get('catalogSearch').dispatch('input');
+  assertRowProcessing(ui, record, /^복구 요청 중/);
+  ui.releaseRepair(); await starting;
+  assertRowIdle(ui, record);
+  assert.equal(classNode(catalogRow(ui, record.path), 'catalog-repair-button').disabled, false);
+  assert.equal(classNode(catalogRow(ui, record.path), 'catalog-status').textContent, '복구 요청 실패');
+  assert.doesNotMatch(ui.elements.get('catalogDetailHealth').textContent, /복구(?: 요청)? 중(?:…|\s|$)/);
+  assert.doesNotMatch(ui.elements.get('catalogDetailRepair').textContent, /복구(?: 요청)? 중(?:…|\s|$)/);
+  assert.equal(ui.elements.get('catalogDetailRepair').disabled, false);
+  assert.equal(ui.elements.get('catalogDetailProgress').classList.contains('hidden'), true);
+  assert(ui.elements.get('catalogNotice').textContent.includes(error));
+  assert(ui.elements.get('catalogDetailRepairNote').textContent.includes(error));
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/repair')).length, 1);
+  await classNode(catalogRow(ui, record.path), 'catalog-repair-button').dispatch('click');
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/repair')).length, 2);
+});
+
+test('repair polling updates the row and open detail together, then successful completion restores their normal controls and saved result', async () => {
+  const record = processingRecord();
+  const job = processingJob(record);
+  let next = { ...job, stage: '합성 줄거리 정리 중', percent: 68 };
+  const ui = await boot({ records: [record], repairResponse: job, jobResponse: () => next });
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  await ui.elements.get('catalogDetailRepair').dispatch('click');
+  await ui.runTimers(1500);
+  assertRowProcessing(ui, record, /^복구 중/, next.stage, next.percent);
+  assert(ui.elements.get('catalogDetailRepairNote').textContent.includes(next.stage));
+  assert(ui.elements.get('catalogDetailRepairNote').textContent.includes('68%'));
+  assert.equal(Number(ui.elements.get('catalogDetailProgress').value), next.percent);
+  const saved = { ...record, id: 'processing-result', status: 'completed', summary: '새로 저장한 합성 줄거리', health: { code: 'ready', repairable: true, reason: '합성 분석 결과가 준비되었습니다.' } };
+  next = { ...job, status: 'completed', completed: 1, percent: 100, results: [saved] };
+  await ui.runTimers(1500);
+  assertRowIdle(ui, saved);
+  assert.equal(classNode(catalogRow(ui, saved.path), 'catalog-status').textContent, '정리 완료');
+  assert.equal(classNode(catalogRow(ui, saved.path), 'catalog-repair-button').disabled, false);
+  assert.equal(ui.elements.get('catalogDetailHealth').textContent, '정리 완료');
+  assert.equal(ui.elements.get('catalogDetailRepair').disabled, false);
+  assert.equal(ui.elements.get('catalogDetailProgress').classList.contains('hidden'), true);
+  assert.equal(ui.elements.get('catalogEditSummary').value, saved.summary);
+  assert(!ui.elements.get('catalogDetailRepairNote').textContent.includes('68%'));
+});
+
+test('failed and cancelled repair jobs remove in-progress badges and stages even when no replacement result is returned', async () => {
+  for (const status of ['failed', 'cancelled']) {
+    const record = processingRecord(`terminal-${status}`);
+    const job = processingJob(record);
+    const finished = { ...job, status, error: status === 'failed' ? '합성 작업 실패' : undefined };
+    const ui = await boot({ records: [record], repairResponse: job, jobResponse: () => finished });
+    await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+    await ui.elements.get('catalogDetailRepair').dispatch('click');
+    assertRowProcessing(ui, record, /^복구 중/, job.stage, job.percent);
+    await ui.runTimers(1500);
+    assertRowIdle(ui, record);
+    const label = status === 'failed' ? '복구 실패' : '복구 중지됨';
+    assert.equal(classNode(catalogRow(ui, record.path), 'catalog-status').textContent, label);
+    assert.equal(classNode(catalogRow(ui, record.path), 'catalog-repair-button').disabled, false, status);
+    assert.equal(ui.elements.get('catalogDetailRepair').disabled, false, status);
+    assert.equal(ui.elements.get('catalogDetailHealth').textContent, label);
+    assert.doesNotMatch(ui.elements.get('catalogDetailRepair').textContent, /복구(?: 요청)? 중(?:…|\s|$)/, status);
+    assert.equal(ui.elements.get('catalogDetailProgress').classList.contains('hidden'), true);
+    assert(!ui.elements.get('catalogDetailRepairNote').textContent.includes(job.stage), status);
+    assert.equal(ui.elements.get('catalogEditSummary').value, record.summary);
+  }
+});
+
+test('config and queue active-job snapshots restore the exact path progress on reload without marking a same-name neighbour', async () => {
+  for (const source of ['config', 'queue']) {
+    const record = processingRecord(`reload-${source}`);
+    const other = processingRecord(`reload-neighbour-${source}`, '둘째');
+    const job = processingJob(record, { currentFilePath: record.path.replace(/\\/g, '/').toUpperCase() });
+    const initialQueue = source === 'queue' ? { ...baseQueue(), activeJob: job } : undefined;
+    const ui = await boot({ records: [record, other], initialQueue, initialActiveJob: source === 'config' ? job : null });
+    assertRowProcessing(ui, record, /^복구 중/, job.stage, job.percent);
+    assertRowIdle(ui, other);
+    await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+    assert.match(ui.elements.get('catalogDetailHealth').textContent, /^복구 중/);
+    assert(ui.elements.get('catalogDetailRepairNote').textContent.includes(job.stage));
+    await catalogRow(ui, other.path).childNodes[1].childNodes[0].dispatch('click');
+    assert.doesNotMatch(ui.elements.get('catalogDetailHealth').textContent, /복구(?: 요청)? 중/);
+    assert(!ui.elements.get('catalogDetailRepairNote').textContent.includes(job.stage));
+  }
+});
+
+test('a manual batch moves row progress by currentFilePath and never guesses an ambiguous basename when the path is missing', async () => {
+  const first = processingRecord('batch-first');
+  const second = processingRecord('batch-second', '둘째');
+  const job = processingJob(first, { id: 'manual-batch-progress', source: 'manual', repairOf: undefined, total: 2 });
+  let next = { ...job, completed: 1, currentFilePath: second.path, stage: '합성 두 번째 영상 처리', percent: 54 };
+  const ui = await boot({ records: [first, second], initialActiveJob: job, jobResponse: () => next });
+  assertRowProcessing(ui, first, /^분석 중/, job.stage, job.percent);
+  assertRowIdle(ui, second);
+  await catalogRow(ui, first.path).childNodes[1].childNodes[0].dispatch('click');
+  assert.match(ui.elements.get('catalogDetailHealth').textContent, /^분석 중/);
+  await ui.runTimers(1500);
+  assertRowIdle(ui, first);
+  assertRowProcessing(ui, second, /^분석 중/, next.stage, next.percent);
+  assert.doesNotMatch(ui.elements.get('catalogDetailHealth').textContent, /^분석 중/);
+  await catalogRow(ui, second.path).childNodes[1].childNodes[0].dispatch('click');
+  assert.match(ui.elements.get('catalogDetailHealth').textContent, /^분석 중/);
+  assert(ui.elements.get('catalogDetailRepairNote').textContent.includes(next.stage));
+  next = { ...next, currentFilePath: undefined, stage: '합성 경로 미상 처리', percent: 75 };
+  await ui.runTimers(1500);
+  assertRowIdle(ui, first);
+  assertRowIdle(ui, second);
+  assert.doesNotMatch(ui.elements.get('catalogDetailHealth').textContent, /^분석 중/);
+});
+
+test('a failed or cancelled manual batch keeps its completed file ready and marks only the unfinished file with the terminal status', async () => {
+  for (const status of ['cancelled', 'failed']) {
+    const first = processingRecord(`batch-finished-${status}`);
+    const second = processingRecord(`batch-unfinished-${status}`, '둘째');
+    const job = processingJob(first, { id: `manual-batch-${status}`, source: 'manual', repairOf: undefined, total: 2 });
+    const completed = { ...first, id: `batch-saved-${status}`, status: 'completed', summary: '먼저 완료해 저장된 합성 줄거리',
+      health: { code: 'ready', repairable: true, reason: '먼저 완료한 합성 분석 결과입니다.' } };
+    let next = { ...job, completed: 1, currentFilePath: second.path, stage: '합성 두 번째 영상 처리', percent: 54, results: [completed] };
+    const ui = await boot({ records: [first, second], manualResponse: job, jobResponse: () => next });
+    ui.elements.get('catalogSelectAll').checked = true;
+    await ui.elements.get('catalogSelectAll').dispatch('change');
+    await ui.elements.get('catalogAnalyze').dispatch('click');
+    const posted = ui.calls.find(call => call.url === '/api/analysis/jobs');
+    assert.deepEqual(new Set(posted.body.files), new Set([first.path, second.path]));
+    await ui.runTimers(1500);
+    assertRowIdle(ui, completed);
+    assert.equal(classNode(catalogRow(ui, completed.path), 'catalog-status').textContent, '정리 완료');
+    assertRowProcessing(ui, second, /^분석 중/, next.stage, next.percent);
+    await catalogRow(ui, completed.path).childNodes[1].childNodes[0].dispatch('click');
+    assert.equal(ui.elements.get('catalogDetailHealth').textContent, '정리 완료');
+
+    next = { ...next, status, error: status === 'failed' ? '합성 두 번째 영상 작업 실패' : undefined };
+    await ui.runTimers(1500);
+    assertRowIdle(ui, completed);
+    assert.equal(classNode(catalogRow(ui, completed.path), 'catalog-status').textContent, '정리 완료');
+    assert.equal(classNode(catalogRow(ui, completed.path), 'catalog-repair-button').disabled, false);
+    assert.equal(ui.elements.get('catalogDetailHealth').textContent, '정리 완료');
+    assert.equal(ui.elements.get('catalogEditSummary').value, completed.summary);
+    assert.equal(ui.elements.get('catalogDetailProgress').classList.contains('hidden'), true);
+    assertRowIdle(ui, second);
+    const label = status === 'failed' ? '분석 실패' : '분석 중지됨';
+    assert.equal(classNode(catalogRow(ui, second.path), 'catalog-status').textContent, label);
+    assert.equal(classNode(catalogRow(ui, second.path), 'catalog-repair-button').disabled, false);
+    await catalogRow(ui, second.path).childNodes[1].childNodes[0].dispatch('click');
+    assert.equal(ui.elements.get('catalogDetailHealth').textContent, label);
+    assert.equal(ui.elements.get('catalogDetailRepair').disabled, false);
+    assert.equal(ui.elements.get('catalogEditSummary').value, second.summary);
+  }
+});
+
+test('a new automatic analysis clears only its path stale repair failure while another path or the old job terminal poll preserves it', async () => {
+  const record = processingRecord('stale-request-target');
+  const other = processingRecord('stale-request-neighbour', '둘째');
+  const error = '합성 HTTP503 복구 요청 실패';
+  const oldJob = processingJob(record, { id: 'old-request-context', source: 'auto-pick', repairOf: undefined, status: 'completed', completed: 1, results: [] });
+  const localQueue = { ...baseQueue(), configured: true, mode: 'local', options: { mode: 'local', frameCount: 10 } };
+  const queueFor = (job, file) => ({ ...localQueue, activeJob: job, activeAutoPath: file.path });
+  const otherJob = processingJob(other, { id: 'new-other-path', source: 'auto-pick', repairOf: undefined });
+  let next = { ...otherJob, status: 'completed', completed: 1, results: [] };
+  const ui = await boot({ records: [record, other], initialQueue: localQueue, initialActiveJob: oldJob,
+    repairStatus: 503, repairResponse: { error }, jobResponse: () => next });
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  await ui.elements.get('catalogDetailRepair').dispatch('click');
+  const assertRequestFailure = () => {
+    assert.equal(classNode(catalogRow(ui, record.path), 'catalog-status').textContent, '복구 요청 실패');
+    assert.equal(ui.elements.get('catalogDetailHealth').textContent, '복구 요청 실패');
+    assert(ui.elements.get('catalogDetailRepairNote').textContent.includes(error));
+  };
+  assertRequestFailure();
+
+  // A different path has the same basename, so its fresh job must leave this
+  // request failure visible while running and after its terminal response.
+  ui.setQueue(queueFor(otherJob, other));
+  await ui.runTimers(300);
+  assertRequestFailure();
+  assertRowProcessing(ui, other, /^분석 중/, otherJob.stage, otherJob.percent);
+  await ui.runTimers(1500);
+  assertRequestFailure();
+
+  // Reobserving an older running snapshot can schedule another terminal poll.
+  // That old job predates the HTTP failure and cannot claim it was recovered.
+  const oldRunning = { ...oldJob, status: 'running', completed: 0, percent: 23 };
+  ui.setQueue(queueFor(oldRunning, record));
+  next = oldJob;
+  await ui.runTimers(300);
+  await ui.runTimers(1500);
+  assertRequestFailure();
+
+  const fresh = processingJob(record, { id: 'fresh-target-auto', source: 'auto-pick', repairOf: undefined, stage: '합성 줄거리 정리 중', percent: 68 });
+  ui.setQueue(queueFor(fresh, record));
+  await ui.runTimers(300);
+  assertRowProcessing(ui, record, /^분석 중/, fresh.stage, fresh.percent);
+  const saved = { ...record, id: 'fresh-target-result', status: 'completed', summary: '새 자동 작업이 저장한 합성 줄거리',
+    health: { code: 'ready', repairable: true, reason: '새 합성 분석이 완료되었습니다.' } };
+  next = { ...fresh, status: 'completed', completed: 1, percent: 100, results: [saved] };
+  await ui.runTimers(1500);
+  assertRowIdle(ui, saved);
+  assert.equal(classNode(catalogRow(ui, saved.path), 'catalog-status').textContent, '정리 완료');
+  assert(!classNode(catalogRow(ui, saved.path), 'catalog-row-stage')?.textContent.includes(error));
+  assert.equal(classNode(catalogRow(ui, saved.path), 'catalog-repair-button').disabled, false);
+  assert.equal(ui.elements.get('catalogDetailHealth').textContent, '정리 완료');
+  assert.equal(ui.elements.get('catalogDetailProgress').classList.contains('hidden'), true);
+  assert.equal(ui.elements.get('catalogEditSummary').value, saved.summary);
 });
 
 test('timed subtitle choices restore durable queue options and accompany automatic and local analysis correctly', async () => {

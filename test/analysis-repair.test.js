@@ -176,6 +176,8 @@ test('repair shares the job coordinator and automatic FIFO without overlapping a
   const blocked = await f.request(`/results/${seedId}/repair`, { options: { mode: 'local' } });
   assert.equal(blocked.status, 409);
   assert.equal(blocked.data.job.id, started.data.id);
+  assert.equal(blocked.data.job.repairOf, seedId);
+  assert.equal(blocked.data.job.currentFilePath, f.filePath);
   assert.equal((await f.request('/jobs', { files: [f.nextPath] })).status, 409);
   const queued = await f.request('/auto-pick', { filePath: f.nextPath, options: { mode: 'local' } });
   assert.equal(queued.status, 202);

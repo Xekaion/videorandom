@@ -10,7 +10,8 @@
   const state = {
     scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0,
     config: null, job: null, pollTimer: null, starting: false, exporting: false,
-    refreshing: false, detailId: null, detailRequest: 0, saving: false, subtitleDownloading: false, hasModePreference: false,
+    pendingRequest: null, requestFailure: null, jobTargets: { id: '', keys: new Set() }, detailActivityPath: '',
+    refreshing: false, detailId: null, detailPath: '', detailRequest: 0, saving: false, subtitleDownloading: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
     autoPick: null, autoTimer: null, autoSettingsTimer: null,
     autoPolling: false, autoBusy: false, autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
@@ -374,6 +375,81 @@
     return files.map(recordFor).filter(hasResult);
   }
 
+  function fileActivity(file) {
+    const key = pathKey(file.path);
+    const pending = state.pendingRequest;
+    if (pending?.keys.has(key)) return { active: true, label: pending.source === 'repair' ? '복구 요청 중…' : '분석 요청 중…', detail: '서버 응답을 기다리고 있습니다.', percent: null, tone: 'active' };
+    const job = state.job;
+    const repairPath = job?.source === 'repair' ? findRecord(job.repairOf)?.path : '';
+    const knownTarget = state.jobTargets.id === job?.id && state.jobTargets.keys.has(key);
+    const attempt = job?.results?.find(record => pathKey(record.path) === key);
+    if (isActive(job) && !attempt) {
+      let currentPath = job.currentFilePath || repairPath || (job.source === 'auto-pick' && state.autoPick?.activeJob?.id === job.id ? state.autoPick.activeAutoPath : '');
+      // Older servers only supplied a name. Use it only when it identifies
+      // exactly one file; duplicate names must never mark the wrong row busy.
+      if (!currentPath && job.currentFile) {
+        const matches = allFiles().filter(candidate => candidate.name === job.currentFile);
+        if (matches.length === 1) currentPath = matches[0].path;
+      }
+      const current = currentPath && pathKey(currentPath) === key;
+      if (current || knownTarget) {
+        const repair = job.source === 'repair';
+        const waiting = job.status === 'queued' || (!current && !!currentPath);
+        const cancelling = job.status === 'cancelling';
+        const percent = !waiting && Number.isFinite(job.percent) ? Math.max(0, Math.min(100, Math.round(job.percent))) : null;
+        return { active: true, tone: 'active', percent,
+          label: cancelling ? `${repair ? '복구' : '분석'} 중지 중…` : waiting ? `${repair ? '복구' : '분석'} 대기 중` : `${repair ? '복구' : '분석'} 중…`,
+          detail: cancelling ? '현재 작업을 안전하게 중지하고 있습니다.' : waiting ? '앞선 작업이 끝나면 시작합니다.' : job.stage || '분석을 준비하고 있습니다.' };
+      }
+    }
+    if (state.requestFailure?.keys.has(key)) return { active: false, tone: 'failed',
+      label: state.requestFailure.source === 'repair' ? '복구 요청 실패' : '분석 요청 실패', detail: state.requestFailure.message };
+    const repair = job?.source === 'repair';
+    if (job && !isActive(job) && (knownTarget || (repairPath && pathKey(repairPath) === key) || attempt)) {
+      if (attempt && ['ready', 'extraction-only'].includes(healthFor(attempt).code)) return null;
+      if (job.status === 'failed' || job.status === 'cancelled') return { active: false, tone: job.status === 'failed' ? 'failed' : 'partial',
+        label: `${repair ? '복구' : '분석'} ${job.status === 'failed' ? '실패' : '중지됨'}`, detail: job.error || '기존에 저장한 결과는 보관됩니다.' };
+      if (attempt && ['failed', 'partial', 'summary-missing'].includes(healthFor(attempt).code)) return { active: false,
+        tone: healthFor(attempt).code === 'failed' ? 'failed' : 'partial', label: `${repair ? '복구' : '분석'} ${healthFor(attempt).code === 'failed' ? '실패' : '일부 완료'}`,
+        detail: attempt.error || healthFor(attempt).reason };
+    }
+    return null;
+  }
+
+  function activityText(activity) {
+    return `${activity.detail}${Number.isFinite(activity.percent) ? ` · ${activity.percent}%` : ''}`;
+  }
+
+  function setActivityProgress(progress, activity) {
+    progress.max = 100;
+    if (Number.isFinite(activity.percent)) progress.value = activity.percent;
+    else progress.removeAttribute('value');
+  }
+
+  function renderDetailActivity() {
+    if (!$('catalogDetail').open) return;
+    const record = findRecord(state.detailId);
+    if (!record) {
+      const latest = state.records.get(pathKey(state.detailPath));
+      if (latest) openDetail(latest.id);
+      return;
+    }
+    const activity = fileActivity(record);
+    $('catalogDetailRepair').textContent = activity?.active ? activity.label : '복구 / 다시 분석';
+    $('catalogDetailHealth').classList.toggle('catalog-activity-health', activity?.active === true);
+    $('catalogDetailProgress').classList.toggle('hidden', !activity?.active);
+    if (activity) {
+      $('catalogDetailHealth').textContent = activity.label;
+      $('catalogDetailRepairNote').textContent = `${activityText(activity)} 기존 결과와 이미지는 보관됩니다.`;
+      if (activity.active) setActivityProgress($('catalogDetailProgress'), activity);
+      state.detailActivityPath = pathKey(record.path);
+    } else if (state.detailActivityPath === pathKey(record.path)) {
+      $('catalogDetailHealth').textContent = healthLabel(record);
+      $('catalogDetailRepairNote').textContent = `${healthFor(record).reason} 현재 분석 설정으로 다시 분석하며 기존 결과는 보존합니다.`;
+      state.detailActivityPath = '';
+    }
+  }
+
   function updateSelectionUI() {
     const selectedVisible = state.filtered.filter(file => state.selected.has(pathKey(file.path))).length;
     const selectAll = $('catalogSelectAll');
@@ -393,6 +469,7 @@
     $('catalogSave').disabled = state.saving || isActive(state.job);
     $('catalogDetailRepair').disabled = state.starting || isActive(state.job) || !state.config;
     document.querySelectorAll('.catalog-repair-button').forEach(button => { button.disabled = state.starting || isActive(state.job) || !state.config; });
+    renderDetailActivity();
   }
 
   function render() {
@@ -414,8 +491,11 @@
 
     visible.forEach(file => {
       const record = recordFor(file);
+      const activity = fileActivity(file);
       const key = pathKey(file.path);
       const row = make('tr');
+      row.setAttribute('aria-busy', String(activity?.active === true));
+      if (activity?.active) row.classList.add('catalog-row-active');
       const selectCell = make('td', 'catalog-select-cell');
       const checkbox = make('input');
       checkbox.type = 'checkbox';
@@ -497,8 +577,20 @@
       framesCell.append(strip);
 
       const statusCell = make('td');
-      const statusText = healthLabel(record);
-      statusCell.append(make('span', `catalog-status catalog-status-${record?.status || 'pending'}`, statusText));
+      const statusText = activity?.label || healthLabel(record);
+      statusCell.append(make('span', `catalog-status catalog-status-${activity?.tone || record?.status || 'pending'}`, statusText));
+      if (activity) {
+        const stage = make('small', 'catalog-row-stage', activityText(activity));
+        stage.setAttribute('role', 'status');
+        statusCell.append(stage);
+        if (activity.active) {
+          const progress = make('progress', 'catalog-row-progress');
+          progress.setAttribute('aria-label', `${file.name || '영상'} 분석 진행률`);
+          setActivityProgress(progress, activity);
+          statusCell.append(progress);
+        }
+        if (record) statusCell.append(make('small', 'catalog-row-previous', `이전 결과: ${healthLabel(record)}`));
+      }
       if (record?.savedAt && hasResult(record)) statusCell.append(make('small', 'catalog-saved-badge', '이 PC에 저장됨'));
       if (record?.warnings?.length) {
         const warning = make('small', 'catalog-row-warning', `확인 ${record.warnings.length}건`);
@@ -507,7 +599,7 @@
       }
       if (record?.error) statusCell.title = record.error;
       if (record && healthFor(record).repairable !== false) {
-        const repair = make('button', 'catalog-detail-link catalog-repair-button', healthFor(record).code === 'ready' ? '다시 분석' : '복구 / 다시 분석');
+        const repair = make('button', 'catalog-detail-link catalog-repair-button', activity?.active ? activity.label : healthFor(record).code === 'ready' ? '다시 분석' : '복구 / 다시 분석');
         repair.type = 'button';
         repair.title = '현재 분석 설정으로 다시 분석합니다. 기존 결과와 이미지는 보존됩니다.';
         repair.setAttribute('aria-label', `${file.name} 복구 / 다시 분석`);
@@ -817,18 +909,21 @@
     try {
       const options = analysisOptions();
       state.starting = true;
-      updateSelectionUI();
+      state.requestFailure = null;
+      state.pendingRequest = { source: 'repair', keys: new Set([pathKey(record.path)]) };
+      render();
       notice(options.mode === 'local'
         ? '로컬 이미지·원문 자막을 다시 추출합니다. 자동 요약·한국어 번역 자막을 생성하려면 이 PC에서 분석 또는 분석 서버 방식을 선택하세요. 기존 결과와 이미지는 보존됩니다.'
         : '현재 분석 설정으로 복구를 시작합니다. 이전에 저장한 결과와 이미지는 보존됩니다.');
       const result = await request(`/api/analysis/results/${encodeURIComponent(id)}/repair`, jsonOptions('POST', { options }));
-      trackJob(result.job || result);
-      if ($('catalogDetail').open && isActive(result.job || result)) $('catalogDetailRepairNote').textContent = '복구 분석 중입니다. 완료되면 새 결과를 표시합니다.';
+      state.pendingRequest = null;
+      trackJob(result.job || result, [record.path]);
     } catch (error) {
+      state.requestFailure = { source: 'repair', keys: new Set([pathKey(record.path)]), message: error.message, jobId: state.job?.id || '' };
       notice(`복구 요청 실패 · ${error.message}`, true);
       if ($('catalogDetail').open) $('catalogDetailRepairNote').textContent = `복구 요청 실패 · ${error.message}`;
       $('catalogSettings').open = true;
-    } finally { state.starting = false; updateSelectionUI(); }
+    } finally { state.starting = false; state.pendingRequest = null; render(); }
   }
 
   async function startAnalysis() {
@@ -839,16 +934,21 @@
       if (files.length > MAX_BATCH) throw new Error(`한 번에 최대 ${MAX_BATCH.toLocaleString()}개를 분석할 수 있습니다. 검색 범위를 줄이거나 선택 수를 조정하세요.`);
       const options = analysisOptions();
       state.starting = true;
+      state.requestFailure = null;
+      state.pendingRequest = { source: 'manual', keys: new Set(files.map(pathKey)) };
       notice();
-      updateSelectionUI();
+      render();
       const result = await request('/api/analysis/jobs', jsonOptions('POST', { files, options }));
-      trackJob(result.job || result);
+      state.pendingRequest = null;
+      trackJob(result.job || result, files);
     } catch (error) {
+      if (state.pendingRequest) state.requestFailure = { ...state.pendingRequest, message: error.message, jobId: state.job?.id || '' };
       notice(error.message, true);
       $('catalogSettings').open = true;
     } finally {
       state.starting = false;
-      updateSelectionUI();
+      state.pendingRequest = null;
+      render();
     }
   }
 
@@ -871,8 +971,17 @@
     state.pollTimer = setTimeout(() => pollJob(id), delay);
   }
 
-  function trackJob(job) {
+  function trackJob(job, paths) {
     if (!job || !job.id) return;
+    if (state.requestFailure && state.requestFailure.jobId !== job.id) {
+      const processed = [job.currentFilePath, ...(paths || []), ...(job.results || []).map(record => record.path),
+        job.source === 'repair' ? findRecord(job.repairOf)?.path : '',
+        job.source === 'auto-pick' && state.autoPick?.activeJob?.id === job.id ? state.autoPick.activeAutoPath : ''];
+      for (const path of processed) if (path) state.requestFailure.keys.delete(pathKey(path));
+      if (!state.requestFailure.keys.size) state.requestFailure = null;
+    }
+    if (paths) state.jobTargets = { id: job.id, keys: new Set(paths.map(pathKey)) };
+    else if (state.jobTargets.id !== job.id) state.jobTargets = { id: job.id, keys: new Set() };
     state.job = job;
     mergeRecords(job.results);
     displayJob(job);
@@ -980,6 +1089,7 @@
     const record = findRecord(id);
     if (!record) return;
     state.detailId = id;
+    state.detailPath = record.path;
     const detailRequest = ++state.detailRequest;
     $('catalogDetailTitle').textContent = record.name || '영상 상세';
     $('catalogDetailPath').textContent = record.path;
@@ -1022,6 +1132,7 @@
     $('catalogSubtitleDownloadLanguage').value = translated ? 'ko' : 'original';
     renderTranscript(record);
     if (!$('catalogDetail').open) $('catalogDetail').showModal();
+    renderDetailActivity();
     $('catalogDetail').scrollTop = 0;
     if (Array.isArray(record.subtitleTranslationPartial) && window.crypto?.subtle) {
       try {

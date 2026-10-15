@@ -88,6 +88,70 @@ test('unscanned paths and unknown frame/export ids are rejected', async t => {
   assert.equal((await f.request('/export', { ids: ['unknown'] })).status, 400);
 });
 
+test('active snapshots identify the exact current path across a batch of same-named files without exposing private job data', async t => {
+  const gates = [], started = [];
+  for (let index = 0; index < 2; index++) {
+    let release, notify;
+    gates.push({ promise: new Promise(resolve => { release = resolve; }), release: () => release() });
+    started.push({ promise: new Promise(resolve => { notify = resolve; }), notify: () => notify() });
+  }
+  let calls = 0;
+  const f = await fixture(t, async (file, options, context) => {
+    const index = calls++;
+    context.onProgress(index ? 'summary' : 'transcription', index ? 70 : 35);
+    started[index].notify();
+    await Promise.race([gates[index].promise, new Promise(resolve => context.signal.addEventListener('abort', resolve, { once: true }))]);
+    return { ...file, status: 'completed', summary: '테스트로 검증한 요약', transcript: [], frames: [], warnings: [] };
+  });
+  const folders = ['first', 'second'].map(name => path.join(f.dataDir, name));
+  await Promise.all(folders.map(folder => fs.mkdir(folder)));
+  const paths = folders.map(folder => path.join(folder, 'same-name.mp4'));
+  await Promise.all(paths.map(file => fs.writeFile(file, 'mock media; never decoded')));
+  f.service.registerFiles(paths.map(file => ({ path: file })));
+  const response = await f.request('/jobs', { files: paths, options: { mode: 'local', apiKey: 'snapshot-private-fixture-key' }, currentFilePath: 'caller-supplied-path' });
+  assert.equal(response.status, 202);
+  const job = await response.json();
+  assert.equal(job.currentFile, '');
+  assert.equal(job.currentFilePath, '');
+  for (let index = 0; index < paths.length; index++) {
+    await started[index].promise;
+    const direct = await (await f.request('/jobs/' + job.id)).json();
+    const config = (await (await f.request('/config')).json()).activeJob;
+    const automatic = (await (await f.request('/auto-pick')).json()).activeJob;
+    for (const snapshot of [direct, config, automatic]) {
+      assert.equal(snapshot.currentFile, 'same-name.mp4');
+      assert.equal(snapshot.currentFilePath, paths[index]);
+      assert.equal(snapshot.completed, index);
+      assert.equal(snapshot.percent, index ? 70 : 35);
+      assert.equal(snapshot.stage, index ? '줄거리와 라벨 생성' : '전체 음성의 대사 인식');
+      for (const key of ['files', 'options', 'controller', 'pairingGeneration']) assert.equal(Object.hasOwn(snapshot, key), false, key);
+      assert.equal(JSON.stringify(snapshot).includes('snapshot-private-fixture-key'), false);
+      assert.equal(JSON.stringify(snapshot).includes('caller-supplied-path'), false);
+      if (!index) assert.equal(JSON.stringify(snapshot).includes(JSON.stringify(paths[1]).slice(1, -1)), false, 'the future file list stays private');
+    }
+    gates[index].release();
+  }
+  const done = await waitForJob(f.request, job.id);
+  assert.equal(done.status, 'completed');
+  assert.equal(done.currentFile, '');
+  assert.equal(done.currentFilePath, '');
+  assert.equal((await (await f.request('/config')).json()).activeJob, null);
+});
+
+test('a result persistence failure clears the current file path from the terminal snapshot', async t => {
+  const f = await fixture(t, async file => {
+    const record = { ...file, status: 'completed', summary: '저장 실패 테스트', transcript: [], frames: [], warnings: [] };
+    record.invalidCircularFixture = record;
+    return record;
+  });
+  const started = await (await f.request('/jobs', { files: [f.filePath] })).json();
+  const failed = await waitForJob(f.request, started.id);
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.error, /분석 결과 저장 중 오류/);
+  assert.equal(failed.currentFile, '');
+  assert.equal(failed.currentFilePath, '');
+});
+
 test('cancel stops active analysis and preserves partial transcript; second job is refused', async t => {
   const f = await fixture(t, async (file, options, context) => {
     context.onProgress('대사 읽는 중', 40);
@@ -101,10 +165,15 @@ test('cancel stops active analysis and preserves partial transcript; second job 
   });
   const job = await (await f.request('/jobs', { files: [f.filePath] })).json();
   assert.equal((await f.request('/jobs', { files: [f.filePath] })).status, 409);
+  const active = await (await f.request('/jobs/' + job.id)).json();
+  assert.equal(active.currentFile, path.basename(f.filePath));
+  assert.equal(active.currentFilePath, f.filePath);
   assert.equal((await f.request('/jobs/' + job.id + '/cancel', {})).status, 200);
   const done = await waitForJob(f.request, job.id);
   assert.equal(done.status, 'cancelled');
   assert.equal(done.results[0].status, 'partial');
   assert.equal(done.results[0].transcript[0].text, '중지 전에 읽은 대사');
   assert.equal(done.results[0].warnings.length, 1);
+  assert.equal(done.currentFile, '');
+  assert.equal(done.currentFilePath, '');
 });
