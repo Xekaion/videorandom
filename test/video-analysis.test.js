@@ -118,6 +118,70 @@ test('real local extraction, embedded subtitles, corrupt files and cancellation'
             assert.equal(record.transcriptSource, 'embedded:kor');
             assert.equal(record.transcript.length, 2);
         });
+        await t.test('generated Korean output is excluded only when trusted path and exact bytes match', async t => {
+            const generatedVideo = path.join(folder, 'generated-neutral.mp4');
+            const koreanPath = path.join(folder, 'generated-neutral.ko.srt');
+            const japanesePath = path.join(folder, 'generated-neutral.ja.srt');
+            const originalJapanese = '1\n00:00:00,500 --> 00:00:02,500\n駅はどこですか。\n';
+            const generatedKorean = '1\n00:00:00,500 --> 00:00:02,500\n역은 어디인가요?\n';
+            await fs.promises.copyFile(videoPath, generatedVideo);
+            await fs.promises.writeFile(koreanPath, generatedKorean, 'utf8');
+            await fs.promises.writeFile(japanesePath, originalJapanese, 'utf8');
+            const provenance = [{ path: process.platform === 'win32' ? koreanPath.toUpperCase() : koreanPath,
+                sha256: crypto.createHash('sha256').update(Buffer.from(generatedKorean)).digest('hex') }];
+            let attempt = 0;
+            const extract = (context = {}, options = {}) => analyzeVideo({ path: generatedVideo, id: `generated-${++attempt}` },
+                { mode: 'local', frameCount: 1, ...options }, { dataDir, ...context });
+            await t.test('matching generated Korean file leaves original Japanese cues available', async () => {
+                const record = await extract({ generatedSubtitleFiles: provenance });
+                assert.equal(record.status, 'completed', record.error);
+                assert.equal(record.transcriptSource, 'sidecar:generated-neutral.ja.srt');
+                assert.equal(record.transcript[0].text, '駅はどこですか。');
+            });
+            await t.test('ordinary user Korean subtitles keep their existing priority', async () => {
+                const record = await extract();
+                assert.equal(record.transcriptSource, 'sidecar:generated-neutral.ko.srt');
+                assert.equal(record.transcript[0].text, '역은 어디인가요?');
+            });
+            await t.test('API-style options cannot substitute trusted subtitle provenance', async () => {
+                const record = await extract({}, { generatedSubtitleFiles: provenance });
+                assert.equal(record.transcriptSource, 'sidecar:generated-neutral.ko.srt');
+            });
+            await t.test('matching hash for a different canonical path does not exclude user subtitles', async () => {
+                const otherPath = path.join(folder, 'unrelated.ko.srt');
+                await fs.promises.writeFile(otherPath, generatedKorean);
+                const record = await extract({ generatedSubtitleFiles: [{ path: otherPath, sha256: provenance[0].sha256 }] });
+                assert.equal(record.transcriptSource, 'sidecar:generated-neutral.ko.srt');
+            });
+            await t.test('edited generated Korean subtitles become readable user input', async () => {
+                await fs.promises.writeFile(koreanPath, generatedKorean.replace('역은 어디인가요?', '사용자가 직접 고친 자막입니다.'));
+                const record = await extract({ generatedSubtitleFiles: provenance });
+                assert.equal(record.transcriptSource, 'sidecar:generated-neutral.ko.srt');
+                assert.equal(record.transcript[0].text, '사용자가 직접 고친 자막입니다.');
+                await fs.promises.writeFile(koreanPath, generatedKorean);
+            });
+            await t.test('generated-only subtitles leave audio available for fresh speech recognition', async () => {
+                await fs.promises.unlink(japanesePath);
+                const record = await extract({ generatedSubtitleFiles: provenance });
+                assert.equal(record.hasAudio, true);
+                assert.equal(record.transcriptSource, 'none');
+                assert.deepEqual(record.transcript, []);
+            });
+            await t.test('owned generated Korean output does not hide embedded original subtitles', async () => {
+                await fs.promises.writeFile(japanesePath, originalJapanese);
+                const embeddedVideo = path.join(folder, 'generated-embedded.mkv');
+                await runProcess(tools.ffmpeg.path, ['-nostdin', '-v', 'error', '-y', '-i', generatedVideo, '-i', japanesePath,
+                    '-map', '0', '-map', '1:0', '-c', 'copy', '-metadata:s:s:0', 'language=jpn', embeddedVideo]);
+                const embeddedKorean = path.join(folder, 'generated-embedded.ko.srt');
+                await fs.promises.writeFile(embeddedKorean, generatedKorean);
+                const record = await analyzeVideo({ path: embeddedVideo, id: 'generated-embedded' }, { frameCount: 1 }, {
+                    dataDir, generatedSubtitleFiles: [{ path: embeddedKorean, sha256: provenance[0].sha256 }]
+                });
+                assert.equal(record.status, 'completed', record.error);
+                assert.equal(record.transcriptSource, 'embedded:jpn');
+                assert.equal(record.transcript[0].text, '駅はどこですか。');
+            });
+        });
         await t.test('a corrupt scanned video is failed and has no fabricated content', async () => {
             const invalidPath = path.join(folder, 'fake-story.mp4');
             await fs.promises.writeFile(invalidPath, 'This is a placeholder, not a video.');

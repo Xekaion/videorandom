@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.5.0">
+  <link rel="stylesheet" href="css/style.css?v=1.5.1">
 </head>
 <body>
 
@@ -40,7 +40,7 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link" href="#videoCatalog">영상 분석</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.5.0</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.5.1</span>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
         </button>
@@ -379,7 +379,7 @@
           </div>
           <label class="catalog-check catalog-summary-field hidden" for="catalogTranslateSubtitles">
             <input id="catalogTranslateSubtitles" type="checkbox" checked>
-            <span>한국어 번역 자막도 생성 <small>자동 요약과 함께 번역하고 원문의 시간 구간을 유지합니다. 인식과 번역이 잘못된 부분은 원문과 대조해 주세요.</small></span>
+            <span>한국어 번역 자막도 생성 <small>자동 요약과 함께 번역하고 원문의 시간 구간을 유지합니다. 완성된 한국어 SRT는 이 PC의 원본 영상 폴더에 ‘영상이름.ko.srt’로 자동 저장합니다. 같은 이름의 다른 파일은 보존하고 별도 이름으로 저장합니다. 인식과 번역이 잘못된 부분은 원문과 대조해 주세요.</small></span>
           </label>
           <div class="catalog-field catalog-remote-field hidden">
             <label for="catalogRemoteUrl">분석 서버 주소</label>
@@ -515,6 +515,7 @@
         <h3 id="catalogTranscriptTitle">전체 대사 / 시간 자막</h3>
         <p id="catalogTranscriptSource" class="catalog-section-note"></p>
         <p id="catalogSubtitleNotice" class="catalog-section-note hidden" role="status"></p>
+        <p id="catalogSubtitleAutoSaveNotice" class="catalog-section-note catalog-subtitle-save-notice hidden" role="status"></p>
         <div class="catalog-subtitle-controls">
           <div class="catalog-field"><label for="catalogSubtitleView">화면에 표시</label><select id="catalogSubtitleView"><option value="both">원문 + 한국어</option><option value="original">원문</option><option value="ko">한국어 번역</option></select></div>
           <div class="catalog-field"><label for="catalogSubtitleDownloadLanguage">저장할 자막</label><select id="catalogSubtitleDownloadLanguage"><option value="ko">한국어 번역</option><option value="original">원문</option></select></div>
@@ -528,9 +529,9 @@
   <dialog class="catalog-zoom-dialog" id="catalogZoom" aria-labelledby="catalogZoomCaption"><button id="catalogZoomClose" class="btn btn-secondary" type="button" aria-label="확대 이미지 닫기">닫기 ×</button><img id="catalogZoomImage" alt=""><p id="catalogZoomCaption"></p></dialog>
 
   <!-- Core JavaScript Engine -->
-  <script src="js/app.js?v=1.5.0" defer></script>
-  <script src="js/history.js?v=1.5.0" defer></script>
-  <script src="js/catalog-sort.js?v=1.5.0" defer></script>
-  <script src="js/catalog.js?v=1.5.0" defer></script>
+  <script src="js/app.js?v=1.5.1" defer></script>
+  <script src="js/history.js?v=1.5.1" defer></script>
+  <script src="js/catalog-sort.js?v=1.5.1" defer></script>
+  <script src="js/catalog.js?v=1.5.1" defer></script>
 </body>
 </html>

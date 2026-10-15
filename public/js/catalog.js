@@ -1028,6 +1028,7 @@
     $('catalogSubtitleNotice').textContent = message;
     $('catalogSubtitleNotice').classList.remove('hidden');
     $('catalogSubtitleNotice').classList.toggle('catalog-error', !!record.subtitleError);
+    renderSubtitleAutoSave(record, translated);
     const lines = document.createDocumentFragment();
     transcript.forEach((segment, index) => {
       const line = make('div', 'catalog-transcript-line');
@@ -1039,6 +1040,20 @@
     });
     if (!transcript.length) lines.append(make('p', 'catalog-muted', '대사가 추출되지 않았습니다. 자막 / 음성 인식 오류 안내를 확인하고 복구 / 다시 분석하세요.'));
     $('catalogTranscript').replaceChildren(lines);
+  }
+
+  function renderSubtitleAutoSave(record, translated = hasTranslatedSubtitles(record)) {
+    const notice = $('catalogSubtitleAutoSaveNotice');
+    const saved = record.subtitleAutoSave;
+    const path = typeof saved?.path === 'string' && saved.path ? `\n${saved.path}` : '';
+    const error = typeof saved?.error === 'string' && saved.error ? saved.error : '원본 영상 폴더에 자막 파일을 쓰지 못했습니다.';
+    const message = saved?.status === 'saved' ? `한국어 SRT를 원본 영상 옆에 자동 저장했습니다.${path}`
+      : saved?.status === 'unchanged' ? `동일한 한국어 SRT가 원본 영상 옆에 있어 그대로 사용합니다.${path}`
+      : saved?.status === 'failed' ? `영상 폴더에 한국어 SRT 자동 저장 실패 · ${error}${path}\n저장된 번역 자막은 계속 사용할 수 있습니다. 아래 SRT 저장 버튼으로 내려받으세요.`
+      : translated ? '이 기록에는 원본 영상 폴더의 SRT 자동 저장 내역이 없습니다. 아래 SRT 저장 버튼으로 내려받을 수 있습니다.' : '';
+    notice.textContent = message;
+    notice.classList.toggle('hidden', !message);
+    notice.classList.toggle('catalog-error', saved?.status === 'failed');
   }
 
   async function downloadSubtitles(format) {

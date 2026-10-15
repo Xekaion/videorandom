@@ -576,3 +576,51 @@ test('translation failure or mismatched cue timing never hides the original tran
   assert.equal(empty.elements.get('catalogSubtitleSrt').disabled, true);
   assert.equal(empty.elements.get('catalogSubtitleVtt').disabled, true);
 });
+
+test('persisted automatic SRT save results show the real local path after restart without treating an unchanged file as a failure', async () => {
+  for (const status of ['saved', 'unchanged']) {
+    const record = { ...timedRecord(), subtitleAutoSave: { status, path: 'D:\\영상\\일본어 예제.ko.srt', savedAt: '2026-10-15T01:25:00Z' } };
+    const first = await boot({ records: [record] });
+    await first.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+    assert(first.elements.get('catalogSubtitleAutoSaveNotice').textContent.includes(record.subtitleAutoSave.path));
+    assert(first.elements.get('catalogSubtitleAutoSaveNotice').textContent.includes(status === 'saved' ? '자동 저장했습니다' : '그대로 사용합니다'));
+    assert.equal(first.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('catalog-error'), false);
+    assert.equal(first.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('hidden'), false);
+    const reopened = await boot({ records: [plain(record)] });
+    await reopened.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+    assert.equal(reopened.elements.get('catalogSubtitleAutoSaveNotice').textContent, first.elements.get('catalogSubtitleAutoSaveNotice').textContent);
+    assert.equal(reopened.calls.filter(call => call.url.includes('/subtitles?')).length, 0);
+  }
+});
+
+test('sidecar write failure stays visible while valid Korean cues and manual SRT download remain available', async () => {
+  const record = { ...timedRecord(), subtitleAutoSave: { status: 'failed', path: 'D:\\읽기 전용\\일본어 예제.ko.srt', error: '폴더에 쓰기 권한이 없습니다. <권한 확인>' } };
+  const ui = await boot({ records: [record] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const automaticNotice = ui.elements.get('catalogSubtitleAutoSaveNotice');
+  assert(automaticNotice.textContent.includes(record.subtitleAutoSave.error));
+  assert(automaticNotice.textContent.includes(record.subtitleAutoSave.path));
+  assert(automaticNotice.classList.contains('catalog-error'));
+  assert.equal(automaticNotice.childNodes.length, 0);
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+  assert.equal(ui.elements.get('catalogSubtitleDownloadLanguage').value, 'ko');
+  assert.equal(ui.elements.get('catalogSubtitleSrt').disabled, false);
+  assert.equal(ui.elements.get('catalogSubtitleNotice').classList.contains('catalog-error'), false);
+  assert.equal(ui.elements.get('catalogTranscript').childNodes[0].childNodes[1].childNodes[1].textContent, record.subtitleTranslation[0].text);
+  await ui.elements.get('catalogSubtitleSrt').dispatch('click');
+  assert(ui.body.childNodes.some(element => element.download?.endsWith('.ko.srt') && element.clicked));
+  assert(ui.elements.get('catalogSubtitleNotice').textContent.includes('한국어 번역 SRT 자막을 저장했습니다'));
+  assert(automaticNotice.textContent.includes(record.subtitleAutoSave.error));
+  assert(automaticNotice.classList.contains('catalog-error'));
+});
+
+test('older translated records without an automatic sidecar save do not claim one exists', async () => {
+  const ui = await boot({ records: [timedRecord()] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  assert(ui.elements.get('catalogSubtitleAutoSaveNotice').textContent.includes('자동 저장 내역이 없습니다'));
+  assert.equal(ui.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('catalog-error'), false);
+  assert.equal(ui.elements.get('catalogSubtitleSrt').disabled, false);
+  const withoutTranslation = await boot({ records: [{ ...timedRecord(), subtitleTranslation: [] }] });
+  await withoutTranslation.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  assert(withoutTranslation.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('hidden'));
+});

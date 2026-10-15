@@ -1550,6 +1550,7 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-transcript-line .catalog-transcript-original { color: #a1a8b5; }
 .catalog-transcript-line .catalog-transcript-translation { color: #e3edf4; }
 .catalog-transcript-original + .catalog-transcript-translation { margin-top: 5px; }
+.catalog-subtitle-save-notice { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 620px) { .catalog-repair-panel { align-items: start; flex-direction: column; gap: 10px; } .catalog-subtitle-controls .catalog-field { flex: 1; } }
 .catalog-zoom-dialog { padding: 18px; width: min(1200px, calc(100vw - 30px)); max-height: 94vh; overflow: auto; }
 .catalog-zoom-dialog > .btn { display: block; margin-left: auto; margin-bottom: 12px; }
