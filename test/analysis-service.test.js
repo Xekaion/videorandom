@@ -56,6 +56,34 @@ test('analysis options reject invalid frames and API mode, and validate private 
   assert.equal(validateOptions({ frameCount: 12, timestamps: [300] }).frameCount, 12);
 });
 
+test('active jobs expose sanitized phase workload and clear it on the following stage', async t => {
+  let context, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, async (file, options, current) => {
+    context = current;
+    current.onProgress('transcription', 45, { phase: 'transcription', completedSeconds: 180, totalSeconds: 600,
+      elapsedSeconds: 90, remainingSeconds: 210, sampleAgeSeconds: 121, path: 'C:/private', connectionCode: 'private-code' });
+    await gate;
+    return { ...file, status: 'completed', duration: 600, frames: [], transcript: [], warnings: [], labels: [] };
+  });
+  try {
+    const job = await (await f.request('/jobs', { files: [f.filePath], options: { mode: 'local' } })).json();
+    for (let n = 0; !context && n < 100; n++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert(context);
+    const running = await (await f.request('/jobs/' + job.id)).json();
+    assert.equal(running.phaseProgress.completedSeconds, 180);
+    assert.equal(running.phaseProgress.totalSeconds, 600);
+    assert.equal('remainingSeconds' in running.phaseProgress, false, 'remote sample age cannot be reset by local polling');
+    assert.equal(JSON.stringify(running).includes('private-code'), false);
+    assert.equal('_phaseProgressAt' in running, false);
+    context.onProgress('summary', 88);
+    const summarizing = await (await f.request('/jobs/' + job.id)).json();
+    assert.equal('phaseProgress' in summarizing, false);
+    release();
+    assert.equal('phaseProgress' in await waitForJob(f.request, job.id), false);
+  } finally { release(); }
+});
+
 test('scanned videos analyze, persist, edit and export without exposing credentials', async t => {
   const f = await fixture(t);
   const start = await f.request('/jobs', { files: [f.filePath, f.filePath], options: { mode: 'local', apiKey: 'test-key-not-used' } });

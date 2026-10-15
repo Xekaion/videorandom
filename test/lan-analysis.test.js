@@ -86,6 +86,32 @@ test('relay starts only explicitly and requires private client plus bearer authe
   assert.equal(restarted.connectionCode, f.status.connectionCode);
 });
 
+test('LAN phase workload survives polling with age and strips untrusted diagnostic fields', async t => {
+  let context, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, async (pkg, current) => {
+    context = current;
+    current.onProgress('transcription', 45, { phase: 'transcription', completedSeconds: 180, totalSeconds: 600,
+      elapsedSeconds: 90, remainingSeconds: 210, sampleAgeSeconds: 121, path: 'C:/private', transcript: 'private speech' });
+    await gate;
+    return { ...pkg.record, status: 'completed' };
+  });
+  try {
+    const created = await (await f.submit()).json();
+    for (let n = 0; !context && n < 100; n++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert(context);
+    const running = await (await f.request('/v1/jobs/' + created.id)).json();
+    assert.equal(running.phaseProgress.completedSeconds, 180);
+    assert(running.phaseProgress.sampleAgeSeconds >= 121);
+    assert.equal('remainingSeconds' in running.phaseProgress, false);
+    assert.equal(JSON.stringify(running).includes('private speech'), false);
+    context.onProgress('summary', 88);
+    assert.equal('phaseProgress' in await (await f.request('/v1/jobs/' + created.id)).json(), false);
+    release();
+    assert.equal('phaseProgress' in await finished(f, created.id), false);
+  } finally { release(); }
+});
+
 test('uploads process authenticated data without host paths and retains JPEG frames', async t => {
   let received;
   const f = await fixture(t, async (pkg, context) => {

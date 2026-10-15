@@ -1,11 +1,14 @@
 """Stream ASR with full-audio processing and an independent coverage audit."""
 import argparse
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import gc
 import json
 import math
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import unicodedata
 
@@ -17,6 +20,119 @@ DLL_DIRECTORY_HANDLES = []
 DLL_DIRECTORY_PATHS = set()
 DLL_LIBRARY_HANDLES = []
 DLL_LIBRARY_PATHS = set()
+GPU_PARALLEL_MIN_FREE_MIB = 6144
+GPU_PARALLEL_RESERVE_MIB = 2048
+
+
+def gpu_memory_available():
+    """Optional capacity hint only; unknown/mapped devices stay serial in auto."""
+    if os.environ.get('CUDA_VISIBLE_DEVICES', '0') != '0':
+        return None
+    try:
+        result = subprocess.run(['nvidia-smi', '--id=0', '--query-gpu=memory.free,memory.total',
+                                 '--format=csv,noheader,nounits'], capture_output=True, text=True,
+                                timeout=5, check=True,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        lines = result.stdout.strip().splitlines()
+        if len(lines) != 1:
+            return None
+        free, total = (int(value.strip()) for value in lines[0].split(','))
+        return (free, total) if 0 <= free <= total else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def requested_workers(value, device, memory=None):
+    if str(value) not in ('auto', '1', '2'):
+        raise ValueError('음성 인식 병렬 수는 auto, 1, 2 중에서 선택해야 합니다.')
+    if device != 'cuda' or str(value) == '1':
+        return 1
+    if str(value) == '2':
+        return 2
+    return 2 if memory and memory[1] >= 8192 and memory[0] >= GPU_PARALLEL_MIN_FREE_MIB else 1
+
+
+def gpu_out_of_memory(error):
+    message = str(error).lower()
+    return isinstance(error, (RuntimeError, OSError)) and any(marker in message for marker in
+        ('cuda_error_out_of_memory', 'cuda out of memory', 'cuda failed with error out of memory',
+         'cuda error: out of memory', 'cuda error out of memory', 'cublas_status_alloc_failed'))
+
+
+def decode_windows(model, audio, windows, options, sample_rate, state, emitter, waiting=None):
+    """Use the ordinary decoder unchanged; keep at most two windows in flight.
+
+    No batching API is used: its ignored fallback/no-speech options would change
+    recognition. Each thread has its own transcribe generator and alignment
+    state. Only the caller emits/commits decoded cues, in original window order.
+    """
+    def decode(window):
+        start, end, _, _ = window
+        chunk = audio[round(start * sample_rate):round(end * sample_rate)]
+        segments, _ = model.transcribe(chunk, **options)
+        return list(segments)
+
+    if state['workers'] < 2 or len(windows) < 2:
+        for index, window in enumerate(windows):
+            # Keep streaming behavior in serial mode, including early source
+            # checkpoints. A failed serial decode is surfaced, never skipped.
+            start, end, _, _ = window
+            segments, _ = model.transcribe(audio[round(start * sample_rate):round(end * sample_rate)], **options)
+            yield index, window, segments
+        return
+
+    def settle(future, index):
+        while True:
+            try:
+                return future.result(timeout=10)
+            except FutureTimeout:
+                if future.done():
+                    return future.result()
+                if waiting:
+                    waiting(index)
+
+    cursor, pending = 0, deque()
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix='videorandom-asr') as executor:
+        while cursor < min(2, len(windows)):
+            pending.append((cursor, executor.submit(decode, windows[cursor])))
+            cursor += 1
+        while pending:
+            index, future = pending.popleft()
+            try:
+                segments = settle(future, index)
+            except Exception as error:
+                if not gpu_out_of_memory(error):
+                    for _, other in pending:
+                        other.cancel()
+                    raise
+                # Futures retain exception tracebacks. Release decoder frames
+                # (which can own encoder buffers) before the lower-memory retry.
+                error.__traceback__ = None
+                # Let all in-flight GPU work settle before any serial retry.
+                # Retain successful work, and retry failed windows only once.
+                fallback = [(index, None)]
+                for other_index, other in pending:
+                    try:
+                        fallback.append((other_index, settle(other, other_index)))
+                    except Exception as other_error:
+                        if not gpu_out_of_memory(other_error):
+                            raise
+                        other_error.__traceback__ = None
+                        fallback.append((other_index, None))
+                pending.clear()
+                state.update(workers=1, oomFallback=True)
+                emitter({'type': 'warning', 'message': 'GPU 병렬 처리의 메모리가 부족해 남은 구간을 한 번에 하나씩 처리합니다. '
+                         '완료된 구간은 유지하며 같은 모델과 인식 설정을 사용합니다.'})
+                gc.collect()
+                for retry_index, saved in fallback:
+                    yield retry_index, windows[retry_index], decode(windows[retry_index]) if saved is None else saved
+                for remaining in range(cursor, len(windows)):
+                    yield remaining, windows[remaining], decode(windows[remaining])
+                return
+            yield index, windows[index], segments
+            if cursor < len(windows):
+                pending.append((cursor, executor.submit(decode, windows[cursor])))
+                cursor += 1
 
 
 def emit(payload):
@@ -583,11 +699,12 @@ def choose_language(model, audio, duration, language, sample_rate, speech=None):
 
 def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3', language='auto',
                      device='cpu', compute_type='int8', sample_rate=SAMPLE_RATE,
-                     speech_detector=None, emitter=emit):
+                     speech_detector=None, emitter=emit, workers=1):
     duration = len(audio) / sample_rate
     if not finite(duration) or duration <= 0:
         raise ValueError('음성 파일이 비어 있거나 길이가 올바르지 않습니다.')
     warnings, cues, processed = [], [], 0.0
+    state = {'workers': requested_workers(workers, device), 'oomFallback': False}
     speech, audit_available = [], False
     if profile == 'accurate':
         emitter({'type': 'progress', 'phase': 'audit', 'completedSeconds': 0.0, 'totalSeconds': duration, 'percent': 0.0})
@@ -605,7 +722,8 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
     selected_language, probability = choose_language(model, audio, duration, language, sample_rate,
                                                     speech=speech if audit_available else None)
     emitter({'type': 'info', 'language': selected_language, 'languageProbability': probability,
-             'duration': duration, 'model': model_name, 'profile': profile, 'device': device, 'computeType': compute_type})
+             'duration': duration, 'model': model_name, 'profile': profile, 'device': device,
+             'computeType': compute_type, 'workers': state['workers']})
     options = dict(beam_size=5, best_of=5, word_timestamps=True, task='transcribe',
                    condition_on_previous_text=False, language=selected_language,
                    temperature=(0.0, 0.2, 0.4), hallucination_silence_threshold=2.0,
@@ -613,10 +731,15 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
     # Owning windows cover [0,duration]. Extra context is assigned by word
     # midpoint; no evenly spaced, interpolated or fabricated subtitle timings.
     cores = plan_core_windows(duration, speech if audit_available else [])
-    for window, (core_start, core_end) in enumerate(cores):
-        decode_start, decode_end = max(0.0, core_start - 2.0), min(duration, core_end + 2.0)
-        chunk = audio[int(decode_start * sample_rate):int(decode_end * sample_rate)]
-        segments, _ = model.transcribe(chunk, **options)
+
+    def transcription_waiting(window):
+        emitter({'type': 'progress', 'phase': 'transcription', 'completedSeconds': processed,
+                 'totalSeconds': duration, 'percent': 80.0 * processed / duration,
+                 'windowIndex': window, 'windowCount': len(cores), 'workers': state['workers'], 'heartbeat': True})
+
+    initial_windows = [(max(0.0, start - 2.0), min(duration, end + 2.0), start, end) for start, end in cores]
+    for window, (decode_start, decode_end, core_start, core_end), segments in decode_windows(
+            model, audio, initial_windows, options, sample_rate, state, emitter, transcription_waiting):
         for segment in segments:
             for cue in cues_from_segment(segment, decode_start, duration, (core_start, core_end)):
                 cues.append({**cue, '_window': window, '_boundary': core_start})
@@ -642,23 +765,29 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
         # All cores are examined, with context across internal cuts rather than
         # truncated phonemes. Thirty-second cores plus three seconds per side
         # cost at most 1.2 audio-durations. Count the actual decoded samples.
-        windows = [(round(start * sample_rate), round(end * sample_rate), core_start, core_end)
+        windows = [(round(start * sample_rate) / sample_rate, round(end * sample_rate) / sample_rate, core_start, core_end)
                    for start, end, core_start, core_end in recovery_plan(targets, duration)]
-        budget = sum((right - left) / sample_rate for left, right, _, _ in windows)
+        budget = sum(end - start for start, end, _, _ in windows)
         recovery_cues = []
-        for window, (left, right, core_start, core_end) in enumerate(windows):
-            start, end = left / sample_rate, right / sample_rate
-            chunk = audio[left:right]
-            retry_options = {**options, 'vad_filter': False, 'no_speech_threshold': 0.8}
-            segments, _ = model.transcribe(chunk, **retry_options)
+
+        def recovery_waiting(window):
+            emitter({'type': 'progress', 'phase': 'recovery', 'completedSeconds': duration,
+                     'totalSeconds': duration, 'percent': 84.0 + 14.0 * rechecked / max(1.0, budget),
+                     'phaseCompletedSeconds': rechecked, 'phaseTotalSeconds': budget,
+                     'windowIndex': window, 'windowCount': len(windows), 'workers': state['workers'], 'heartbeat': True})
+
+        retry_options = {**options, 'vad_filter': False, 'no_speech_threshold': 0.8}
+        for window, (start, end, core_start, core_end), segments in decode_windows(
+                model, audio, windows, retry_options, sample_rate, state, emitter, recovery_waiting):
             candidates = []
             for segment in segments:
                 candidates.extend(recovery_candidates_for_targets(cues_from_segment(
                     segment, start, duration, (core_start, core_end)), targets, duration))
             recovery_cues.extend({**cue, '_window': window, '_boundary': core_start} for cue in candidates)
-            rechecked += len(chunk) / sample_rate
+            rechecked += end - start
             emitter({'type': 'progress', 'phase': 'recovery', 'completedSeconds': duration,
-                     'totalSeconds': duration, 'percent': 84.0 + 14.0 * rechecked / max(1.0, budget)})
+                     'totalSeconds': duration, 'percent': 84.0 + 14.0 * rechecked / max(1.0, budget),
+                     'phaseCompletedSeconds': rechecked, 'phaseTotalSeconds': budget})
         # Reconcile context observations before confirming split native cues.
         # Empty rechecks stay empty; no words or times are synthesized.
         cues, _ = merge_recovery(cues, reconcile_window_boundaries(recovery_cues))
@@ -711,6 +840,7 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
              'unresolvedCount': len(unresolved), 'unresolvedByReason': unresolved_by_reason,
              'unresolvedTruncated': len(unresolved) > MAX_UNRESOLVED}
     quality = {'profile': profile, 'model': model_name, 'device': device, 'computeType': compute_type,
+               'workers': state['workers'], 'parallelMemoryFallback': state['oomFallback'],
                'recognitionRevision': RECOGNITION_REVISION,
                'processingComplete': profile == 'accurate' and processed == duration,
                'durationSeconds': duration, 'processedSeconds': processed, 'wordTimestamps': all(bool(cue.get('words')) for cue in cues),
@@ -730,6 +860,7 @@ def parser_for_cli():
     parser.add_argument('--device', default='cpu', choices=('cpu', 'cuda', 'auto'))
     parser.add_argument('--compute-type', default='int8')
     parser.add_argument('--cpu-threads', type=int, default=max(1, min(8, os.cpu_count() or 4)))
+    parser.add_argument('--workers', default='auto', choices=('auto', '1', '2'))
     parser.add_argument('--language', default='auto', choices=('auto', 'ja', 'zh'))
     return parser
 
@@ -834,19 +965,81 @@ def probe_cuda_encoder(model):
 
 
 def load_whisper_model(model_name, cache, *, device='cpu', compute_type='int8', cpu_threads=8,
-                       factory=None, cuda_count=None, probe=None, dll_registrar=None, emitter=emit):
+                       factory=None, cuda_count=None, probe=None, dll_registrar=None, emitter=emit,
+                       workers='auto', memory_probe=None):
+    native_factory = factory is None
     if factory is None:
         from faster_whisper import WhisperModel
         factory = WhisperModel
     common = {'cpu_threads': cpu_threads, 'download_root': os.path.abspath(cache)}
     register = dll_registrar or register_nvidia_dll_directories
     warmup = probe or probe_cuda_encoder
+    capacity = memory_probe or (gpu_memory_available if native_factory else lambda: None)
+
+    def construct(selected_device, selected_compute):
+        count = requested_workers(workers, selected_device, capacity() if selected_device == 'cuda' else None)
+        options = {**common, 'device': selected_device, 'compute_type': selected_compute}
+        try:
+            try:
+                model = factory(model_name, **options, num_workers=count)
+            except TypeError as error:
+                # Custom/older model factories without this optional argument
+                # retain their serial decoder, never pretend to run parallel.
+                if 'num_workers' not in str(error) or 'unexpected keyword' not in str(error):
+                    raise
+                count = 1
+                model = factory(model_name, **options)
+        except Exception as error:
+            if count != 2 or not gpu_out_of_memory(error):
+                raise
+            gc.collect()
+            count = 1
+            emitter({'type': 'warning', 'message': 'GPU 병렬 모델 준비 중 메모리가 부족해 같은 모델을 직렬로 준비합니다.'})
+            model = factory(model_name, **options, num_workers=1)
+        if selected_device == 'cuda':
+            try:
+                warmup(model)
+            except Exception as error:
+                unload = getattr(getattr(model, 'model', None), 'unload_model', None)
+                if callable(unload):
+                    try:
+                        unload()
+                    except Exception:
+                        pass
+                if count != 2 or not gpu_out_of_memory(error):
+                    raise
+                model = None
+                gc.collect()
+                count = 1
+                emitter({'type': 'warning', 'message': 'GPU 병렬 준비 중 메모리가 부족해 같은 모델을 직렬로 다시 준비합니다.'})
+                model = factory(model_name, **options, num_workers=1)
+                try:
+                    warmup(model)
+                except Exception:
+                    unload = getattr(getattr(model, 'model', None), 'unload_model', None)
+                    if callable(unload):
+                        try:
+                            unload()
+                        except Exception:
+                            pass
+                    raise
+            if count == 2:
+                available = capacity()
+                # Unknown capacity is allowed only after an explicit --workers
+                # 2 choice. Automatic mode needs a verified post-load reserve.
+                if (available is None and str(workers) == 'auto') or (
+                        available is not None and available[0] < GPU_PARALLEL_RESERVE_MIB):
+                    count = 1
+        try:
+            model._videorandom_workers = count
+        except (AttributeError, TypeError):
+            pass
+        return model
+
     if device != 'auto':
         if device == 'cuda':
             register()
-        model = factory(model_name, device=device, compute_type=compute_type, **common)
-        if device == 'cuda':
-            warmup(model)
+        model = construct(device, compute_type)
         return model, device, compute_type
     candidate = None
     try:
@@ -858,8 +1051,7 @@ def load_whisper_model(model_name, cache, *, device='cpu', compute_type='int8', 
             available = cuda_count()
         if not available:
             raise RuntimeError('CUDA device is not available')
-        candidate = factory(model_name, device='cuda', compute_type='int8_float16', **common)
-        warmup(candidate)
+        candidate = construct('cuda', 'int8_float16')
         return candidate, 'cuda', 'int8_float16'
     except Exception as error:
         if not hardware_runtime_unavailable(error):
@@ -876,7 +1068,7 @@ def load_whisper_model(model_name, cache, *, device='cpu', compute_type='int8', 
         emitter({'type': 'warning', 'message': 'GPU 실행 환경을 사용할 수 없어 같은 음성 인식 모델을 CPU int8로 실행합니다. '
                  + str(error).replace('\n', ' ')[:200]})
         # Never change the requested model or profile when hardware is missing.
-        return factory(model_name, device='cpu', compute_type='int8', **common), 'cpu', 'int8'
+        return construct('cpu', 'int8'), 'cpu', 'int8'
 
 
 def main():
@@ -890,7 +1082,7 @@ def main():
     model_name = args.model or ('large-v3' if args.profile == 'accurate' else 'small')
     emit({'type': 'loading', 'model': model_name, 'profile': args.profile, 'device': args.device, 'computeType': args.compute_type})
     model, device, compute_type = load_whisper_model(model_name, args.cache, device=args.device,
-        compute_type=args.compute_type, cpu_threads=args.cpu_threads)
+        compute_type=args.compute_type, cpu_threads=args.cpu_threads, workers=args.workers)
     audio = decode_audio(os.path.abspath(args.audio), sampling_rate=SAMPLE_RATE)
 
     def speech_detector(waveform, rate):
@@ -900,7 +1092,8 @@ def main():
                 for item in get_speech_timestamps(waveform, options, sampling_rate=rate)]
 
     transcribe_audio(model, audio, profile=args.profile, model_name=model_name, language=args.language,
-                     device=device, compute_type=compute_type, speech_detector=speech_detector)
+                     device=device, compute_type=compute_type, speech_detector=speech_detector,
+                     workers=getattr(model, '_videorandom_workers', 1))
 
 
 if __name__ == '__main__':

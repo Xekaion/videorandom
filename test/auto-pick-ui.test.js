@@ -114,7 +114,7 @@ async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, 
   };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
-  for (const file of ['catalog-sort.js', 'catalog.js']) vm.runInContext(fs.readFileSync(path.join(publicDir, 'js', file), 'utf8'), sandbox, { filename: file });
+  for (const file of ['catalog-sort.js', 'analysis-progress.js', 'catalog.js']) vm.runInContext(fs.readFileSync(path.join(publicDir, 'js', file), 'utf8'), sandbox, { filename: file });
   load();
   await flush();
   const runTimers = async delay => {
@@ -1528,6 +1528,15 @@ test('job progress shows measured total and current-stage elapsed time without e
   assert(text.includes('경과 00:02:05'));
   assert(text.includes('현재 단계 00:01:05'));
   assert(!text.includes('예상'));
+});
+
+test('job progress labels source counters and estimates as the current phase only', async () => {
+  const ui = await boot({ initialActiveJob: { id: 'phase-timed-job', source: 'manual', status: 'running', total: 1, completed: 0,
+    stage: '전체 음성의 대사 인식', elapsedMs: 125000, stageElapsedMs: 65000, results: [],
+    phaseProgress: { phase: 'transcription', completedSeconds: 180, totalSeconds: 600, remainingSeconds: 210 } } });
+  const text = ui.elements.get('catalogJobText').textContent;
+  assert(text.includes('인식한 음성 03:00 / 10:00'));
+  assert(text.includes('음성 인식 예상 잔여 약 4분 · 이후 단계 별도'));
 });
 
 test('an unusable interrupted waiting job can be dismissed without starting analysis or removing results', async () => {

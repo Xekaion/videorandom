@@ -4,8 +4,10 @@ import json
 import pathlib
 import random
 import tempfile
+import threading
 import types
 import unittest
+from unittest.mock import patch
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'scripts' / 'transcribe_local.py'
 SPEC = importlib.util.spec_from_file_location('transcribe_local', SOURCE)
@@ -68,6 +70,150 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(ASR.merge_intervals([(-2, 2), (1, 4), (7, 12), (float('nan'), 5)], 10), [(0, 4), (7, 10)])
         self.assertEqual(ASR.uncovered_intervals([(0, 10), (5, 14)], [(2, 4), (3, 6), (9, 11)], 12), [(0, 2), (6, 9), (11, 12)])
         self.assertEqual(ASR.uncovered_intervals([(0, 10)], [(0, 9.6)], 10, minimum=0.75), [])
+
+    def test_parallel_decoder_bounds_pending_work_and_commits_in_source_order(self):
+        lock, second_started = threading.Lock(), threading.Event()
+        started, active, peak = [], [0], [0]
+        class ParallelModel:
+            def transcribe(self, audio, **options):
+                start = audio.start_sample / 10
+                def generate():
+                    with lock:
+                        started.append(start)
+                        active[0] += 1
+                        peak[0] = max(peak[0], active[0])
+                    try:
+                        if start == 0:
+                            if not second_started.wait(2):
+                                raise RuntimeError('second window was not concurrent')
+                        elif start == 10:
+                            second_started.set()
+                        yield segment(1, 2, str(start))
+                    finally:
+                        with lock:
+                            active[0] -= 1
+                return generate(), None
+        windows = [(start, start + 10, start, start + 10) for start in (0, 10, 20, 30)]
+        state = {'workers': 2, 'oomFallback': False}
+        output = ASR.decode_windows(ParallelModel(), PositionedAudio(40), windows, {}, 10, state, lambda event: None)
+        first = next(output)
+        self.assertEqual(first[0], 0)
+        # Pausing commits cannot enqueue the rest of a long video's transcript.
+        self.assertEqual(sorted(started), [0, 10])
+        remaining = list(output)
+        self.assertEqual([row[0] for row in [first] + remaining], [0, 1, 2, 3])
+        self.assertEqual(peak[0], 2)
+        self.assertEqual(active[0], 0)
+
+    def test_parallel_oom_settles_inflight_work_then_retries_only_failed_window(self):
+        lock, failed_ready, sibling_done = threading.Lock(), threading.Event(), threading.Event()
+        calls, active, warnings = {}, [0], []
+        class OomModel:
+            def transcribe(self, audio, **options):
+                start = audio.start_sample / 10
+                def generate():
+                    with lock:
+                        calls[start] = calls.get(start, 0) + 1
+                        attempt = calls[start]
+                        active[0] += 1
+                    try:
+                        if start == 10 and attempt == 1:
+                            failed_ready.set()
+                            yield segment(1, 2, 'discarded partial window')
+                            raise RuntimeError('CUDA out of memory')
+                        if start == 20:
+                            if not failed_ready.wait(2):
+                                raise RuntimeError('failure was not observed')
+                            sibling_done.set()
+                        if start == 10 and attempt == 2:
+                            self_test.assertTrue(sibling_done.is_set())
+                            self_test.assertEqual(active[0], 1)
+                        yield segment(1, 2, 'complete ' + str(start))
+                    finally:
+                        with lock:
+                            active[0] -= 1
+                return generate(), None
+        self_test = self
+        windows = [(start, start + 10, start, start + 10) for start in (0, 10, 20, 30)]
+        state = {'workers': 2, 'oomFallback': False}
+        rows = list(ASR.decode_windows(OomModel(), PositionedAudio(40), windows, {}, 10, state, warnings.append))
+        self.assertEqual([index for index, _, _ in rows], [0, 1, 2, 3])
+        self.assertEqual(calls, {0: 1, 10: 2, 20: 1, 30: 1})
+        self.assertEqual([segments[0]['text'] for _, _, segments in rows],
+                         ['complete ' + str(value) for value in (0.0, 10.0, 20.0, 30.0)])
+        self.assertEqual(state, {'workers': 1, 'oomFallback': True})
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(active[0], 0)
+
+    def test_parallel_unrelated_failure_and_model_timeout_are_not_retried(self):
+        for error in (ValueError('invalid model output'), TimeoutError('decoder timeout')):
+            model = Model([error, []])
+            state = {'workers': 2, 'oomFallback': False}
+            with self.assertRaisesRegex(type(error), str(error)):
+                list(ASR.decode_windows(model, PositionedAudio(20), [(0, 10, 0, 10), (10, 20, 10, 20)],
+                                        {}, 10, state, lambda event: None))
+            self.assertLessEqual(len(model.calls), 2)
+            self.assertEqual(state['workers'], 2)
+
+    def test_both_parallel_ooms_retry_serially_once_and_repeated_oom_is_visible(self):
+        lock, calls, warnings = threading.Lock(), {}, []
+        class FailingModel:
+            def transcribe(self, audio, **options):
+                start = audio.start_sample / 10
+                with lock:
+                    calls[start] = calls.get(start, 0) + 1
+                raise RuntimeError('CUDA out of memory')
+        state = {'workers': 2, 'oomFallback': False}
+        with self.assertRaisesRegex(RuntimeError, 'CUDA out of memory'):
+            list(ASR.decode_windows(FailingModel(), PositionedAudio(20), [(0, 10, 0, 10), (10, 20, 10, 20)],
+                                    {}, 10, state, warnings.append))
+        # Once the first serial retry fails, do not repeatedly restart the
+        # model/video or publish completion over the unprocessed source range.
+        self.assertEqual(calls, {0: 2, 10: 1})
+        self.assertEqual(state, {'workers': 1, 'oomFallback': True})
+        self.assertEqual(len(warnings), 1)
+
+    def test_parallel_and_serial_full_audio_and_recovery_preserve_quality_policy(self):
+        dialogue = [(start, start + 2, str(start)) for start in range(5, 360, 15)]
+        class TimelineModel:
+            def __init__(self):
+                self.calls = []
+                self.lock = threading.Lock()
+            def transcribe(self, audio, **options):
+                start, end = audio.start_sample / 10, (audio.start_sample + len(audio)) / 10
+                recovery = options.get('no_speech_threshold') == 0.8
+                with self.lock:
+                    self.calls.append((start, end, dict(options)))
+                result = [segment(left - start, right - start, text,
+                                  probability=0.95 if recovery or left % 30 == 5 else 0.2)
+                          for left, right, text in dialogue if start <= left and right <= end]
+                return iter(result), None
+        results = []
+        for workers in (1, 2):
+            model, events = TimelineModel(), []
+            cues, quality = ASR.transcribe_audio(model, PositionedAudio(360), sample_rate=10,
+                language='ja', device='cuda', workers=workers,
+                speech_detector=lambda audio, rate: [(start, end) for start, end, _ in dialogue], emitter=events.append)
+            results.append((cues, quality, model.calls, events))
+        self.assertEqual(results[0][0], results[1][0])
+        self.assertEqual(results[0][1]['audit'], results[1][1]['audit'])
+        self.assertTrue(results[1][1]['audit']['complete'])
+        self.assertEqual(sorted(results[0][2], key=lambda item: (item[0], item[1])),
+                         sorted(results[1][2], key=lambda item: (item[0], item[1])))
+        for _, _, calls, events in results:
+            self.assertTrue(all(options['beam_size'] == 5 and options['word_timestamps']
+                                and options['temperature'] == (0.0, 0.2, 0.4)
+                                and options['vad_filter'] is False and 'chunk_length' not in options
+                                for _, _, options in calls))
+            recovery = [event for event in events if event.get('phase') == 'recovery']
+            self.assertTrue(recovery)
+            self.assertEqual(recovery[-1]['phaseCompletedSeconds'], recovery[-1]['phaseTotalSeconds'])
+
+    def test_cpu_stays_serial_even_if_two_workers_are_requested(self):
+        self.assertEqual(ASR.requested_workers('2', 'cpu', (20000, 24000)), 1)
+        model = Model([[], []])
+        _, quality, _ = self.run_audio(model, seconds=120, workers=2, device='cpu')
+        self.assertEqual(quality['workers'], 1)
 
     def test_recovery_work_never_exceeds_budget_or_maximum_window(self):
         windows = ASR.recovery_windows([(0, 1000)], 1000, 71)
@@ -244,6 +390,76 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(calls[0][0], 'large-v3')
         self.assertEqual(calls[0][1]['compute_type'], 'int8_float16')
         self.assertEqual(probes, [candidate])
+
+    def test_gpu_auto_workers_require_memory_before_and_after_loading(self):
+        cases = [([(7000, 8192), (3000, 8192)], 2, 2),
+                 ([(7000, 8192), (1000, 8192)], 2, 1),
+                 ([(7000, 8192), None], 2, 1),
+                 ([(5000, 8192)], 1, 1), ([None], 1, 1), ([(7000, 8000)], 1, 1)]
+        for samples, native_workers, active_workers in cases:
+            memory, calls = iter(samples), []
+            def factory(name, **options):
+                calls.append((name, options))
+                return types.SimpleNamespace()
+            model, device, _ = ASR.load_whisper_model('large-v3', 'owned-cache', device='auto', factory=factory,
+                cuda_count=lambda: 1, probe=lambda model: None, dll_registrar=lambda: 0,
+                memory_probe=lambda: next(memory))
+            self.assertEqual(device, 'cuda')
+            self.assertEqual(calls[0][0], 'large-v3')
+            self.assertEqual(calls[0][1]['num_workers'], native_workers)
+            self.assertEqual(model._videorandom_workers, active_workers)
+
+    def test_parallel_gpu_loader_oom_retries_same_model_serially_before_cpu(self):
+        for stage in ('constructor', 'warmup'):
+            calls, unloaded, warnings = [], [], []
+            def factory(name, **options):
+                calls.append((name, options['device'], options['num_workers']))
+                if stage == 'constructor' and options['num_workers'] == 2:
+                    raise RuntimeError('CUDA failed with error out of memory')
+                return types.SimpleNamespace(workers=options['num_workers'],
+                    model=types.SimpleNamespace(unload_model=lambda: unloaded.append(True)))
+            def probe(model):
+                if stage == 'warmup' and model.workers == 2:
+                    raise RuntimeError('CUDA out of memory')
+            model, device, _ = ASR.load_whisper_model('large-v3', 'owned-cache', device='auto', factory=factory,
+                cuda_count=lambda: 1, probe=probe, dll_registrar=lambda: 0,
+                memory_probe=lambda: (7000, 8192), emitter=warnings.append)
+            self.assertEqual(calls, [('large-v3', 'cuda', 2), ('large-v3', 'cuda', 1)])
+            self.assertEqual(device, 'cuda')
+            self.assertEqual(model._videorandom_workers, 1)
+            self.assertEqual(len(warnings), 1)
+            self.assertEqual(len(unloaded), 1 if stage == 'warmup' else 0)
+
+    def test_custom_factory_without_workers_argument_retains_serial_execution(self):
+        def factory(name, device, compute_type, cpu_threads, download_root):
+            return types.SimpleNamespace()
+        model, device, _ = ASR.load_whisper_model('large-v3', 'owned-cache', device='cuda', workers='2',
+            factory=factory, probe=lambda model: None, dll_registrar=lambda: 0,
+            memory_probe=lambda: (7000, 8192))
+        self.assertEqual(device, 'cuda')
+        self.assertEqual(model._videorandom_workers, 1)
+
+    def test_wait_timeout_race_returns_completed_future_result(self):
+        class CompletedAfterTimeout:
+            calls = 0
+            def result(self, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ASR.FutureTimeout()
+                return [segment(1, 2)]
+            def done(self):
+                return True
+        class Executor:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def submit(self, function, window):
+                return CompletedAfterTimeout()
+        with patch.object(ASR, 'ThreadPoolExecutor', return_value=Executor()):
+            rows = list(ASR.decode_windows(Model([]), PositionedAudio(20),
+                [(0, 10, 0, 10), (10, 20, 10, 20)], {}, 10, {'workers': 2}, lambda event: None))
+        self.assertEqual([row[0] for row in rows], [0, 1])
 
     def test_auto_without_gpu_uses_cpu_same_model_and_reports_warning(self):
         calls, warnings = [], []

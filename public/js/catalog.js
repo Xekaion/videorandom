@@ -6,6 +6,7 @@
   const MAX_BATCH = 1000;
   const SORT_STORAGE_KEY = 'video_catalog_sort';
   const catalogSort = window.videoCatalogSort;
+  const phaseTimingText = job => window.videoAnalysisProgress?.formatProgressDetails(job?.phaseProgress) || '';
   const verifiedPartialSources = new WeakMap();
   const state = {
     scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0, detailLoading: false, transcriptLimit: 200,
@@ -403,7 +404,7 @@
         const percent = !waiting && Number.isFinite(job.percent) ? Math.max(0, Math.min(100, Math.round(job.percent))) : null;
         return { active: true, tone: 'active', percent,
           label: cancelling ? `${repair ? '복구' : '분석'} 중지 중…` : waiting ? `${repair ? '복구' : '분석'} 대기 중` : `${repair ? '복구' : '분석'} 중…`,
-          detail: cancelling ? '현재 작업을 안전하게 중지하고 있습니다.' : waiting ? '앞선 작업이 끝나면 시작합니다.' : job.stage || '분석을 준비하고 있습니다.' };
+          detail: cancelling ? '현재 작업을 안전하게 중지하고 있습니다.' : waiting ? '앞선 작업이 끝나면 시작합니다.' : [job.stage || '분석을 준비하고 있습니다.', phaseTimingText(job)].filter(Boolean).join(' · ') };
       }
     }
     if (state.requestFailure?.keys.has(key)) return { active: false, tone: 'failed',
@@ -1029,7 +1030,8 @@
     $('catalogJobTitle').textContent = job.source === 'auto-pick' ? `뽑은 영상 자동 ${jobTitle.replace(/^영상 /, '')}` : job.source === 'repair' ? `복구 · ${jobTitle}` : jobTitle;
     $('catalogJobProgress').value = overall;
     const timing = Number.isFinite(job.elapsedMs) ? ` · 경과 ${time(job.elapsedMs / 1000)}${active && Number.isFinite(job.stageElapsedMs) ? ` · 현재 단계 ${time(job.stageElapsedMs / 1000)}` : ''}` : '';
-    $('catalogJobText').textContent = `${completed}/${total}개 처리${job.currentFile ? ` · ${job.currentFile}` : ''}${active && job.stage ? ` · ${job.stage}` : ''}${timing}${job.error ? ` · ${job.error}` : ''}`;
+    const phaseTiming = active ? phaseTimingText(job) : '';
+    $('catalogJobText').textContent = `${completed}/${total}개 처리${job.currentFile ? ` · ${job.currentFile}` : ''}${active && job.stage ? ` · ${job.stage}` : ''}${timing}${phaseTiming ? ` · ${phaseTiming}` : ''}${job.error ? ` · ${job.error}` : ''}`;
     $('catalogCancel').classList.toggle('hidden', !active);
     $('catalogCancel').disabled = job.status === 'cancelling';
   }
@@ -1383,6 +1385,8 @@
     const processed = Number.isFinite(quality.processedUntil) ? time(quality.processedUntil) : '확인 중';
     const duration = Number.isFinite(quality.duration) ? time(quality.duration) : time(record.duration);
     const lines = [`음성 인식: ${quality.model || '모델 미상'} · ${quality.profile === 'accurate' ? '정확도 우선' : '빠름'} · 처리 ${processed} / ${duration}`];
+    if (quality.workers === 2) lines.push('GPU에서 음성 두 구간을 병렬 처리했습니다.');
+    if (quality.parallelMemoryFallback) lines.push('GPU 메모리가 부족해 남은 음성 구간은 하나씩 처리했습니다.');
     if (quality.profile === 'accurate' && quality.recognitionRevision !== 3) lines.push('이전 인식 방식으로 저장한 결과입니다. 긴 영상의 전체 재검수를 적용하려면 정확도 우선으로 복구 / 다시 분석하세요.');
     if (quality.processingComplete === true) lines.push('전체 음성 파일 처리는 끝났습니다. 아래 내용은 별도의 누락·신뢰도 검수 결과입니다.');
     const unauditedFast = quality.profile === 'fast' && quality.complete === true && audit.complete !== true && !unresolved.length;

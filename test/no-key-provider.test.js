@@ -238,6 +238,105 @@ test('local speech JSONL streams UTF-8 segments and progress into retained full 
     assert.equal(speech.args[speech.args.indexOf('--cache') + 1], path.join(dataDir, 'shared-models'));
 });
 
+test('current speech workers report owning-window progress without context-segment jumps or regressions', async t => {
+    const { dataDir } = await fixture(t);
+    const audioPath = path.join(dataDir, 'synthetic-progress.flac');
+    await fs.promises.writeFile(audioPath, 'mock audio');
+    const mocked = mockSpawn(call => {
+        call.child.stdout.write([
+            { type: 'info', profile: 'accurate', language: 'ja', duration: 100 },
+            { type: 'segment', start: 17, end: 22, text: '합성 대사 1' },
+            { type: 'progress', phase: 'transcription', completedSeconds: 20, totalSeconds: 100, percent: 16 },
+            { type: 'segment', start: 37, end: 42, text: '합성 대사 2' },
+            { type: 'progress', phase: 'transcription', completedSeconds: 40, totalSeconds: 100, percent: 32 },
+            { type: 'complete', segments: 2 }
+        ].map(event => JSON.stringify(event)).join('\n') + '\n');
+    });
+    const progress = [];
+    await provider(mocked.spawnImpl).transcribeLocalAudio(audioPath, { dataDir, subtitleQuality: 'accurate', onProgress: (...args) => progress.push(args) });
+    assert.deepEqual(progress.map(([, percent]) => percent), [35, 40.28, 45.56]);
+    assert.deepEqual(progress.map(([, , details]) => details.completedSeconds), [0, 20, 40]);
+    assert.ok(progress.every(([stage, , details]) => stage === 'transcription' && details.totalSeconds === 100));
+});
+
+test('speech ETA uses observed phase work and never claims remaining whole-analysis time', async t => {
+    const { dataDir } = await fixture(t);
+    const audioPath = path.join(dataDir, 'synthetic-timing.flac');
+    await fs.promises.writeFile(audioPath, 'mock audio');
+    let clock = 0;
+    const mocked = mockSpawn(call => {
+        for (const [at, event] of [
+            [0, { type: 'info', profile: 'accurate', duration: 100 }],
+            [10000, { type: 'progress', phase: 'transcription', completedSeconds: 20, totalSeconds: 100, percent: 16 }],
+            [20000, { type: 'progress', phase: 'transcription', completedSeconds: 40, totalSeconds: 100, percent: 32,
+                text: 'private material must not enter timing metadata' }],
+            [30000, { type: 'progress', phase: 'transcription', completedSeconds: 40, totalSeconds: 100, percent: 32 }],
+            [40000, { type: 'progress', phase: 'audit', completedSeconds: 100, totalSeconds: 100, percent: 82 }],
+            [50000, { type: 'progress', phase: 'recovery', completedSeconds: 100, totalSeconds: 100, percent: 86 }],
+            [60000, { type: 'progress', phase: 'recovery', completedSeconds: 100, totalSeconds: 100, percent: 89 }],
+            [70000, { type: 'complete', segments: 0 }]
+        ]) {
+            clock = at;
+            call.child.stdout.write(JSON.stringify(event) + '\n');
+        }
+    });
+    const instance = createNoKeyProvider({ spawnImpl: mocked.spawnImpl, environment: { VIDEORANDOM_PYTHON: 'mock-python' }, platform: 'win32', now: () => clock });
+    const progress = [];
+    await instance.transcribeLocalAudio(audioPath, { dataDir, onProgress: (...args) => progress.push(args) });
+    assert.equal(progress[1][2].remainingSeconds, undefined, 'a single completed window is too little timing evidence');
+    assert.deepEqual(progress[2][2], { phase: 'transcription', elapsedSeconds: 20, completedSeconds: 40, totalSeconds: 100, remainingSeconds: 30 });
+    assert.equal(progress[3][2].remainingSeconds, 60, 'a heartbeat without completed work increases the conservative phase estimate');
+    assert.deepEqual(progress[4][2], { phase: 'audit', elapsedSeconds: 0 });
+    assert.deepEqual(progress[5][2], { phase: 'recovery', elapsedSeconds: 0 });
+    assert.deepEqual(progress[6][2], { phase: 'recovery', elapsedSeconds: 10 });
+    assert.ok(progress.every(([, , details]) => !('text' in details) && !('overallRemainingSeconds' in details)));
+});
+
+test('independent recovery work counters support a separate ETA without reusing source-duration completion', async t => {
+    const { dataDir } = await fixture(t);
+    const audioPath = path.join(dataDir, 'synthetic-recovery-timing.flac');
+    await fs.promises.writeFile(audioPath, 'mock audio');
+    let clock = 0;
+    const mocked = mockSpawn(call => {
+        for (const [at, event] of [
+            [0, { type: 'info', profile: 'accurate', duration: 1000 }],
+            [1000, { type: 'progress', phase: 'recovery', completedSeconds: 1000, totalSeconds: 1000, phaseCompletedSeconds: 0, phaseTotalSeconds: 100, percent: 84 }],
+            [11000, { type: 'progress', phase: 'recovery', completedSeconds: 1000, totalSeconds: 1000, phaseCompletedSeconds: 20, phaseTotalSeconds: 100, percent: 87 }],
+            [21000, { type: 'progress', phase: 'recovery', completedSeconds: 1000, totalSeconds: 1000, phaseCompletedSeconds: 40, phaseTotalSeconds: 100, percent: 90 }],
+            [22000, { type: 'complete', segments: 0 }]
+        ]) {
+            clock = at;
+            call.child.stdout.write(JSON.stringify(event) + '\n');
+        }
+    });
+    const instance = createNoKeyProvider({ spawnImpl: mocked.spawnImpl, environment: { VIDEORANDOM_PYTHON: 'mock-python', VIDEORANDOM_ASR_WORKERS: '1' }, platform: 'win32', now: () => clock });
+    const progress = [];
+    await instance.transcribeLocalAudio(audioPath, { dataDir, onProgress: (...args) => progress.push(args) });
+    assert.deepEqual(progress.at(-1).slice(0, 1), ['대사 누락 재확인']);
+    assert.deepEqual(progress.at(-1)[2], { phase: 'recovery', elapsedSeconds: 20, completedSeconds: 40, totalSeconds: 100, remainingSeconds: 30 });
+    assert.equal(mocked.calls[0].args[mocked.calls[0].args.indexOf('--workers') + 1], '1');
+});
+
+test('analyzeExtracted forwards speech phase timing to the caller without transcript fields', async t => {
+    const { dataDir, record } = await fixture(t, { transcript: [], transcriptSource: 'none' });
+    const audioPath = path.join(dataDir, 'synthetic-forwarding.mp3');
+    await fs.promises.writeFile(audioPath, 'mock audio');
+    const mocked = mockSpawn(async call => {
+        if (call.args.includes('--audio')) call.child.stdout.write([
+            { type: 'info', profile: 'fast', language: 'ko', duration: 90 },
+            { type: 'progress', phase: 'transcription', completedSeconds: 45, totalSeconds: 90, percent: 40 },
+            { type: 'segment', start: 1, end: 2, text: '합성 원문' }, { type: 'complete', segments: 1 }
+        ].map(event => JSON.stringify(event)).join('\n') + '\n');
+        else await writeResponse(call, summary());
+    });
+    const progress = [];
+    await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, onProgress: (...args) => progress.push(args) });
+    const timing = progress.find(([, , details]) => details?.completedSeconds === 45)?.[2];
+    assert.equal(timing?.phase, 'transcription');
+    assert.equal(timing?.totalSeconds, 90);
+    assert.equal(JSON.stringify(timing).includes('합성 원문'), false);
+});
+
 test('stopping streaming speech retains recognized segments and unread subtitle fallback', async t => {
     const { dataDir, record } = await fixture(t, { transcript: [{ start: 30, end: 31, text: '뒤쪽 기존 자막' }] });
     const audioPath = path.join(dataDir, 'audio.mp3');

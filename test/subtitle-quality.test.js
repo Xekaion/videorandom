@@ -57,6 +57,14 @@ test('normalizing legacy diagnostics cannot manufacture verification provenance'
   assert.equal(malformed.audit.complete, false);
 });
 
+test('GPU parallel diagnostics survive storage without accepting arbitrary worker settings', () => {
+  const normalized = normalizeTranscriptionQuality({ ...proof(), workers: 2, parallelMemoryFallback: false });
+  assert.equal(normalized.workers, 2);
+  assert.equal(normalized.parallelMemoryFallback, false);
+  for (const workers of [0, 3, '2', Infinity]) assert.equal(normalizeTranscriptionQuality({ ...proof(), workers }).workers, undefined);
+  assert.equal(normalizeTranscriptionQuality({ ...proof(), parallelMemoryFallback: 'yes' }).parallelMemoryFallback, undefined);
+});
+
 test('validated boundary uncertainty keeps the raw gap total while gating on genuine unresolved speech', () => {
   const audit = { complete: true, speechSeconds: 2.704, uncoveredSpeechSeconds: 0.704, boundaryUncertaintySeconds: 0.704, unresolvedSpeechSeconds: 0,
     boundaryRanges: [{ start: 0.812, end: 1, reason: 'speech_boundary_uncertainty' }, { start: 3, end: 3.516, reason: 'speech_boundary_uncertainty' }], unresolved: [] };

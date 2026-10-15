@@ -77,6 +77,23 @@ test('a Wi-Fi interruption retries only the accepted job GET and succeeds on the
   assert.equal(JSON.stringify(progress).includes(CODE), false);
 });
 
+test('remote phase progress is forwarded without scaling its audio counters or exposing arbitrary fields', async t => {
+  const f = await fixture(t, { poll(attempt, req, res, completed) {
+    if (attempt === 1) {
+      res.end(JSON.stringify({ id: JOB_ID, status: 'running', stage: 'transcription', percent: 45,
+        phaseProgress: { phase: 'transcription', completedSeconds: 180, totalSeconds: 600, elapsedSeconds: 90,
+          remainingSeconds: 210, sampleAgeSeconds: 12, transcript: 'private speech', path: 'C:/private' } }));
+    } else res.end(JSON.stringify(completed));
+  } });
+  const progress = [];
+  await f.send({ onProgress: (stage, percent, details) => progress.push({ stage, percent, details }) });
+  const measured = progress.find(item => item.details);
+  assert.equal(measured.percent, 64.75);
+  assert.deepEqual(measured.details, { phase: 'transcription', completedSeconds: 180, totalSeconds: 600,
+    elapsedSeconds: 90, remainingSeconds: 210, sampleAgeSeconds: 12 });
+  assert.equal(JSON.stringify(progress).includes('private speech'), false);
+});
+
 test('an exhausted network recovery stops after three retries and explains that the server job may still be running', async t => {
   const f = await fixture(t, { poll(attempt, req, res) { res.destroy(); } });
   const progress = [];
