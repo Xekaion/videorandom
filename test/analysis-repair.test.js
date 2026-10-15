@@ -201,8 +201,10 @@ test('repair rejects unknown result IDs, missing files and unavailable tools bef
 test('subtitle options validate and survive the durable automatic settings journal', async t => {
   assert.equal(validateOptions({}).transcriptLanguage, 'auto');
   assert.equal(validateOptions({}).subtitleLanguage, 'original');
+  assert.equal(validateOptions({}).subtitleQuality, 'fast');
   assert.throws(() => validateOptions({ transcriptLanguage: 'anything' }), /대사 언어/);
   assert.throws(() => validateOptions({ subtitleLanguage: '../secret' }), /자막/);
+  assert.throws(() => validateOptions({ subtitleQuality: 'unknown' }), /정확|품질|분석/);
   const f = await fixture(t);
   const configured = await f.request('/auto-pick', { options: { mode: 'local', transcriptLanguage: 'ja', subtitleLanguage: 'ko' } }, 'PUT');
   assert.equal(configured.status, 200);
@@ -220,12 +222,48 @@ test('legacy AI settings adopt Korean subtitles while explicit original and loca
     const restored = (await f.request('/auto-pick')).data;
     assert.equal(restored.options.subtitleLanguage, expected, `${mode}/${choice}`);
     assert.equal(restored.options.transcriptLanguage, 'auto');
+    assert.equal(restored.options.subtitleQuality, expected === 'ko' ? 'accurate' : 'fast');
     const persisted = JSON.parse(await fs.readFile(path.join(f.dataDir, 'auto-pick.json'), 'utf8'));
     if (expected === 'ko' || choice === 'original') assert.equal(persisted.safeOptions.subtitleLanguage, expected);
     assert.equal(f.calls.length, 0);
   }
   assert.equal(validateOptions({ mode: 'codex' }).subtitleLanguage, 'original');
   assert.equal(validateOptions({ mode: 'remote', remoteUrl: 'http://192.168.1.10:3001', connectionCode: 'fixture-code' }).subtitleLanguage, 'original');
+});
+
+test('durable Korean subtitle quality migrates to accurate but an explicit fast preference survives', async t => {
+  for (const [mode, quality, expected] of [['codex', undefined, 'accurate'], ['remote', undefined, 'accurate'],
+    ['codex', 'fast', 'fast'], ['remote', 'fast', 'fast'], ['codex', 'accurate', 'accurate'], ['local', undefined, 'fast']]) {
+    const safeOptions = { mode, frameCount: 10, subtitleLanguage: 'ko', remoteUrl: mode === 'remote' ? 'http://192.168.1.10:3001' : '',
+      ...(quality ? { subtitleQuality: quality } : {}) };
+    const f = await fixture(t, { journal: { schemaVersion: 1, enabled: false, paused: false, pauseReason: '', safeOptions, entries: [] } });
+    assert.equal((await f.request('/auto-pick')).data.options.subtitleQuality, expected);
+    if (mode !== 'local') assert.equal(JSON.parse(await fs.readFile(path.join(f.dataDir, 'auto-pick.json'), 'utf8')).safeOptions.subtitleQuality, expected);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test('accurate records save only a trusted local source identity and ignore caller or provider file metadata', async t => {
+  const injected = { sizeBytes: 999999, mtimeMs: 1 };
+  const f = await fixture(t, { analyze: async file => ({ ...file, sourceFile: injected, status: 'completed', summary: '소유한 자료의 분석', frames: [], transcript: [], warnings: [] }) });
+  const actual = await fs.stat(f.filePath);
+  const started = await f.request('/jobs', { files: [f.filePath], options: { mode: 'codex', subtitleQuality: 'accurate', sourceFile: injected } });
+  const record = (await f.finish(started.data.id)).results[0];
+  assert.deepEqual(record.sourceFile, { sizeBytes: actual.size, mtimeMs: actual.mtimeMs });
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.dataDir, 'results', record.id + '.json'), 'utf8')).sourceFile, record.sourceFile);
+  const fast = await f.request('/jobs', { files: [f.filePath], options: { mode: 'codex', subtitleQuality: 'fast', sourceFile: injected } });
+  assert.equal((await f.finish(fast.data.id)).results[0].sourceFile, undefined);
+});
+
+test('explicit fast repair retains the trusted identity of reused accurate source data', async t => {
+  const originalSource = { sizeBytes: 42, mtimeMs: 1234567 };
+  const f = await fixture(t, { seed: { sourceFile: originalSource }, analyze: async file => ({ ...file,
+    extractionReusedFrom: seedId, sourceFile: { sizeBytes: 99999, mtimeMs: 0 }, status: 'completed', summary: '재사용한 원문의 요약', frames: [], transcript: [], warnings: [] }) });
+  const repair = await f.request(`/results/${seedId}/repair`, { options: { mode: 'codex', subtitleQuality: 'fast' } });
+  assert.equal(repair.status, 202);
+  const record = (await f.finish(repair.data.id)).results[0];
+  assert.deepEqual(record.sourceFile, originalSource);
+  assert.notEqual(record.sourceFile.sizeBytes, (await fs.stat(f.filePath)).size);
 });
 
 test('saved timed subtitles download with aligned Korean cues and reject unavailable translation', async t => {

@@ -624,3 +624,80 @@ test('older translated records without an automatic sidecar save do not claim on
   await withoutTranslation.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
   assert(withoutTranslation.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('hidden'));
 });
+
+test('new subtitle settings default to accurate and retain an explicit fast choice without storing connection codes', async () => {
+  const ui = await boot({ savedSettings: { mode: 'remote', remoteUrl: 'http://192.168.55.166:3001' } });
+  assert.equal(ui.elements.get('catalogSubtitleQuality').value, 'accurate');
+  ui.elements.get('catalogConnectionCode').value = 'owned-fixture-secret';
+  ui.elements.get('catalogSubtitleQuality').value = 'fast';
+  await ui.elements.get('catalogSubtitleQuality').dispatch('change');
+  await ui.runTimers(450);
+  assert.equal(ui.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options.subtitleQuality, 'fast');
+  const stored = JSON.parse(ui.preferences.get('video_catalog_settings'));
+  assert.equal(stored.subtitleQuality, 'fast');
+  assert.equal(JSON.stringify(stored).includes('owned-fixture-secret'), false);
+  const reopened = await boot({ savedSettings: stored });
+  assert.equal(reopened.elements.get('catalogSubtitleQuality').value, 'fast');
+});
+
+test('durable quality preferences restore while an in-flight user edit remains authoritative', async () => {
+  const queue = { ...baseQueue(), configured: true, mode: 'codex', options: { mode: 'codex', frameCount: 10, subtitleLanguage: 'ko', subtitleQuality: 'fast' } };
+  const restored = await boot({ initialQueue: queue });
+  assert.equal(restored.elements.get('catalogSubtitleQuality').value, 'fast');
+  const edited = await boot({ initialQueue: queue, delayConfig: true });
+  edited.elements.get('catalogSubtitleQuality').value = 'accurate';
+  await edited.elements.get('catalogSubtitleQuality').dispatch('change');
+  edited.releaseConfig(); await flush(); await flush();
+  assert.equal(edited.elements.get('catalogSubtitleQuality').value, 'accurate');
+});
+
+test('local extraction queue settings do not change the next AI subtitle default or an explicit browser preference', async () => {
+  const queue = { ...baseQueue(), configured: true, mode: 'local', options: { mode: 'local', frameCount: 10, subtitleLanguage: 'original', subtitleQuality: 'fast' } };
+  const fresh = await boot({ initialQueue: queue });
+  assert.equal(fresh.elements.get('catalogSubtitleQuality').value, 'accurate');
+  fresh.elements.get('catalogMode').value = 'codex';
+  await fresh.elements.get('catalogMode').dispatch('change');
+  await fresh.runTimers(450);
+  assert.equal(fresh.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options.subtitleQuality, 'accurate');
+  const explicit = await boot({ initialQueue: queue, savedSettings: { mode: 'local', subtitleQuality: 'fast' } });
+  assert.equal(explicit.elements.get('catalogSubtitleQuality').value, 'fast');
+});
+
+test('subtitle details distinguish full audio processing from unresolved speech without promising perfect recognition', async () => {
+  for (const complete of [true, false]) {
+    const record = { ...timedRecord(), transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3',
+      complete, duration: 60, processedUntil: 60, audit: { complete, unresolved: complete ? [] : [{ start: 40, end: 44 }] } } };
+    const ui = await boot({ records: [record] });
+    await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+    const notice = ui.elements.get('catalogSubtitleQualityNotice');
+    assert(notice.textContent.includes('large-v3'));
+    assert(notice.textContent.includes('00:01:00 / 00:01:00'));
+    assert.equal(notice.classList.contains('catalog-error'), !complete);
+    assert(notice.textContent.includes(complete ? '전체 음성 처리와 발화 누락 점검' : '00:00:40–00:00:44'));
+    assert.equal(notice.childNodes.length, 0);
+    assert.equal(notice.textContent.includes('100%'), false);
+  }
+});
+
+test('an unfinished translated prefix shows counts without claiming all speech or a completed Korean subtitle', async () => {
+  const record = { ...timedRecord(), subtitleTranslation: undefined, subtitleLanguage: undefined,
+    subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: 2, completedCues: 2, complete: false, sourceComplete: false },
+    subtitleError: '원어 인식 확인 필요' };
+  const ui = await boot({ records: [record] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const notice = ui.elements.get('catalogSubtitleQualityNotice').textContent;
+  assert(notice.includes('한국어 번역 2 / 2구간 · 진행 기록 보관됨 · 원어 인식 확인 필요'));
+  assert.equal(notice.includes('2구간 완료'), false);
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'original');
+});
+
+test('a completed fast transcript discloses the omitted coverage audit without claiming it ran or failed', async () => {
+  const record = { ...timedRecord(), transcriptionQuality: { version: 1, source: 'audio', profile: 'fast', model: 'small',
+    complete: true, duration: 60, processedUntil: 60, audit: { complete: false, unresolved: [] } } };
+  const ui = await boot({ records: [record] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const notice = ui.elements.get('catalogSubtitleQualityNotice');
+  assert(notice.textContent.includes('발화 누락 검사를 생략'));
+  assert.equal(notice.classList.contains('catalog-error'), false);
+  assert.equal(notice.textContent.includes('발화 누락 점검을 마쳤습니다'), false);
+});

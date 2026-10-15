@@ -4,10 +4,16 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
+const crypto = require('node:crypto');
 const { createLanAnalysis, sendRemoteAnalysis, checkRemoteServer, privateAddress, validateRemoteUrl, resolveRemoteUrl, validateMetadata } = require('../lib/lan-analysis');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const MP3 = Buffer.from('ID3tiny-transport-fixture');
+const FLAC = Buffer.from('fLaCtiny-lossless-transport-fixture');
+const quality = (changes = {}) => ({ version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+  language: 'ja', languageProbability: 0.99, duration: 60, processedUntil: 60, wordTimestamps: true,
+  audit: { complete: true, speechSeconds: 2, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [], ...changes });
+const fingerprint = transcript => crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex');
 const metadata = (changes = {}) => ({ name: '한글 영상.mp4', ext: 'MP4', sizeMB: 1, duration: 60,
   transcript: [{ start: 1, end: 3, text: '안녕하세요' }], transcriptSource: 'sidecar:srt',
   frames: [{ timestamp: 5, filename: 'frame_001.jpg' }], transcribeAudio: false, ...changes });
@@ -66,7 +72,7 @@ test('relay starts only explicitly and requires private client plus bearer authe
   const f = await fixture(t);
   assert.ok(f.status.connectionCode.length >= 24);
   const status = await (await f.request('/v1/status')).json();
-  assert.deepEqual(status, { ready: true, protocol: 1, active: 0, queued: 0, capabilities: ['timed-subtitles-v1'] });
+  assert.deepEqual(status, { ready: true, protocol: 1, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1'] });
   assert.equal(JSON.stringify(status).includes(f.status.connectionCode), false);
   assert.equal((await fetch(f.base + '/v1/status')).status, 401);
   assert.equal((await f.request('/v1/status', { headers: { Authorization: 'Bearer ' + 'x'.repeat(32) } })).status, 401);
@@ -115,6 +121,161 @@ test('uploads process authenticated data without host paths and retains JPEG fra
   assert.deepEqual(Buffer.from(await image.arrayBuffer()), JPEG);
   assert.equal((await f.request(`/v1/jobs/${submitted.id}/frames/missing.jpg`)).status, 404);
   assert.equal((await f.request('/api/library')).status, 404);
+});
+
+test('accurate uploads require lossless FLAC and forward quality options instead of trusting sparse sidecars', async t => {
+  let received;
+  const f = await fixture(t, async pkg => {
+    received = pkg;
+    assert.equal(pkg.subtitleQuality, 'accurate');
+    assert.equal(path.extname(pkg.audioPath), '.flac');
+    assert.deepEqual(await fs.readFile(pkg.audioPath), FLAC);
+    return { ...pkg.record, status: 'completed', summary: '전체 음성 인식 검증', transcriptSource: 'audio:faster-whisper large-v3',
+      transcriptionQuality: quality(), transcript: [{ id: 0, start: 1, end: 3, text: 'こんにちは', confidence: 0.98,
+        avgLogprob: -0.2, noSpeechProbability: 0.01, qualityFlags: [], words: [{ start: 1, end: 3, word: 'こんにちは', probability: 0.98 }] }] };
+  });
+  const info = metadata({ subtitleQuality: 'accurate', subtitleLanguage: 'ko', hasAudio: true, transcribeAudio: true });
+  const files = audio => [{ field: 'frames', name: 'frame_001.jpg', type: 'image/jpeg', bytes: JPEG }, audio];
+  const submitted = await f.submit(info, files({ field: 'audio', name: 'audio.flac', type: 'audio/flac', bytes: FLAC }));
+  assert.equal(submitted.status, 202, await submitted.clone().text());
+  const result = await finished(f, (await submitted.json()).id);
+  assert.equal(result.result.transcriptionQuality.profile, 'accurate');
+  assert.equal(result.result.transcript[0].words[0].probability, 0.98);
+  assert.equal(result.result.transcript[0].confidence, 0.98);
+  assert.equal(result.result.transcriptionQuality.complete, true);
+  await assert.rejects(fs.stat(received.audioPath), { code: 'ENOENT' });
+  assert.equal((await f.submit(info, files({ field: 'audio', name: 'audio.mp3', type: 'audio/mpeg', bytes: MP3 }))).status, 400);
+  assert.equal((await f.submit(info, files({ field: 'audio', name: 'audio.flac', type: 'audio/flac', bytes: MP3 }))).status, 400);
+});
+
+test('accurate cached transcripts require complete large-model proof and sanitize diagnostics and word metadata', async t => {
+  let received;
+  const f = await fixture(t, async pkg => {
+    received = pkg;
+    return { ...pkg.record, summary: '재사용한 전체 대사', transcriptionQuality: { ...quality(), model: 'C:/host-private/models/large-v3', apiKey: 'private-quality-key' },
+      transcript: pkg.record.transcript.map(cue => ({ ...cue, private: 'private-cue-key', words: cue.words.map(word => ({ ...word, token: 'private-word-key' })) })) };
+  });
+  const original = metadata({ subtitleQuality: 'accurate', subtitleLanguage: 'ko', hasAudio: true, transcriptSource: 'audio:faster-whisper large-v3',
+    transcriptionQuality: quality(), transcript: [{ id: 'cue-1', start: 1, end: 3, text: 'こんにちは', confidence: 0.9,
+      words: [{ start: 1, end: 3, word: 'こんにちは', probability: 0.9 }] }] });
+  const submitted = await f.submit(original);
+  assert.equal(submitted.status, 202, await submitted.clone().text());
+  const job = await finished(f, (await submitted.json()).id);
+  assert.equal(received.audioPath, null);
+  assert.equal(received.record.hasAudio, true);
+  assert.equal(job.result.transcriptionQuality.model, 'large-v3');
+  assert.equal(job.result.transcript[0].words[0].probability, 0.9);
+  assert.equal(JSON.stringify(job).includes('private-'), false);
+  assert.equal(JSON.stringify(job).includes('host-private'), false);
+  for (const changes of [{ transcriptionQuality: quality({ model: 'small' }) }, { transcriptionQuality: quality({ complete: false }) },
+    { transcriptionQuality: quality({ processedUntil: 30 }) }, { transcriptSource: 'sidecar:sparse.srt' }]) {
+    assert.equal((await f.submit({ ...original, ...changes })).status, 400);
+  }
+});
+
+test('old subtitle hosts reject accurate requests before upload while fast requests retain legacy metadata', async t => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-quality-legacy-'));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const id = 'c'.repeat(32), jobId = 'd'.repeat(32), code = 'e'.repeat(32);
+  const framesDir = path.join(dataDir, 'frames', id);
+  await fs.mkdir(framesDir, { recursive: true }); await fs.writeFile(path.join(framesDir, 'frame_001.jpg'), JPEG);
+  let posts = 0, upload = '';
+  const server = http.createServer(async (req, res) => {
+    if (req.url === '/v1/status') { res.end(JSON.stringify({ ready: true, protocol: 1, capabilities: ['timed-subtitles-v1'] })); return; }
+    if (req.url === '/v1/jobs') {
+      posts++; for await (const bytes of req) upload += bytes.toString('utf8');
+      res.end(JSON.stringify({ id: jobId, status: 'completed', result: { ...metadata(), status: 'completed', summary: '기존 서버 검증' } })); return;
+    }
+    if (req.url.endsWith('/frames/frame_001.jpg')) { res.end(JPEG); return; }
+    res.writeHead(404); res.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const options = { dataDir, connectionCode: code, remoteUrl: `http://127.0.0.1:${server.address().port}`, subtitleLanguage: 'ko' };
+  const record = { id, path: 'C:/client/neutral.mp4', ...metadata(), size: 1 };
+  await assert.rejects(sendRemoteAnalysis(record, { ...options, subtitleQuality: 'accurate' }), /분석 서버 PC도 새 버전으로 업데이트/);
+  assert.equal(posts, 0);
+  await sendRemoteAnalysis({ ...record, transcript: [{ start: 1, end: 3, text: '대사', words: [{ start: 1, end: 3, word: '대사', probability: 0.9 }] }] }, { ...options, subtitleQuality: 'fast' });
+  assert.equal(posts, 1);
+  assert.equal(upload.includes('"subtitleQuality"'), false);
+  assert.equal(upload.includes('"transcriptionQuality"'), false);
+  assert.equal(upload.includes('"words"'), false);
+});
+
+test('discarding invalid returned cues also clears the full-transcription proof', async t => {
+  const f = await fixture(t, async ({ record }) => ({ ...record, status: 'completed', transcriptSource: 'audio:faster-whisper large-v3',
+    transcriptionQuality: quality(), transcript: [{ start: 1, end: 3, text: '유효한 원문' }, { start: 5, end: 4, text: '잘못된 시점' }] }));
+  const submitted = await f.submit();
+  const job = await finished(f, (await submitted.json()).id);
+  assert.equal(job.result.status, 'partial');
+  assert.equal(job.result.transcriptionQuality.complete, false);
+  assert.equal(job.result.transcript.length, 1);
+  assert.match(job.result.warnings.join('\n'), /전체 인식 완료로 표시하지/);
+});
+
+test('LAN round trips exact-source partial translation progress without checkpoint paths or a complete Korean flag', async t => {
+  const cues = [{ id: 'first', start: 1, end: 2, text: 'こんにちは' }, { id: 'second', start: 3, end: 4, text: '駅はどこ' }];
+  const progress = { version: 1, sourceFingerprint: fingerprint(cues), totalCues: 2, completedCues: 1, language: 'ko', complete: false, sourceComplete: true };
+  const f = await fixture(t, async ({ record }) => ({ ...record, status: 'partial', subtitleError: 'translation quota fixture',
+    subtitleTranslationProgress: { ...progress, checkpointPath: 'C:/host-private/checkpoints/file.json', apiKey: 'private-progress-key' },
+    subtitleTranslationPartial: [{ id: 'first', start: 1, end: 2, text: '안녕하세요', checkpoint: 'private-checkpoint-key' }] }));
+  const id = 'f'.repeat(32), framesDir = path.join(f.dataDir, 'frames', id);
+  await fs.mkdir(framesDir, { recursive: true }); await fs.writeFile(path.join(framesDir, 'frame_001.jpg'), JPEG);
+  const result = await sendRemoteAnalysis({ id, path: 'C:/client/neutral.mp4', size: 1, ...metadata({ transcript: cues }) }, {
+    remoteUrl: f.base, connectionCode: f.status.connectionCode, dataDir: f.dataDir
+  });
+  assert.deepEqual(result.subtitleTranslationProgress, progress);
+  assert.deepEqual(result.subtitleTranslationPartial, [{ id: 'first', start: 1, end: 2, text: '안녕하세요' }]);
+  assert.equal(result.subtitleLanguage, undefined);
+  assert.equal(result.subtitleTranslation, undefined);
+  assert.equal(result.status, 'partial');
+  assert.equal(JSON.stringify(result).includes('private-'), false);
+  assert.equal(JSON.stringify(result).includes('checkpoint'), false);
+});
+
+test('invalid translation counters, source fingerprints, prefix intervals and IDs never become completion claims', async t => {
+  const cues = [{ id: 1, start: 1, end: 2, text: '原文一' }, { id: 2, start: 3, end: 4, text: '原文二' }];
+  const progress = { version: 1, sourceFingerprint: fingerprint(cues), totalCues: 2, completedCues: 1, language: 'ko', complete: false, sourceComplete: true };
+  let changes = {};
+  const f = await fixture(t, async ({ record }) => ({ ...record, status: 'completed', subtitleTranslationProgress: progress,
+    subtitleTranslationPartial: [{ id: 1, start: 1, end: 2, text: '첫 원문' }], ...changes }));
+  const cases = [{ subtitleTranslationProgress: { ...progress, totalCues: 3 } }, { subtitleTranslationProgress: { ...progress, completedCues: 3 } },
+    { subtitleTranslationProgress: { ...progress, completedCues: 0 } }, { subtitleTranslationProgress: { ...progress, sourceFingerprint: '0'.repeat(64) } },
+    { subtitleTranslationProgress: { ...progress, language: 'ja' } }, { subtitleTranslationProgress: { ...progress, complete: true } },
+    { subtitleTranslationPartial: [{ id: 99, start: 1, end: 2, text: '첫 원문' }] },
+    { subtitleTranslationPartial: [{ id: 1, start: 1, end: 2.1, text: '첫 원문' }] }];
+  for (changes of cases) {
+    const submitted = await f.submit(metadata({ transcript: cues }));
+    const job = await finished(f, (await submitted.json()).id);
+    assert.equal(job.result.subtitleTranslationProgress, undefined);
+    assert.equal(job.result.subtitleTranslationPartial, undefined);
+    assert.equal(job.result.subtitleLanguage, undefined);
+    assert.equal(job.result.status, 'partial');
+  }
+});
+
+test('partial and full translations share one bounded payload budget with rich original cues', async t => {
+  const cues = Array.from({ length: 400 }, (_, index) => ({ id: index, start: index / 20, end: index / 20 + 0.04, text: 'あ'.repeat(2000) }));
+  let full = false;
+  const f = await fixture(t, async ({ record }) => full ? { ...record, status: 'completed', subtitleLanguage: 'ko',
+    subtitleTranslation: cues.map(cue => ({ ...cue, text: '가'.repeat(4000) })) } : {
+    ...record, status: 'partial', subtitleTranslationProgress: { version: 1, sourceFingerprint: fingerprint(cues), totalCues: cues.length,
+      completedCues: 200, language: 'ko', complete: false, sourceComplete: true },
+    subtitleTranslationPartial: cues.slice(0, 200).map(cue => ({ ...cue, text: '가'.repeat(4000) }))
+  });
+  for (full of [false, true]) {
+    const submitted = await f.submit(metadata({ transcript: cues }));
+    assert.equal(submitted.status, 202, await submitted.clone().text());
+    const job = await finished(f, (await submitted.json()).id);
+    assert.equal(job.result.transcript.length, cues.length);
+    assert.equal(job.result.subtitleTranslationPartial, undefined);
+    assert.equal(job.result.subtitleTranslationProgress, undefined);
+    assert.equal(job.result.subtitleTranslation, undefined);
+    assert.equal(job.result.subtitleLanguage, undefined);
+    assert.equal(job.result.status, 'partial');
+    assert.match(job.result.subtitleError, /응답 크기 제한/);
+    assert.ok(Buffer.byteLength(JSON.stringify(job.result.transcript)) < 4 * 1024 * 1024);
+  }
 });
 
 test('invalid media and metadata are rejected and uploaded temporary files cleaned', async t => {

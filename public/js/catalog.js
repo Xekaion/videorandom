@@ -70,6 +70,7 @@
   const hasResult = record => record && (record.status !== 'failed' || frames(record).length > 0 || record.transcript?.length > 0);
   const hasSummary = record => !![record?.summary, record?.plot].some(value => typeof value === 'string' && value.trim());
   const transcriptLanguage = value => ['auto', 'ja', 'zh'].includes(value) ? value : 'auto';
+  const subtitleQuality = value => value === 'fast' ? 'fast' : 'accurate';
   const healthFor = record => {
     if (record?.health?.code) return record.health;
     if (!record) return { code: 'pending', reason: '아직 분석하지 않았습니다.' };
@@ -254,6 +255,7 @@
       transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked,
       transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value),
       subtitleLanguage: mode !== 'local' && $('catalogTranslateSubtitles').checked ? 'ko' : 'original',
+      subtitleQuality: mode === 'local' ? 'fast' : subtitleQuality($('catalogSubtitleQuality').value),
       ...(mode === 'remote' ? { remoteUrl: $('catalogRemoteUrl').value.trim(), connectionCode: currentConnectionCode() } : {})
     };
   }
@@ -528,7 +530,7 @@
     if (persist) {
       state.hasModePreference = true;
       try {
-        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode, frameCount: $('catalogFrameCount').value, remoteUrl: savedRemoteOrigin($('catalogRemoteUrl').value), transcribeAudio: $('catalogTranscribe').checked, transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value), subtitleLanguage: $('catalogTranslateSubtitles').checked ? 'ko' : 'original' }));
+        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode, frameCount: $('catalogFrameCount').value, remoteUrl: savedRemoteOrigin($('catalogRemoteUrl').value), transcribeAudio: $('catalogTranscribe').checked, transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value), subtitleLanguage: $('catalogTranslateSubtitles').checked ? 'ko' : 'original', subtitleQuality: subtitleQuality($('catalogSubtitleQuality').value) }));
       } catch (_) { /* Preferences are optional when browser storage is unavailable. */ }
     }
     updateSelectionUI();
@@ -542,6 +544,7 @@
     $('catalogSort').value = catalogSort.DEFAULT_ORDER;
     $('catalogTranscriptLanguage').value = 'auto';
     $('catalogTranslateSubtitles').checked = true;
+    $('catalogSubtitleQuality').value = 'accurate';
     try {
       $('catalogSort').value = catalogSort.normalizeOrder(localStorage.getItem(SORT_STORAGE_KEY));
     } catch (_) { /* Use completed-first ordering when browser storage is unavailable. */ }
@@ -554,10 +557,11 @@
       $('catalogTranscribe').checked = saved.transcribeAudio === true;
       $('catalogTranscriptLanguage').value = transcriptLanguage(saved.transcriptLanguage);
       $('catalogTranslateSubtitles').checked = saved.subtitleLanguage !== 'original';
+      $('catalogSubtitleQuality').value = subtitleQuality(saved.subtitleQuality);
       // Remove an unsafe address saved by an older version without changing
       // the chosen mode or the raw address being edited during this session.
       if (typeof saved.remoteUrl === 'string' && saved.remoteUrl !== $('catalogRemoteUrl').value) {
-        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode: $('catalogMode').value, frameCount: $('catalogFrameCount').value, remoteUrl: $('catalogRemoteUrl').value, transcribeAudio: $('catalogTranscribe').checked, transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value), subtitleLanguage: $('catalogTranslateSubtitles').checked ? 'ko' : 'original' }));
+        localStorage.setItem('video_catalog_settings', JSON.stringify({ mode: $('catalogMode').value, frameCount: $('catalogFrameCount').value, remoteUrl: $('catalogRemoteUrl').value, transcribeAudio: $('catalogTranscribe').checked, transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value), subtitleLanguage: $('catalogTranslateSubtitles').checked ? 'ko' : 'original', subtitleQuality: subtitleQuality($('catalogSubtitleQuality').value) }));
       }
     } catch (_) { /* Malformed preferences do not prevent use of the catalog. */ }
     settingsChanged(false);
@@ -724,6 +728,7 @@
         if (!state.settingsFields.has('catalogTranscribe')) $('catalogTranscribe').checked = persistedOptions.transcribeAudio === true;
         if (!state.settingsFields.has('catalogTranscriptLanguage')) $('catalogTranscriptLanguage').value = transcriptLanguage(persistedOptions.transcriptLanguage);
         if (!state.settingsFields.has('catalogTranslateSubtitles') && ['original', 'ko'].includes(persistedOptions.subtitleLanguage)) $('catalogTranslateSubtitles').checked = persistedOptions.subtitleLanguage === 'ko';
+        if (persistedOptions.mode !== 'local' && !state.settingsFields.has('catalogSubtitleQuality') && ['accurate', 'fast'].includes(persistedOptions.subtitleQuality)) $('catalogSubtitleQuality').value = persistedOptions.subtitleQuality;
         state.hasModePreference = true;
       } else if (!state.hasModePreference && !state.settingsFields.has('catalogMode')) {
         $('catalogMode').value = codexReady() && config.defaultMode === 'codex' ? 'codex' : 'local';
@@ -778,6 +783,7 @@
     return { mode, frameCount, transcribeAudio: mode !== 'local' && $('catalogTranscribe').checked,
       transcriptLanguage: transcriptLanguage($('catalogTranscriptLanguage').value),
       subtitleLanguage: mode !== 'local' && $('catalogTranslateSubtitles').checked ? 'ko' : 'original',
+      subtitleQuality: mode === 'local' ? 'fast' : subtitleQuality($('catalogSubtitleQuality').value),
       ...(mode === 'remote' ? remoteOptions() : {}) };
   }
 
@@ -1028,6 +1034,7 @@
     $('catalogSubtitleNotice').textContent = message;
     $('catalogSubtitleNotice').classList.remove('hidden');
     $('catalogSubtitleNotice').classList.toggle('catalog-error', !!record.subtitleError);
+    renderSubtitleQuality(record);
     renderSubtitleAutoSave(record, translated);
     const lines = document.createDocumentFragment();
     transcript.forEach((segment, index) => {
@@ -1054,6 +1061,36 @@
     notice.textContent = message;
     notice.classList.toggle('hidden', !message);
     notice.classList.toggle('catalog-error', saved?.status === 'failed');
+  }
+
+  function renderSubtitleQuality(record) {
+    const notice = $('catalogSubtitleQualityNotice');
+    const quality = record.transcriptionQuality;
+    const progress = record.subtitleTranslationProgress;
+    const hasProgress = progress?.language === 'ko' && Number.isSafeInteger(progress.totalCues) && progress.totalCues > 0
+      && progress.totalCues === record.transcript?.length && Number.isSafeInteger(progress.completedCues)
+      && progress.completedCues >= 0 && progress.completedCues <= progress.totalCues;
+    const translationStatus = hasProgress ? `한국어 번역 ${progress.completedCues.toLocaleString()} / ${progress.totalCues.toLocaleString()}구간${progress.complete === true ? ' 완료' : ' · 진행 기록 보관됨'}${progress.sourceComplete === false ? ' · 원어 인식 확인 필요' : ''}` : '';
+    if (!quality || typeof quality !== 'object') {
+      notice.textContent = [record.transcript?.length ? '전체 음성 처리 확인 기록이 없습니다. 누락이 있으면 정확도 우선으로 복구 / 다시 분석하세요.' : '', translationStatus].filter(Boolean).join('\n');
+      notice.classList.toggle('hidden', !notice.textContent);
+      notice.classList.remove('catalog-error');
+      return;
+    }
+    const audit = quality.audit || {};
+    const unresolved = Array.isArray(audit.unresolved) ? audit.unresolved : [];
+    const processed = Number.isFinite(quality.processedUntil) ? time(quality.processedUntil) : '확인 중';
+    const duration = Number.isFinite(quality.duration) ? time(quality.duration) : time(record.duration);
+    const lines = [`음성 인식: ${quality.model || '모델 미상'} · ${quality.profile === 'accurate' ? '정확도 우선' : '빠름'} · 처리 ${processed} / ${duration}`];
+    const unauditedFast = quality.profile === 'fast' && quality.complete === true && audit.complete !== true && !unresolved.length;
+    lines.push(unauditedFast ? '빠르게 모드는 발화 누락 검사를 생략합니다. 자막을 더 정확히 만들려면 정확도 우선으로 다시 분석하세요.' : quality.complete === true && audit.complete === true && !unresolved.length
+      ? '전체 음성 처리와 발화 누락 점검을 마쳤습니다. 인식과 번역의 정확성은 원문과 대조해 확인할 수 있습니다.'
+      : '확인이 필요한 구간이 남아 있습니다. 이 결과를 전체 대사가 완성된 자막으로 간주하지 마세요.');
+    if (unresolved.length) lines.push('확인 필요: ' + unresolved.slice(0, 8).map(range => `${time(range.start)}–${time(range.end)}`).join(', '));
+    if (translationStatus) lines.push(translationStatus);
+    notice.textContent = lines.join('\n');
+    notice.classList.remove('hidden');
+    notice.classList.toggle('catalog-error', !unauditedFast && (quality.complete !== true || audit.complete !== true || unresolved.length > 0));
   }
 
   async function downloadSubtitles(format) {
@@ -1132,7 +1169,7 @@
   window.videoCatalog = { onScan, onPick };
   document.addEventListener('DOMContentLoaded', () => {
     restoreSettings();
-    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl', 'catalogTranscriptLanguage', 'catalogTranslateSubtitles'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); scheduleAutoSettings(id); if (state.config) renderToolStatus(); }));
+    ['catalogMode', 'catalogFrameCount', 'catalogTranscribe', 'catalogRemoteUrl', 'catalogTranscriptLanguage', 'catalogTranslateSubtitles', 'catalogSubtitleQuality'].forEach(id => $(id).addEventListener('change', () => { settingsChanged(); scheduleAutoSettings(id); if (state.config) renderToolStatus(); }));
     $('catalogAutoEnabled').addEventListener('change', event => changeAutoPick({ enabled: event.target.checked }));
     $('catalogAutoResume').addEventListener('click', () => changeAutoPick({ resume: true }));
     $('catalogStorageCopy').addEventListener('click', () => copyText(state.config?.storage?.directory, '이 PC의 분석 결과 저장 폴더 경로를 복사했습니다. 파일 탐색기 주소창에 붙여 넣으면 열 수 있습니다.'));

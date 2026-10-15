@@ -8,6 +8,9 @@ const { reuseCachedExtraction } = require('../lib/cached-extraction');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const sourceId = 'a'.repeat(32), attemptId = 'b'.repeat(32);
+const completeAccurate = () => ({ version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+  language: 'ja', duration: 60, processedUntil: 60, wordTimestamps: true,
+  audit: { complete: true, speechSeconds: 4, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] });
 
 async function fixture(t) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-cached-extraction-'));
@@ -36,8 +39,12 @@ async function fixture(t) {
   };
   const providerImpl = { async analyzeExtracted(record) { calls.provider++; return { ...record, summary: '새 요약', plot: '새 줄거리', status: 'completed' }; } };
   const lanImpl = {
-    async checkRemoteServer() { calls.connection++; return { ready: true }; },
-    async sendRemoteAnalysis(record, receivedOptions) { calls.remote++; assert.equal(receivedOptions.audioPath, undefined); return { ...record, summary: '서버의 새 요약' }; }
+    async checkRemoteServer() { calls.connection++; return { ready: true, capabilities: ['subtitle-quality-v1'] }; },
+    async sendRemoteAnalysis(record, receivedOptions) {
+      calls.remote++; assert.equal(receivedOptions.audioPath, undefined);
+      const { extractionReusedFrom, ...transportRecord } = record;
+      return { ...transportRecord, summary: '서버의 새 요약' };
+    }
   };
   const engine = createCatalogEngine({ extractionImpl, providerImpl, lanImpl });
   return { dataDir, file, saved, sourceDir, options, calls, engine };
@@ -70,6 +77,7 @@ test('remote cached repair sends retained cues and fresh local frame copies with
   const f = await fixture(t);
   const result = await f.engine.analyzeVideo(f.file, { ...f.options, mode: 'remote' }, { dataDir: f.dataDir });
   assert.equal(result.summary, '서버의 새 요약');
+  assert.equal(result.extractionReusedFrom, sourceId);
   assert.deepEqual(result.transcript, f.saved.transcript);
   assert.deepEqual(f.calls, { extraction: 0, tools: 0, ffmpeg: 0, provider: 0, remote: 1, connection: 1 });
 });
@@ -147,4 +155,122 @@ test('cancelled cached repair propagates abort without re-extraction or modifyin
   await assert.rejects(f.engine.analyzeVideo(f.file, f.options, { dataDir: f.dataDir, signal: controller.signal }), { name: 'AbortError' });
   assert.equal(f.calls.extraction, 0);
   for (const frame of f.saved.frames) assert.deepEqual(await fs.readFile(path.join(f.sourceDir, frame.filename)), JPEG);
+});
+
+test('accurate Korean repair refuses sidecars, small-model and incomplete cached recognition', async t => {
+  const variations = [{}, { transcriptionQuality: { ...completeAccurate(), model: 'small' } },
+    { transcriptionQuality: { ...completeAccurate(), profile: 'fast' } }, { transcriptionQuality: { ...completeAccurate(), complete: false } },
+    { transcriptionQuality: { ...completeAccurate(), processedUntil: 20 } },
+    { transcriptionQuality: completeAccurate(), transcriptSource: 'sidecar:neutral.ja.srt' },
+    { transcriptionQuality: { ...completeAccurate(), audit: { complete: false, unresolved: [{ start: 20, end: 25, reason: 'speech gap' }] } } }];
+  for (const changes of variations) {
+    const f = await fixture(t);
+    const before = JSON.stringify(f.saved);
+    const record = await reuseCachedExtraction(f.file, { ...f.options, subtitleQuality: 'accurate', repairRecord: { ...f.saved, ...changes } }, { dataDir: f.dataDir });
+    assert.equal(record, null);
+    assert.equal(JSON.stringify(f.saved), before);
+    assert.equal(await fs.stat(path.join(f.dataDir, 'frames', attemptId)).catch(() => null), null);
+  }
+});
+
+test('verified accurate cache retains word confidence and proof and avoids speech extraction in Codex and LAN modes', async t => {
+  for (const mode of ['codex', 'remote']) {
+    const f = await fixture(t);
+    f.saved.transcriptSource = 'audio:faster-whisper large-v3';
+    f.saved.transcriptionQuality = completeAccurate();
+    f.saved.transcript = f.saved.transcript.map(cue => ({ ...cue, avgLogprob: -0.1, noSpeechProbability: 0.01,
+      words: [{ start: cue.start, end: cue.end, word: cue.text, probability: 0.95 }] }));
+    const before = JSON.stringify(f.saved);
+    const result = await f.engine.analyzeVideo(f.file, { ...f.options, mode, subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
+    assert.equal(result.extractionReusedFrom, sourceId);
+    assert.equal(result.transcriptionQuality.profile, 'accurate');
+    assert.equal(result.transcript[0].words[0].probability, 0.95);
+    assert.equal(f.calls.extraction, 0);
+    assert.equal(f.calls.tools, 0);
+    assert.equal(f.calls.ffmpeg, 0);
+    assert.equal(f.calls[mode === 'codex' ? 'provider' : 'remote'], 1);
+    assert.equal(JSON.stringify(f.saved), before);
+  }
+});
+
+test('a new accurate Korean analysis sends whole lossless audio even when external subtitles already exist', async t => {
+  const f = await fixture(t);
+  let extracted = 0, decoded = 0, remote = 0, audioPath;
+  const engine = createCatalogEngine({
+    extractionImpl: {
+      analyzeVideo: async file => { extracted++; return { ...f.saved, ...file, error: null, status: 'completed', transcriptSource: 'sidecar:sparse.ja.srt' }; },
+      getToolsStatus: async () => ({ available: true, ffmpeg: { path: 'mock-ffmpeg' } }),
+      runProcess: async (binary, args) => {
+        decoded++;
+        assert.equal(binary, 'mock-ffmpeg');
+        assert.equal(args[args.indexOf('-i') + 1], f.file.path);
+        assert.equal(args.includes('-ss'), false);
+        assert.equal(args.includes('-t'), false);
+        assert.equal(args[args.indexOf('-ac') + 1], '1');
+        assert.equal(args[args.indexOf('-ar') + 1], '16000');
+        assert.equal(args[args.indexOf('-c:a') + 1], 'flac');
+        assert.equal(args[args.indexOf('-sample_fmt') + 1], 's16');
+        audioPath = args.at(-1); assert.equal(path.extname(audioPath), '.flac');
+        await fs.writeFile(audioPath, 'fLaCowned-quality-fixture');
+      }
+    },
+    providerImpl: {},
+    lanImpl: {
+      checkRemoteServer: async () => ({ ready: true, capabilities: ['subtitle-quality-v1'] }),
+      sendRemoteAnalysis: async (record, options) => {
+        remote++;
+        assert.equal(options.subtitleQuality, 'accurate');
+        assert.equal(options.subtitleLanguage, 'ko');
+        assert.equal(options.audioPath, audioPath);
+        assert.equal(await fs.readFile(audioPath, 'utf8'), 'fLaCowned-quality-fixture');
+        return { ...record, summary: '전체 음성 전달 확인' };
+      }
+    }
+  });
+  const result = await engine.analyzeVideo(f.file, { mode: 'remote', subtitleLanguage: 'ko', subtitleQuality: 'accurate', transcribeAudio: false }, { dataDir: f.dataDir });
+  assert.equal(result.summary, '전체 음성 전달 확인');
+  assert.deepEqual([extracted, decoded, remote], [1, 1, 1]);
+  await assert.rejects(fs.stat(audioPath), { code: 'ENOENT' });
+});
+
+test('an old server is rejected before a long accurate audio extraction begins', async t => {
+  const f = await fixture(t);
+  let decoded = 0, uploads = 0;
+  const engine = createCatalogEngine({
+    extractionImpl: {
+      analyzeVideo: async file => ({ ...f.saved, ...file, status: 'completed', error: null }),
+      getToolsStatus: async () => ({ available: true, ffmpeg: { path: 'mock-ffmpeg' } }),
+      runProcess: async () => { decoded++; }
+    },
+    providerImpl: {},
+    lanImpl: { checkRemoteServer: async () => ({ ready: true, capabilities: ['timed-subtitles-v1'] }),
+      sendRemoteAnalysis: async () => { uploads++; } }
+  });
+  const result = await engine.analyzeVideo(f.file, { mode: 'remote', subtitleLanguage: 'ko', subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
+  assert.equal(result.status, 'partial');
+  assert.match(result.error, /분석 서버 PC도 새 버전으로 업데이트/);
+  assert.equal(decoded, 0);
+  assert.equal(uploads, 0);
+  assert.deepEqual(result.transcript, f.saved.transcript);
+});
+
+test('accurate source identity rejects replaced files but preserves cached recovery for missing originals and legacy fast mode', async t => {
+  for (const change of ['unchanged', 'size', 'mtime', 'missing', 'fast']) {
+    const f = await fixture(t);
+    await fs.writeFile(f.file.path, 'owned original source');
+    const source = await fs.stat(f.file.path);
+    f.saved.sourceFile = { sizeBytes: source.size, mtimeMs: source.mtimeMs };
+    f.saved.transcriptSource = 'audio:faster-whisper large-v3';
+    f.saved.transcriptionQuality = completeAccurate();
+    if (change === 'size' || change === 'fast') await fs.writeFile(f.file.path, 'owned replacement with a different exact byte length');
+    if (change === 'mtime') await fs.utimes(f.file.path, new Date(), new Date(source.mtimeMs + 10000));
+    if (change === 'missing') await fs.unlink(f.file.path);
+    const result = await reuseCachedExtraction(f.file, { ...f.options, subtitleQuality: change === 'fast' ? 'fast' : 'accurate' }, { dataDir: f.dataDir });
+    if (change === 'size' || change === 'mtime') assert.equal(result, null, change);
+    else {
+      assert.equal(result.extractionReusedFrom, sourceId, change);
+      assert.deepEqual(result.sourceFile, f.saved.sourceFile);
+    }
+    for (const frame of f.saved.frames) assert.deepEqual(await fs.readFile(path.join(f.sourceDir, frame.filename)), JPEG);
+  }
 });
