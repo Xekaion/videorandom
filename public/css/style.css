@@ -1400,7 +1400,9 @@ input[type="text"]::placeholder {
 .catalog-storage-path-row > .btn { padding: 6px 9px; border-radius: 7px; font-size: 11px; }
 .catalog-storage > .catalog-storage-count { margin-top: 6px; font-size: 11px; }
 .catalog-saved-badge { display: block; color: #a7f3d0; font-size: 10px; margin-top: 7px; }
-.winner-analysis-status { color: #a7f3d0; font-size: 12px; line-height: 1.7; margin: 14px 0 0; text-align: center; overflow-wrap: anywhere; }
+.winner-analysis-controls { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+.winner-analysis-status { flex: 1 1 250px; min-width: 0; color: #a7f3d0; font-size: 12px; line-height: 1.7; margin: 0; text-align: center; overflow-wrap: anywhere; white-space: pre-line; }
+.winner-analysis-resume { flex: 0 0 auto; padding: 8px 12px; font-size: 12px; border-radius: 8px; }
 .winner-analysis-status.catalog-error { color: #fda4af; }
 .catalog-auto-pick { margin-bottom: 20px; padding: 15px 18px; border: 1px solid rgba(6,182,212,.25); border-radius: 12px; background: rgba(6,182,212,.035); }
 .catalog-auto-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }

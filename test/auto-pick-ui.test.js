@@ -34,7 +34,7 @@ class Element {
   focus() {}
 }
 
-async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, translationRepairResponse, translationRepairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
+async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, autoResumeStatus = 200, autoResumeResponse, delayAutoResume = false, savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, translationRepairResponse, translationRepairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
@@ -42,11 +42,12 @@ async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, 
   let connection = initialConnection;
   const preferences = new Map(savedSettings ? [['video_catalog_settings', JSON.stringify(savedSettings)]] : []);
   const calls = [], timers = new Map();
-  let load, releaseConfig, releaseRemote, releaseRepair, releaseFolderSave, timerId = 0;
+  let load, releaseConfig, releaseRemote, releaseRepair, releaseFolderSave, releaseAutoResume, timerId = 0;
   const configGate = delayConfig ? new Promise(resolve => { releaseConfig = resolve; }) : Promise.resolve();
   const remoteGate = delayRemote ? new Promise(resolve => { releaseRemote = resolve; }) : Promise.resolve();
   const repairGate = delayRepair ? new Promise(resolve => { releaseRepair = resolve; }) : Promise.resolve();
   const folderSaveGate = delayFolderSave ? new Promise(resolve => { releaseFolderSave = resolve; }) : Promise.resolve();
+  const autoResumeGate = delayAutoResume ? new Promise(resolve => { releaseAutoResume = resolve; }) : Promise.resolve();
   const config = () => ({ interruptedJobs: plain(interruptedJobs), tools: { available: true }, providers: providerStatus, defaultMode: 'codex', host: { running: false }, activeJob: plain(initialActiveJob), autoPick: plain(queue), connection: plain(connection) });
   const sandbox = {
     crypto: browserCrypto, TextEncoder,
@@ -95,6 +96,11 @@ async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, 
       else if (url === '/api/analysis/jobs') result = { job: plain(manualResponse || { id: 'manual', source: 'manual', status: 'completed', total: body.files.length, completed: body.files.length, results: [] }) };
       else if (route === '/api/analysis/auto-pick') {
         if (method === 'PUT') {
+          if (body.resume) {
+            await autoResumeGate;
+            if (autoResumeStatus >= 400) return { ok: false, status: autoResumeStatus,
+              json: async () => plain(autoResumeResponse || { error: '합성 자동 분석 재개 실패' }) };
+          }
           if (body.options) {
             const { connectionCode: _connectionCode, ...safe } = body.options;
             queue = { ...queue, configured: true, mode: safe.mode, options: safe };
@@ -127,7 +133,7 @@ async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, 
     for (const [id, timer] of ready) { timers.delete(id); await timer.callback(); }
     await flush();
   };
-  return { sandbox, elements, calls, preferences, runTimers, releaseConfig, releaseRemote, releaseRepair, releaseFolderSave, body: sandbox.document.body, getConnection: () => connection, setQueue: next => { queue = next; }, getQueue: () => queue };
+  return { sandbox, elements, calls, preferences, runTimers, releaseConfig, releaseRemote, releaseRepair, releaseFolderSave, releaseAutoResume, body: sandbox.document.body, getConnection: () => connection, setQueue: next => { queue = next; }, getQueue: () => queue };
 }
 
 test('revealing a winner records the pick and queues analysis without replaying or changing selections', () => {
@@ -1656,4 +1662,106 @@ test('an unusable interrupted waiting job can be dismissed without starting anal
   assert(!ui.calls.some(call => call.url.endsWith('/resume') || call.url === '/api/analysis/jobs'));
   assert.equal(ui.elements.get('catalogRows').childNodes.length, 1);
   assert(ui.elements.get('catalogNotice').textContent.includes('원본 영상은 그대로 유지'));
+});
+
+const pausedWinnerQueue = (changes = {}) => ({ ...baseQueue(), configured: true, mode: 'codex',
+  options: { mode: 'codex', frameCount: 10, subtitleLanguage: 'ko', subtitleQuality: 'fast' },
+  paused: true, waitingReason: '이전에 분석을 중지했습니다. 재개를 눌러 주세요.', ...changes });
+
+test('a winner picked during translation shows the pause reason and resumes its FIFO only on an explicit winner action', async () => {
+  const source = timedRecord();
+  const job = processingJob(source, { id: 'translation-pause-fixture', operation: 'translation-only', stage: '합성 한국어 번역 중' });
+  let next = job;
+  const reason = '사용자가 앞선 분석을 중지했습니다. <img src=x onerror=alert(1)>\n대기 중인 영상은 보관되어 있습니다.';
+  const ui = await boot({ records: [source], initialQueue: pausedWinnerQueue({ waitingReason: reason }),
+    translationRepairResponse: job, jobResponse: () => next });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  await ui.elements.get('catalogSubtitleRepair').dispatch('click');
+  ui.setQueue({ ...ui.getQueue(), activeJob: job });
+  const first = picked('먼저 뽑은 합성 영상.mp4'), second = picked('다음 합성 영상.mp4');
+  await ui.sandbox.videoCatalog.onPick(first);
+  await ui.sandbox.videoCatalog.onPick(second);
+  const status = ui.elements.get('winnerAnalysisStatus'), button = ui.elements.get('winnerAutoResume');
+  assert(status.textContent.includes(reason), 'the complete backend pause reason remains visible as text beside the winner');
+  assert.equal(status.childNodes.length, 0, 'error-like HTML is never inserted as markup');
+  assert.equal(button.classList.contains('hidden'), false);
+  assert.equal(button.disabled, false, 'a running translation does not prevent an explicit queue resume');
+  assert.equal(ui.calls.some(call => call.body?.resume === true), false);
+  next = { ...job, status: 'completed', completed: 1, results: [] };
+  ui.setQueue({ ...ui.getQueue(), activeJob: null });
+  await ui.runTimers(1500); await ui.runTimers(300);
+  assert.equal(ui.getQueue().paused, true, 'finishing translation never overrides an earlier user pause');
+  assert(status.textContent.includes(reason));
+  assert.equal(ui.calls.some(call => call.body?.resume === true), false);
+  await button.dispatch('click');
+  assert.equal(ui.getQueue().paused, false);
+  assert.deepEqual(ui.getQueue().pending.map(file => file.path), [first.path, second.path], 'resume never reorders or replaces the waiting FIFO');
+  const resumes = ui.calls.filter(call => call.url === '/api/analysis/auto-pick' && call.method === 'PUT' && call.body.resume === true);
+  assert.equal(resumes.length, 1);
+  assert.equal(resumes[0].body.options.mode, 'codex');
+  assert.equal(button.classList.contains('hidden'), true);
+  assert(status.textContent.includes('차례가 되면 시작'));
+  assert.equal(ui.calls.some(call => call.method === 'POST' && call.url === '/api/analysis/jobs'), false);
+});
+
+test('winner resume can clear a queue pause while a translation remains active without interrupting or starting a job', async () => {
+  const source = timedRecord(), winner = picked('복구 중 뽑은 합성 영상.mp4');
+  const job = processingJob(source, { id: 'active-translation-resume', operation: 'translation-only', stage: '합성 번역 진행 중' });
+  const ui = await boot({ records: [source], initialQueue: pausedWinnerQueue({ activeJob: job,
+    pendingCount: 1, pending: [winner] }), jobResponse: () => job });
+  await ui.sandbox.videoCatalog.onPick(winner);
+  await ui.elements.get('winnerAutoResume').dispatch('click');
+  assert.equal(ui.getQueue().paused, false);
+  assert.equal(ui.getQueue().activeJob.id, job.id);
+  assert(ui.elements.get('catalogJobTitle').textContent.includes('한국어 자막 번역 복구'));
+  assert.equal(ui.calls.some(call => call.url.includes('/cancel') || call.method === 'POST' && call.url === '/api/analysis/jobs'), false);
+  assert.deepEqual(ui.getQueue().pending.map(file => file.path), [winner.path]);
+});
+
+test('winner resume reports progress and failures, blocks duplicate clicks, and shares the lower control busy guard', async () => {
+  const winner = picked('재개 실패 합성 영상.mp4'), reason = '기존 대기는 사용자가 중지했습니다.';
+  const error = '합성 저장 실패 <script>not executed</script>';
+  const ui = await boot({ initialQueue: pausedWinnerQueue({ pendingCount: 1, pending: [winner], waitingReason: reason }),
+    delayAutoResume: true, autoResumeStatus: 503, autoResumeResponse: { error } });
+  await ui.sandbox.videoCatalog.onPick(winner);
+  const button = ui.elements.get('winnerAutoResume');
+  const pending = button.dispatch('click');
+  await flush();
+  assert.equal(button.disabled, true);
+  assert(button.textContent.includes('재개 중'));
+  assert(ui.elements.get('winnerAnalysisStatus').textContent.includes('재개 중'));
+  assert.equal(ui.elements.get('catalogAutoResume').disabled, true);
+  await button.dispatch('click');
+  await ui.elements.get('catalogAutoResume').dispatch('click');
+  assert.equal(ui.calls.filter(call => call.body?.resume === true).length, 1);
+  ui.releaseAutoResume(); await pending;
+  assert.equal(ui.getQueue().paused, true);
+  assert.equal(button.disabled, false);
+  assert(ui.elements.get('winnerAnalysisStatus').textContent.includes(reason));
+  assert(ui.elements.get('winnerAnalysisStatus').textContent.includes(`재개 실패: ${error}`));
+  assert(ui.elements.get('winnerAnalysisStatus').classList.contains('catalog-error'));
+  assert(ui.elements.get('catalogAutoNotice').textContent.includes('자동 분석 재개 실패'));
+  await button.dispatch('click');
+  assert.equal(ui.calls.filter(call => call.body?.resume === true).length, 2, 'an explicit retry remains available after failure');
+});
+
+test('winner resume is loading guarded and hidden for disabled, unpaused, unrelated, or no-longer-pending winners', async () => {
+  const winner = picked('설정 로딩 합성 영상.mp4');
+  const ui = await boot({ initialQueue: pausedWinnerQueue({ pendingCount: 1, pending: [winner] }), delayConfig: true });
+  await ui.sandbox.videoCatalog.onPick(winner);
+  const button = ui.elements.get('winnerAutoResume');
+  assert.equal(button.disabled, true);
+  await button.dispatch('click');
+  assert.equal(ui.calls.some(call => call.body?.resume === true), false);
+  ui.releaseConfig(); await flush(); await flush();
+  assert.equal(button.disabled, false);
+  for (const changes of [{ enabled: false }, { paused: false }, { pendingCount: 0, pending: [] },
+    { pendingCount: 1, pending: [picked('다른 합성 영상.mp4')] }]) {
+    ui.setQueue(pausedWinnerQueue({ pendingCount: 1, pending: [winner], ...changes }));
+    await ui.elements.get('catalogRefresh').dispatch('click');
+    assert.equal(button.classList.contains('hidden'), true, JSON.stringify(changes));
+    assert.equal(button.disabled, true);
+    await button.dispatch('click');
+    assert.equal(ui.calls.some(call => call.body?.resume === true), false);
+  }
 });

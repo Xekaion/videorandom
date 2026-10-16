@@ -16,7 +16,7 @@
     refreshing: false, detailId: null, detailPath: '', detailRequest: 0, saving: false, subtitleDownloading: false, subtitleFolderSaving: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
     autoPick: null, autoTimer: null, autoSettingsTimer: null,
-    autoPolling: false, autoBusy: false, autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
+    autoPolling: false, autoBusy: false, autoResuming: false, autoResumeError: '', autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
     resultsReady: false, autoSavedCount: null, autoResultsLoading: false, autoResultsWanted: null,
     winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: ''
   };
@@ -132,8 +132,24 @@
     $('catalogAutoNotice').classList.toggle('catalog-error', error);
   }
 
+  function winnerCanResume() {
+    const queue = state.autoPick, key = pathKey(state.winnerPath);
+    return !!state.winnerPath && queue?.enabled !== false && queue?.paused === true
+      && (queue.pending || []).some(file => pathKey(file.path) === key)
+      && pathKey(queue.activeAutoPath) !== key && state.records.get(key)?.status !== 'completed'
+      && state.winnerStatus !== 'already-completed';
+  }
+
   function renderWinnerAnalysis() {
     const element = $('winnerAnalysisStatus');
+    const resume = $('winnerAutoResume');
+    const canResume = winnerCanResume();
+    if (resume) {
+      resume.classList.toggle('hidden', !canResume);
+      resume.disabled = !canResume || state.autoBusy || !state.settingsReady;
+      resume.textContent = state.autoResuming ? '자동 분석 재개 중…' : '자동 분석 재개';
+    }
+    $('winnerAnalysisControls')?.classList.toggle('hidden', !state.winnerPath);
     if (!state.winnerPath || !element) return;
     const key = pathKey(state.winnerPath);
     const record = state.records.get(key);
@@ -145,13 +161,15 @@
     if (state.winnerError) message = `자동 분석 대기 등록 실패 · ${state.winnerError}`;
     else if (record?.status === 'completed' || state.winnerStatus === 'already-completed') message = '기존 분석 결과 사용 · 이 PC에 저장되어 있습니다.';
     else if (active) message = '자동 분석 중 · 완료되면 이 PC에 저장됩니다.';
-    else if (pending) message = `자동 분석 대기${queue.paused ? ' · 일시 중지됨' : queue.waitingReason ? ` · ${queue.waitingReason}` : ' · 차례가 되면 시작됩니다.'}`;
     else if (queue?.enabled === false || state.winnerStatus === 'disabled') message = '뽑은 영상 자동 분석이 꺼져 있습니다.';
+    else if (pending) message = queue.paused
+      ? `자동 분석 대기 · 일시 중지됨${typeof queue.waitingReason === 'string' && queue.waitingReason.trim() ? ` · ${queue.waitingReason.trim()}` : ''}${state.autoResuming ? ' · 자동 분석 재개 중…' : state.autoResumeError ? ` · 재개 실패: ${state.autoResumeError}` : ''}`
+      : `자동 분석 대기${queue.waitingReason ? ` · ${queue.waitingReason}` : ' · 차례가 되면 시작됩니다.'}`;
     else if (record?.status === 'failed' || record?.status === 'partial') message = '자동 분석이 완료되지 않았습니다. 영상 분석에서 결과와 안내를 확인하세요.';
     else message = '자동 분석 대기 등록 중…';
     element.textContent = message;
     element.classList.remove('hidden');
-    element.classList.toggle('catalog-error', !!state.winnerError);
+    element.classList.toggle('catalog-error', !!state.winnerError || canResume && !!state.autoResumeError);
   }
 
   function renderAutoPick() {
@@ -284,10 +302,20 @@
   async function changeAutoPick(extra) {
     if (state.autoBusy || !state.settingsReady) return;
     state.autoBusy = true;
+    state.autoResuming = extra.resume === true;
+    state.autoResumeError = '';
     renderAutoPick();
     try { await syncAutoPick(extra); }
-    catch (error) { autoNotice(`자동 분석 설정 적용 실패 · ${error.message}`, true); }
-    finally { state.autoBusy = false; renderAutoPick(); }
+    catch (error) {
+      if (state.autoResuming) state.autoResumeError = error.message;
+      autoNotice(`${state.autoResuming ? '자동 분석 재개 실패' : '자동 분석 설정 적용 실패'} · ${error.message}`, true);
+    }
+    finally { state.autoBusy = false; state.autoResuming = false; renderAutoPick(); }
+  }
+
+  function resumeWinnerAnalysis() {
+    if (!winnerCanResume()) return;
+    return changeAutoPick({ resume: true });
   }
 
   async function onPick(winner) {
@@ -296,6 +324,7 @@
     state.winnerPath = winner.path;
     state.winnerStatus = '';
     state.winnerError = '';
+    state.autoResumeError = '';
     renderWinnerAnalysis();
     try {
       const result = await request('/api/analysis/auto-pick', jsonOptions('POST', {
@@ -1586,6 +1615,7 @@
     });
     $('catalogAutoEnabled').addEventListener('change', event => changeAutoPick({ enabled: event.target.checked }));
     $('catalogAutoResume').addEventListener('click', () => changeAutoPick({ resume: true }));
+    $('winnerAutoResume').addEventListener('click', resumeWinnerAnalysis);
     $('catalogStorageCopy').addEventListener('click', () => copyText(state.config?.storage?.directory, '이 PC의 분석 결과 저장 폴더 경로를 복사했습니다. 파일 탐색기 주소창에 붙여 넣으면 열 수 있습니다.'));
     ['catalogRemoteUrl', 'catalogConnectionCode'].forEach(id => $(id).addEventListener('input', () => {
       state.connectionRevision++;
