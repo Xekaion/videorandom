@@ -244,6 +244,44 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(events[-1]['type'], 'complete')
         self.assertEqual(events[-2]['percent'], 100)
 
+    def test_fast_skips_word_alignment_and_preserves_native_segment_times(self):
+        first, last = segment(1.125, 2.375, 'First native sentence'), segment(3.125, 4.875, 'Final native sentence')
+        first['words'] = None
+        last['words'] = None
+        model = Model([[first], [last]])
+        cues, quality, events = self.run_audio(model, seconds=120, profile='fast', model_name='small')
+        self.assertEqual([(cue['start'], cue['end'], cue['text']) for cue in cues],
+                         [(1.125, 2.375, 'First native sentence'), (91.125, 92.875, 'Final native sentence')])
+        self.assertTrue(all(not cue.get('words') for cue in cues))
+        self.assertTrue(all(cue['qualityFlags'] == ['segment_timestamps'] for cue in cues))
+        self.assertTrue(all(options['word_timestamps'] is False and options['vad_filter'] is True
+                            and options['beam_size'] == 5 and options['best_of'] == 5
+                            and options['temperature'] == (0.0, 0.2, 0.4)
+                            for _, options in model.calls))
+        self.assertEqual([length for length, _ in model.calls], [920, 320])
+        self.assertFalse(quality['wordTimestamps'])
+        self.assertEqual(quality['model'], 'small')
+        self.assertFalse(quality['audit']['complete'])
+        self.assertFalse(any('단어별 시간 정렬이 불완전' in message for message in quality['warnings']))
+        self.assertFalse(any(event.get('phase') == 'recovery' for event in events))
+
+    def test_fast_empty_transcript_does_not_claim_word_alignment(self):
+        _, quality, _ = self.run_audio(Model([[]]), profile='fast', model_name='small')
+        self.assertFalse(quality['wordTimestamps'])
+        self.assertEqual(quality['warnings'], [])
+
+    def test_intentional_segment_timestamps_preserve_genuine_confidence_and_invalid_alignment_flags(self):
+        native = segment(1.25, 2.75, 'uncertain sentence', logprob=-2)
+        native['words'] = None
+        cues = ASR.cues_from_segment(native, 10, 30, word_timestamps_expected=False)
+        self.assertEqual((cues[0]['start'], cues[0]['end']), (11.25, 12.75))
+        self.assertEqual(cues[0]['qualityFlags'], ['segment_timestamps', 'low_confidence'])
+        malformed = segment(1, 2)
+        malformed['words'][0]['end'] = float('nan')
+        invalid = ASR.cues_from_segment(malformed, 0, 10, word_timestamps_expected=False)
+        self.assertIn('invalid_word_timestamps', invalid[0]['qualityFlags'])
+        self.assertNotIn('segment_timestamps', invalid[0]['qualityFlags'])
+
     def test_trailing_silence_finishes_even_when_no_segments_are_emitted(self):
         cues, quality, events = self.run_audio(Model([[]]), seconds=15)
         self.assertEqual(cues, [])

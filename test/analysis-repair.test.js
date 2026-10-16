@@ -224,7 +224,7 @@ test('legacy AI settings adopt Korean subtitles while explicit original and loca
     const restored = (await f.request('/auto-pick')).data;
     assert.equal(restored.options.subtitleLanguage, expected, `${mode}/${choice}`);
     assert.equal(restored.options.transcriptLanguage, 'auto');
-    assert.equal(restored.options.subtitleQuality, expected === 'ko' ? 'accurate' : 'fast');
+    assert.equal(restored.options.subtitleQuality, 'fast');
     const persisted = JSON.parse(await fs.readFile(path.join(f.dataDir, 'auto-pick.json'), 'utf8'));
     if (expected === 'ko' || choice === 'original') assert.equal(persisted.safeOptions.subtitleLanguage, expected);
     assert.equal(f.calls.length, 0);
@@ -233,8 +233,8 @@ test('legacy AI settings adopt Korean subtitles while explicit original and loca
   assert.equal(validateOptions({ mode: 'remote', remoteUrl: 'http://192.168.1.10:3001', connectionCode: 'fixture-code' }).subtitleLanguage, 'original');
 });
 
-test('durable Korean subtitle quality migrates to accurate but an explicit fast preference survives', async t => {
-  for (const [mode, quality, expected] of [['codex', undefined, 'accurate'], ['remote', undefined, 'accurate'],
+test('durable Korean subtitle quality defaults to fast while explicit preferences survive', async t => {
+  for (const [mode, quality, expected] of [['codex', undefined, 'fast'], ['remote', undefined, 'fast'],
     ['codex', 'fast', 'fast'], ['remote', 'fast', 'fast'], ['codex', 'accurate', 'accurate'], ['local', undefined, 'fast']]) {
     const safeOptions = { mode, frameCount: 10, subtitleLanguage: 'ko', remoteUrl: mode === 'remote' ? 'http://192.168.1.10:3001' : '',
       ...(quality ? { subtitleQuality: quality } : {}) };

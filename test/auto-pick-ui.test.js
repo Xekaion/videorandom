@@ -34,7 +34,7 @@ class Element {
   focus() {}
 }
 
-async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
+async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, translationRepairResponse, translationRepairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
@@ -67,6 +67,11 @@ async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, 
         result = remoteSuperseded ? { ready: remoteReady } : { ready: remoteReady, capabilities: remoteCapabilities, connection: plain(connection) };
       }
       else if (url === '/api/analysis/connection' && method === 'DELETE') { connection = null; result = { remoteUrl: '', connectionCode: '', remembered: false }; }
+      else if (/\/results\/[^/]+\/subtitles\/repair$/.test(url)) {
+        await repairGate;
+        result = translationRepairResponse || { id: 'translation-job', source: 'repair', operation: 'translation-only', repairOf: decodeURIComponent(url.split('/').at(-3)), status: 'running', total: 1, completed: 0, results: [] };
+        return { ok: translationRepairStatus < 400, status: translationRepairStatus, json: async () => plain(result) };
+      }
       else if (/\/results\/[^/]+\/repair$/.test(url)) {
         await repairGate;
         result = repairResponse || { id: 'repair-job', source: 'repair', repairOf: decodeURIComponent(url.split('/').at(-2)), status: 'running', total: 1, completed: 0, results: [] };
@@ -1116,19 +1121,19 @@ test('player subtitle notices distinguish an updated default SRT from a preserve
   }
 });
 
-test('new subtitle settings default to accurate and retain an explicit fast choice without storing connection codes', async () => {
+test('new subtitle settings default to fast and retain an explicit quality choice without storing connection codes', async () => {
   const ui = await boot({ savedSettings: { mode: 'remote', remoteUrl: 'http://192.168.55.166:3001' } });
-  assert.equal(ui.elements.get('catalogSubtitleQuality').value, 'accurate');
+  assert.equal(ui.elements.get('catalogSubtitleQuality').value, 'fast');
   ui.elements.get('catalogConnectionCode').value = 'owned-fixture-secret';
-  ui.elements.get('catalogSubtitleQuality').value = 'fast';
+  ui.elements.get('catalogSubtitleQuality').value = 'accurate';
   await ui.elements.get('catalogSubtitleQuality').dispatch('change');
   await ui.runTimers(450);
-  assert.equal(ui.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options.subtitleQuality, 'fast');
+  assert.equal(ui.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options.subtitleQuality, 'accurate');
   const stored = JSON.parse(ui.preferences.get('video_catalog_settings'));
-  assert.equal(stored.subtitleQuality, 'fast');
+  assert.equal(stored.subtitleQuality, 'accurate');
   assert.equal(JSON.stringify(stored).includes('owned-fixture-secret'), false);
   const reopened = await boot({ savedSettings: stored });
-  assert.equal(reopened.elements.get('catalogSubtitleQuality').value, 'fast');
+  assert.equal(reopened.elements.get('catalogSubtitleQuality').value, 'accurate');
 });
 
 test('durable quality preferences restore while an in-flight user edit remains authoritative', async () => {
@@ -1145,13 +1150,59 @@ test('durable quality preferences restore while an in-flight user edit remains a
 test('local extraction queue settings do not change the next AI subtitle default or an explicit browser preference', async () => {
   const queue = { ...baseQueue(), configured: true, mode: 'local', options: { mode: 'local', frameCount: 10, subtitleLanguage: 'original', subtitleQuality: 'fast' } };
   const fresh = await boot({ initialQueue: queue });
-  assert.equal(fresh.elements.get('catalogSubtitleQuality').value, 'accurate');
+  assert.equal(fresh.elements.get('catalogSubtitleQuality').value, 'fast');
   fresh.elements.get('catalogMode').value = 'codex';
   await fresh.elements.get('catalogMode').dispatch('change');
   await fresh.runTimers(450);
-  assert.equal(fresh.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options.subtitleQuality, 'accurate');
-  const explicit = await boot({ initialQueue: queue, savedSettings: { mode: 'local', subtitleQuality: 'fast' } });
-  assert.equal(explicit.elements.get('catalogSubtitleQuality').value, 'fast');
+  assert.equal(fresh.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options.subtitleQuality, 'fast');
+  const explicit = await boot({ initialQueue: queue, savedSettings: { mode: 'local', subtitleQuality: 'accurate' } });
+  assert.equal(explicit.elements.get('catalogSubtitleQuality').value, 'accurate');
+});
+
+test('invalid or absent browser quality uses fast while durable explicit accurate remains selected', async () => {
+  const invalid = await boot({ savedSettings: { mode: 'codex', subtitleQuality: 'old-value' } });
+  assert.equal(invalid.elements.get('catalogSubtitleQuality').value, 'fast');
+  const queue = { ...baseQueue(), configured: true, mode: 'codex', options: { mode: 'codex', frameCount: 10, subtitleLanguage: 'ko', subtitleQuality: 'accurate' } };
+  const explicit = await boot({ initialQueue: queue });
+  assert.equal(explicit.elements.get('catalogSubtitleQuality').value, 'accurate');
+  assert(explicit.elements.get('catalogSettingsSummary').textContent.includes('정확도 우선'));
+});
+
+test('speed settings reuse subtitles and persist without changing the connection, language, frame count, or translation choice', async () => {
+  const saved = { mode: 'remote', frameCount: 12, transcribeAudio: true, transcriptLanguage: 'ja', subtitleLanguage: 'ko', subtitleQuality: 'accurate', remoteUrl: 'http://192.168.55.166:3001' };
+  const connection = { remoteUrl: saved.remoteUrl, connectionCode: 'owned-speed-fixture', remembered: true };
+  const ui = await boot({ savedSettings: saved, initialConnection: connection });
+  await ui.elements.get('catalogUseFastSettings').dispatch('click');
+  await ui.runTimers(450);
+  const submitted = ui.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options;
+  assert.equal(submitted.subtitleQuality, 'fast');
+  assert.equal(submitted.transcribeAudio, false);
+  assert.equal(submitted.mode, 'remote');
+  assert.equal(Number(submitted.frameCount), 12);
+  assert.equal(submitted.transcriptLanguage, 'ja');
+  assert.equal(submitted.subtitleLanguage, 'ko');
+  assert.equal(submitted.remoteUrl, connection.remoteUrl);
+  assert.equal(submitted.connectionCode, connection.connectionCode);
+  const stored = JSON.parse(ui.preferences.get('video_catalog_settings'));
+  assert.equal(stored.subtitleQuality, 'fast');
+  assert.equal(stored.transcribeAudio, false);
+  assert.equal(JSON.stringify(stored).includes(connection.connectionCode), false);
+  assert(ui.elements.get('catalogSettingsSummary').textContent.includes('속도 우선'));
+  const reopened = await boot({ savedSettings: stored });
+  assert.equal(reopened.elements.get('catalogSubtitleQuality').value, 'fast');
+  assert.equal(reopened.elements.get('catalogTranscribe').checked, false);
+});
+
+test('speed settings selected during config loading survive older durable accurate preferences', async () => {
+  const queue = { ...baseQueue(), configured: true, mode: 'codex', options: { mode: 'codex', frameCount: 10, subtitleLanguage: 'ko', subtitleQuality: 'accurate', transcribeAudio: true } };
+  const ui = await boot({ initialQueue: queue, delayConfig: true });
+  await ui.elements.get('catalogUseFastSettings').dispatch('click');
+  ui.releaseConfig(); await flush(); await flush();
+  assert.equal(ui.elements.get('catalogSubtitleQuality').value, 'fast');
+  assert.equal(ui.elements.get('catalogTranscribe').checked, false);
+  const submitted = ui.calls.filter(call => call.method === 'PUT' && call.url.endsWith('/auto-pick')).at(-1).body.options;
+  assert.equal(submitted.subtitleQuality, 'fast');
+  assert.equal(submitted.transcribeAudio, false);
 });
 
 test('a local queue never replaces the next AI Korean subtitle default or an explicit translation preference', async () => {
@@ -1537,6 +1588,63 @@ test('job progress labels source counters and estimates as the current phase onl
   const text = ui.elements.get('catalogJobText').textContent;
   assert(text.includes('인식한 음성 03:00 / 10:00'));
   assert(text.includes('음성 인식 예상 잔여 약 4분 · 이후 단계 별도'));
+});
+
+test('Korean-only repair bypasses speech readiness and cannot submit whole-video analysis or duplicate clicks', async () => {
+  const record = timedRecord();
+  const ui = await boot({ records: [record], delayRepair: true,
+    providerStatus: { codex: { available: true, loggedIn: true }, speech: { available: false } } });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const pending = ui.elements.get('catalogSubtitleRepair').dispatch('click');
+  await flush();
+  assert.equal(ui.elements.get('catalogSubtitleRepair').disabled, true);
+  assert(ui.elements.get('catalogSubtitleRepair').textContent.includes('자막 번역 요청 중'));
+  await ui.elements.get('catalogSubtitleRepair').dispatch('click');
+  const calls = ui.calls.filter(call => call.url.endsWith('/subtitles/repair'));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.options.mode, 'codex');
+  assert.equal(calls[0].body.options.transcribeAudio, false);
+  assert.equal(calls[0].body.options.subtitleLanguage, 'ko');
+  assert(!ui.calls.some(call => call.method === 'POST' && (call.url === '/api/analysis/jobs' || call.url === '/api/analysis/results/timed/repair')));
+  ui.releaseRepair(); await pending;
+  assert(ui.elements.get('catalogJobTitle').textContent.includes('한국어 자막 번역 복구'));
+  assert.equal(ui.elements.get('catalogEditSummary').value, record.summary);
+});
+
+test('failed Korean-only repair restores its button and preserves saved text without a whole-analysis fallback', async () => {
+  const record = timedRecord();
+  const ui = await boot({ records: [record], translationRepairStatus: 400, translationRepairResponse: { error: '분석 서버도 1.8.0으로 업데이트해 주세요.' } });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  await ui.elements.get('catalogSubtitleRepair').dispatch('click');
+  assert.equal(ui.elements.get('catalogSubtitleRepair').disabled, false);
+  assert(ui.elements.get('catalogNotice').textContent.includes('1.8.0'));
+  assert.equal(ui.elements.get('catalogEditSummary').value, record.summary);
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/subtitles/repair')).length, 1);
+  assert(!ui.calls.some(call => call.url === '/api/analysis/results/timed/repair'));
+});
+
+test('detail distinguishes unknown original versions and a recorded Korean-only repair without relabeling analysis time', async () => {
+  const record = { ...timedRecord(), operation: 'translation-only', analysisMetrics: { totalMs: 125000, stages: [] }, translationMetrics: { totalMs: 21000 },
+    analysisProvenance: { schemaVersion: 1, translation: { clientVersion: '1.8.0', serverVersion: '1.8.0', recordedAt: '2026-10-16T00:00:00.000Z' } } };
+  const ui = await boot({ records: [record] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  const versionText = ui.elements.get('catalogAnalysisVersions').textContent;
+  assert(versionText.includes('분석 버전: 기록 없음'));
+  assert(versionText.includes('자막 번역 복구 버전: 프로그램 1.8.0 / 분석 서버 1.8.0'));
+  assert(ui.elements.get('catalogAnalysisTimings').textContent.includes('원래 분석 소요 00:02:05'));
+  assert(ui.elements.get('catalogAnalysisTimings').textContent.includes('자막 번역 복구 소요 00:00:21'));
+});
+
+test('successful translation repair with remaining source warnings stays selected over an older completed analysis', async () => {
+  const older = { ...timedRecord(), savedAt: '2026-10-15T00:00:00.000Z' };
+  const newer = { ...partialTimedRecord(), id: 'new-translation', operation: 'translation-only', repairOf: older.id,
+    subtitleRepairStatus: 'completed', savedAt: '2026-10-16T00:00:00.000Z' };
+  const ui = await boot({ records: [newer, older] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+  assert(ui.elements.get('catalogSubtitleNotice').textContent.includes('부분'));
+  await ui.elements.get('catalogRefresh').dispatch('click');
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
 });
 
 test('an unusable interrupted waiting job can be dismissed without starting analysis or removing results', async () => {

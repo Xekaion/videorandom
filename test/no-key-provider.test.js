@@ -772,3 +772,236 @@ test('long-video diagnostics retain totals and completed reviewed translations r
     assert.equal(refused.subtitleTranslation, undefined);
     assert.match(refused.summaryError, /safety refusal/);
 });
+
+test('fast speech selects the small model and automatic GPU/compute defaults while honoring explicit overrides', async t => {
+    const { dataDir } = await fixture(t);
+    const audioPath = path.join(dataDir, 'synthetic-fast.mp3');
+    await fs.promises.writeFile(audioPath, 'mock audio');
+    for (const environment of [{}, { VIDEORANDOM_WHISPER_DEVICE: 'cpu', VIDEORANDOM_WHISPER_COMPUTE_TYPE: 'int8' }]) {
+        const mocked = mockSpawn(call => call.child.stdout.write('{"type":"complete","segments":0}\n'));
+        await provider(mocked.spawnImpl, environment).transcribeLocalAudio(audioPath, { dataDir, subtitleQuality: 'fast' });
+        const args = mocked.calls[0].args;
+        assert.equal(args[args.indexOf('--model') + 1], 'small');
+        assert.equal(args[args.indexOf('--profile') + 1], 'fast');
+        assert.equal(args[args.indexOf('--device') + 1], environment.VIDEORANDOM_WHISPER_DEVICE || 'auto');
+        assert.equal(args[args.indexOf('--compute-type') + 1], environment.VIDEORANDOM_WHISPER_COMPUTE_TYPE || 'auto');
+    }
+});
+
+test('translation-only repair never probes speech, extracts frames, or summarizes and preserves the rich original', async t => {
+    const transcript = [{ id: 'kept-cue', start: 1.2, end: 3.4, text: 'こんにちは。', confidence: 0.99,
+        words: [{ start: 1.2, end: 3.4, word: 'こんにちは。', probability: 0.99 }], qualityFlags: ['audio_rechecked'] }];
+    const { dataDir, record } = await fixture(t, { transcript, transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
+        transcriptionQuality: fullQuality(), summary: '보관된 요약', plot: '보관된 줄거리', dialogueSummary: '보관된 대화', labels: ['보관'],
+        summaryError: 'earlier summary failure', error: 'earlier independent failure', analyzedAt: '2020-01-01T00:00:00Z', status: 'partial' });
+    const original = structuredClone(record);
+    const mocked = mockSpawn(async call => {
+        assert.equal(call.args[0], 'exec', 'only a subtitle inference process may be launched');
+        const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
+        assert.ok(schema.properties.subtitles);
+        assert.equal(call.args.includes('--image'), false);
+        await writeResponse(call, { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] });
+    });
+    const result = await provider(mocked.spawnImpl).translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate',
+        transcribeAudio: true, force: true, ffmpegPath: 'must-not-run', audioPath: 'must-not-open', onProgress() {} });
+    assert.equal(mocked.calls.length, 2, 'accurate translation performs only draft and source review');
+    assert.equal(result.subtitleLanguage, 'ko', result.subtitleError);
+    assert.deepEqual(result.subtitleTranslation, [{ id: 'kept-cue', start: 1.2, end: 3.4, text: '안녕하세요.' }]);
+    for (const key of ['transcript', 'transcriptionQuality', 'transcriptSource', 'transcriptLanguage', 'frames', 'summary', 'plot',
+        'dialogueSummary', 'labels', 'summaryError', 'error', 'analyzedAt', 'status']) assert.deepEqual(result[key], original[key], key);
+    assert.equal(result.subtitleTranslationProgress.complete, true);
+    assert.equal(result.subtitleTranslationProgress.sourceAuditComplete, true);
+    await assert.rejects(fs.promises.stat(path.join(dataDir, 'checkpoints', record.id + '-source.json')), { code: 'ENOENT' });
+});
+
+test('translation-only repair resumes exact reviewed checkpoints without retranslating a successful prefix', async t => {
+    const source = Array.from({ length: 85 }, (_, index) => ({ id: `retained-${index}`, start: index, end: index + 0.75, text: `普通の会話 ${index}` }));
+    const { dataDir, record } = await fixture(t, { transcript: source, transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
+        transcriptionQuality: fullQuality(), summary: '보관된 요약' });
+    let fail = true;
+    const order = [];
+    const mocked = mockSpawn(async call => {
+        assert.equal(call.args[0], 'exec');
+        const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
+        const start = input.subtitles[0].index;
+        const review = Boolean(input.draftSubtitles);
+        order.push(`${review ? 'review' : 'draft'}:${start}`);
+        if (fail && review && start === 80) throw Object.assign(new Error('owned temporary translation failure'), { exitCode: 1 });
+        await writeResponse(call, { subtitles: input.subtitles.map(cue => ({ index: cue.index, text: `검수된 대사 ${cue.index}` })), terms: [] });
+    });
+    const instance = provider(mocked.spawnImpl);
+    const first = await instance.translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate' });
+    assert.deepEqual(order, ['draft:0', 'review:0', 'draft:80', 'review:80']);
+    assert.equal(first.subtitleTranslationPartial.length, 80);
+    assert.match(first.subtitleError, /temporary translation failure/);
+    fail = false;
+    order.length = 0;
+    const second = await instance.translateKoreanOnly(first, { dataDir, subtitleQuality: 'accurate', force: true });
+    assert.deepEqual(order, ['draft:80', 'review:80']);
+    assert.equal(second.subtitleTranslation.length, 85);
+    assert.equal(second.subtitleTranslationPartial, undefined);
+    assert.equal(second.subtitleError, null);
+    order.length = 0;
+    await instance.translateKoreanOnly(second, { dataDir, subtitleQuality: 'accurate', force: true });
+    assert.deepEqual(order, [], 'an already reviewed exact checkpoint does not repeat paid/account generation');
+    assert.deepEqual(second.transcript, source);
+});
+
+test('translation-only repair cannot promote unresolved or interrupted audio into complete subtitles', async t => {
+    for (const processingComplete of [true, false]) {
+        const { dataDir, record } = await fixture(t, { transcript: [{ id: 12, start: 1, end: 3, text: 'こんにちは。' }], transcriptLanguage: 'ja',
+            transcriptSource: 'audio:faster-whisper large-v3' + (processingComplete ? '' : ' (partial)'),
+            transcriptionQuality: fullQuality(90, { complete: false, processingComplete, processedUntil: processingComplete ? 90 : 30,
+                audit: { complete: false, unresolved: [{ start: 50, end: 55, reason: 'uncovered speech' }] } }) });
+        const mocked = mockSpawn(call => writeResponse(call, { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] }));
+        const result = await provider(mocked.spawnImpl).translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate' });
+        assert.equal(result.status, 'partial');
+        assert.equal(result.subtitleLanguage, undefined);
+        assert.equal(result.subtitleTranslation, undefined);
+        assert.equal(result.subtitleTranslationPartial[0].id, 12);
+        assert.equal(result.subtitleTranslationProgress.complete, false);
+        assert.equal(result.subtitleTranslationProgress.sourceComplete, false);
+        assert.equal(result.subtitleTranslationProgress.sourceAuditComplete, false);
+        assert.equal(result.subtitleTranslationProgress.sourceProcessed, processingComplete);
+        assert.equal(result.subtitleTranslationProgress.translationComplete, true);
+        assert.equal(result.subtitleError, null, 'successful translation is separate from incomplete source recognition');
+        assert.equal(result.subtitleRepairStatus, 'completed', 'the repair outcome does not certify incomplete source audio');
+        assert.equal(mocked.calls.length, 2);
+    }
+});
+
+test('explicit translation-only replacement bypasses complete checkpoints and preserves prior output if its review fails', async t => {
+    const { dataDir, record } = await fixture(t, { transcript: [{ id: 4, start: 1, end: 3, text: 'こんにちは。' }], transcriptLanguage: 'ja',
+        transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: fullQuality() });
+    let version = 1, failReview = false;
+    const requests = [];
+    const mocked = mockSpawn(async call => {
+        const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
+        requests.push(input.draftSubtitles ? 'review' : 'draft');
+        if (failReview && input.draftSubtitles) throw Object.assign(new Error('owned replacement review unavailable'), { exitCode: 1 });
+        await writeResponse(call, { subtitles: [{ index: 0, text: `번역 수정본 ${version}입니다.` }], terms: [] });
+    });
+    const instance = provider(mocked.spawnImpl);
+    await instance.translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate' });
+    assert.equal(record.subtitleTranslation[0].text, '번역 수정본 1입니다.');
+    requests.length = 0;
+    version = 2;
+    await instance.translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate', forceTranslation: true });
+    assert.deepEqual(requests, ['draft', 'review']);
+    assert.equal(record.subtitleTranslation[0].text, '번역 수정본 2입니다.');
+    requests.length = 0;
+    failReview = true;
+    await instance.translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate', forceTranslation: true });
+    assert.deepEqual(requests, ['draft', 'review']);
+    assert.equal(record.subtitleTranslation[0].text, '번역 수정본 2입니다.');
+    assert.equal(record.subtitleLanguage, 'ko');
+    assert.match(record.subtitleError, /replacement review unavailable/);
+    assert.equal(record.subtitleRepairStatus, 'failed', 'retained complete Korean does not hide a failed replacement attempt');
+});
+
+test('a translation-only refusal preserves a valid prior complete subtitle throughout checkpoint callbacks', async t => {
+    const saved = [{ id: 7, start: 1, end: 3, text: '이전의 검수된 인사입니다.' }];
+    const { dataDir, record } = await fixture(t, { transcript: [{ id: 7, start: 1, end: 3, text: 'こんにちは。' }], transcriptLanguage: 'ja',
+        transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: fullQuality(), subtitleTranslation: saved, subtitleLanguage: 'ko' });
+    const mocked = mockSpawn(() => { throw Object.assign(new Error('owned translation refusal'), { exitCode: 1 }); });
+    const checkpoints = [];
+    const result = await provider(mocked.spawnImpl).translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate',
+        onCheckpoint(value) { checkpoints.push(structuredClone(value)); } });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.subtitleLanguage, 'ko');
+    assert.deepEqual(result.subtitleTranslation, saved);
+    assert.match(result.subtitleError, /owned translation refusal/);
+    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.ok(checkpoints.length > 0);
+    assert.ok(checkpoints.every(value => value.subtitleLanguage === 'ko' && value.subtitleTranslation[0].text === saved[0].text));
+});
+
+test('an aborted translation-only repair retains a longer existing checked partial and source data', async t => {
+    const crypto = require('crypto');
+    const transcript = [{ id: 'a', start: 1, end: 3, text: 'こんにちは。' }, { id: 'b', start: 4, end: 6, text: 'ありがとう。' }];
+    const saved = [{ id: 'a', start: 1, end: 3, text: '안녕하세요.' }];
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id, cue.start, cue.end, cue.text]))).digest('hex');
+    const { dataDir, record } = await fixture(t, { transcript, transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
+        transcriptionQuality: fullQuality(), subtitleTranslationPartial: saved,
+        subtitleTranslationProgress: { version: 1, sourceFingerprint: fingerprint, language: 'ko', complete: false,
+            sourceComplete: true, totalCues: 2, completedCues: 1, translationComplete: false } });
+    const controller = new AbortController();
+    const mocked = mockSpawn(call => controller.abort());
+    await assert.rejects(provider(mocked.spawnImpl).translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate', signal: controller.signal }), error => {
+        assert.equal(error.name, 'AbortError');
+        assert.equal(error.record, record);
+        assert.deepEqual(error.record.subtitleTranslationPartial, saved);
+        assert.deepEqual(error.record.transcript, transcript);
+        return true;
+    });
+});
+
+test('translation-only repair rejects missing or malformed sources before invoking any process', async t => {
+    for (const transcript of [[], [{ start: 2, end: 1, text: 'invalid time' }], [{ start: 1, end: 2, text: 'valid' }, { start: -1, end: 2, text: 'invalid' }]]) {
+        const { dataDir, record } = await fixture(t, { transcript });
+        const original = structuredClone(transcript);
+        const mocked = mockSpawn(() => { throw new Error('must not run'); });
+        const result = await provider(mocked.spawnImpl).translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate' });
+        assert.match(result.subtitleError, /시간별 원문 대사/);
+        assert.equal(mocked.calls.length, 0);
+        assert.deepEqual(result.transcript, original);
+    }
+});
+
+test('translation-only repair reuses actual Korean text locally and translates a false Korean language hint', async t => {
+    for (const [text, expectedCalls] of [['안녕하세요.', 0], ['こんにちは。', 1]]) {
+        const { dataDir, record } = await fixture(t, { transcriptLanguage: 'ko', transcript: [{ start: 1, end: 3, text }] });
+        const mocked = mockSpawn(call => writeResponse(call, { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] }));
+        const result = await provider(mocked.spawnImpl).translateKoreanOnly(record, { dataDir, subtitleQuality: 'fast' });
+        assert.equal(result.subtitleLanguage, 'ko', result.subtitleError);
+        assert.equal(result.subtitleTranslation[0].text, '안녕하세요.');
+        assert.equal(mocked.calls.length, expectedCalls);
+        assert.equal(record.transcript[0].text, text);
+    }
+});
+
+test('fast translation-only repair cannot upgrade an unfinished or obsolete accurate source audit', async t => {
+    for (const quality of [fullQuality(90, { audit: { complete: false, unresolved: [], uncoveredSpeechSeconds: 0 } }),
+        fullQuality(90, { recognitionRevision: 2 }), fullQuality(90, { recognitionRevision: undefined })]) {
+        const transcript = [{ id: 12, start: 1.25, end: 3.5, text: 'こんにちは。' }];
+        const { dataDir, record } = await fixture(t, { transcript, transcriptLanguage: 'ja',
+            transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: quality });
+        const original = structuredClone(record);
+        const mocked = mockSpawn(async call => {
+            assert.equal(call.args[0], 'exec');
+            await writeResponse(call, { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] });
+        });
+        const result = await provider(mocked.spawnImpl).translateKoreanOnly(record, { dataDir, subtitleQuality: 'fast' });
+        assert.equal(mocked.calls.length, 1, 'fast changes translation passes, never the saved source proof');
+        assert.equal(result.subtitleRepairStatus, 'completed');
+        assert.equal(result.subtitleError, null);
+        assert.equal(result.status, 'partial');
+        assert.equal(result.subtitleLanguage, undefined);
+        assert.equal(result.subtitleTranslation, undefined);
+        assert.deepEqual(result.subtitleTranslationPartial, [{ id: 12, start: 1.25, end: 3.5, text: '안녕하세요.' }]);
+        assert.equal(result.subtitleTranslationProgress.complete, false);
+        assert.equal(result.subtitleTranslationProgress.translationComplete, true);
+        assert.equal(result.subtitleTranslationProgress.sourceComplete, false);
+        assert.equal(result.subtitleTranslationProgress.sourceProcessed, true, 'audio processing and current audit are independent');
+        assert.equal(result.subtitleTranslationProgress.sourceAuditComplete, false);
+        assert.deepEqual(result.transcriptionQuality, original.transcriptionQuality);
+        assert.deepEqual(result.transcript, original.transcript);
+    }
+});
+
+test('fast translation-only repair retains current accurate proof and ordinary fast source completion semantics', async t => {
+    for (const [quality, expectedAudit] of [[fullQuality(), true],
+        [fullQuality(90, { profile: 'fast', model: 'small', wordTimestamps: false, audit: { complete: false, unresolved: [] } }), false]]) {
+        const { dataDir, record } = await fixture(t, { transcript: [{ start: 1, end: 3, text: 'こんにちは。' }],
+            transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper ' + quality.model, transcriptionQuality: quality });
+        const mocked = mockSpawn(call => writeResponse(call, { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] }));
+        const result = await provider(mocked.spawnImpl).translateKoreanOnly(record, { dataDir, subtitleQuality: 'fast' });
+        assert.equal(mocked.calls.length, 1);
+        assert.equal(result.subtitleLanguage, 'ko', result.subtitleError);
+        assert.equal(result.subtitleTranslationProgress.complete, true);
+        assert.equal(result.subtitleTranslationProgress.sourceComplete, true);
+        assert.equal(result.subtitleTranslationProgress.sourceAuditComplete, expectedAudit);
+        assert.equal(result.subtitleTranslationPartial, undefined);
+        assert.deepEqual(result.transcriptionQuality, quality);
+    }
+});

@@ -10,23 +10,23 @@ const JOB_ID = 'b'.repeat(32);
 const CODE = 'owned-reconnect-fixture-code-123456';
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 
-async function fixture(t, { poll, dropUpload = false, dropPreflight = false } = {}) {
+async function fixture(t, { poll, dropUpload = false, dropPreflight = false, translationOnly = false } = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-reconnect-'));
   const id = 'a'.repeat(32), frame = { timestamp: 5, filename: 'frame-01.jpg' };
   const record = { id, name: 'owned-neutral.mp4', path: 'C:/synthetic-only/owned-neutral.mp4', ext: 'MP4', size: 1, duration: 60,
-    hasAudio: false, transcript: [], transcriptSource: 'none', frames: [frame], warnings: [] };
+    hasAudio: false, transcript: translationOnly ? [{ id: 1, start: 1, end: 3, text: '合成試験' }] : [], transcriptSource: 'none', frames: [frame], warnings: [] };
   await fs.mkdir(path.join(dataDir, 'frames', id), { recursive: true });
   await fs.writeFile(path.join(dataDir, 'frames', id, frame.filename), JPEG);
   const calls = { uploads: 0, polls: 0, cancels: 0, statuses: 0, requests: [] };
   const completed = { id: JOB_ID, status: 'completed', result: { ...record, id: JOB_ID, status: 'completed', summary: '합성 서버 결과',
-    frames: [{ ...frame, caption: '합성 장면' }] } };
+    frames: [{ ...frame, caption: '합성 장면' }], ...(translationOnly ? { subtitleLanguage: 'ko', subtitleTranslation: [{ id: 1, start: 1, end: 3, text: '합성 시험' }] } : {}) } };
   const server = http.createServer(async (req, res) => {
     calls.requests.push({ method: req.method, url: req.url });
     if (req.headers.authorization !== 'Bearer ' + CODE) { res.writeHead(401); res.end('{}'); return; }
     if (req.url === '/v1/status') {
       calls.statuses++;
       if (dropPreflight) { res.destroy(); return; }
-      res.end(JSON.stringify({ ready: true, protocol: 1, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v3'] })); return;
+      res.end(JSON.stringify({ ready: true, protocol: 1, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v3', ...(translationOnly ? ['subtitle-translation-only-v1'] : [])] })); return;
     }
     if (req.url === '/v1/jobs' && req.method === 'POST') {
       calls.uploads++;
@@ -92,6 +92,20 @@ test('remote phase progress is forwarded without scaling its audio counters or e
   assert.deepEqual(measured.details, { phase: 'transcription', completedSeconds: 180, totalSeconds: 600,
     elapsedSeconds: 90, remainingSeconds: 210, sampleAgeSeconds: 12 });
   assert.equal(JSON.stringify(progress).includes('private speech'), false);
+});
+
+test('translation-only reconnect retries only its accepted text job without fetching images or resubmitting analysis', async t => {
+  const f = await fixture(t, { translationOnly: true, poll(attempt, req, res, completed) {
+    if (attempt <= 2) { res.destroy(); return; }
+    res.end(JSON.stringify(completed));
+  } });
+  const result = await f.send({ operation: 'translation-only', subtitleQuality: 'fast' });
+  assert.equal(result.subtitleTranslation[0].text, '합성 시험');
+  assert.deepEqual(result.transcript, f.record.transcript);
+  assert.deepEqual(result.frames, f.record.frames);
+  assert.equal(result.summary, f.record.summary);
+  assert.deepEqual([f.calls.uploads, f.calls.polls, f.calls.cancels], [1, 3, 0]);
+  assert.equal(f.calls.requests.some(call => call.url.includes('/frames/')), false);
 });
 
 test('an exhausted network recovery stops after three retries and explains that the server job may still be running', async t => {

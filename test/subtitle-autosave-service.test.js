@@ -251,6 +251,9 @@ test('automatic random picks also save Korean SRT without a manual analysis clic
   assert.equal(record.analysisMode, 'codex');
   assert.equal(record.subtitleAutoSave.path, path.join(f.mediaDir, '열차 안내.ko.srt'));
   assert(await fs.readFile(record.subtitleAutoSave.path, 'utf8'));
+  // The saved record is visible before the queue's terminal journal flush.
+  // Await coordinator release before stopping the fixture and removing its data.
+  await until(async () => !(await client.request('/auto-pick')).activeJob);
 });
 
 test('reviewed partial Korean subtitles auto-save separately, remain downloadable and preserve complete player subtitles', async t => {

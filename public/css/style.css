@@ -1556,6 +1556,7 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-repair-panel strong { font-size: 13px; color: #e5bd6c; }
 .catalog-repair-panel .catalog-section-note { margin-bottom: 0; }
 .catalog-repair-panel button { flex-shrink: 0; }
+.catalog-repair-actions { display: flex; flex-direction: column; align-items: stretch; gap: 8px; flex-shrink: 0; }
 .catalog-repair-button { display: block; margin-top: 9px; }
 .catalog-subtitle-controls { display: flex; align-items: end; gap: 10px; margin: 14px 0; flex-wrap: wrap; }
 .catalog-subtitle-controls .catalog-field { min-width: 130px; }

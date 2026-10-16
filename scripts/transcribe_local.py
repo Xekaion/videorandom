@@ -363,8 +363,8 @@ def prune_non_speech_artifacts(cues, audio, speech, sample_rate):
     return kept, removed
 
 
-def cues_from_segment(segment, offset, duration, ownership=None):
-    """Readable cue breaks always use actual aligned word boundaries."""
+def cues_from_segment(segment, offset, duration, ownership=None, word_timestamps_expected=True):
+    """Use aligned word boundaries or preserve native segment times intact."""
     text = str(field(segment, 'text', '')).strip()
     raw_start, raw_end = field(segment, 'start'), field(segment, 'end')
     if not text or not finite(raw_start) or not finite(raw_end) or raw_end <= raw_start:
@@ -403,7 +403,7 @@ def cues_from_segment(segment, offset, duration, ownership=None):
         if invalid_words:
             cue['qualityFlags'] = ['invalid_word_timestamps']
         else:
-            cue['qualityFlags'] = ['word_timestamps_unavailable']
+            cue['qualityFlags'] = ['word_timestamps_unavailable' if word_timestamps_expected else 'segment_timestamps']
         if low_confidence(cue):
             cue.setdefault('qualityFlags', []).append('low_confidence')
         return [cue]
@@ -724,7 +724,7 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
     emitter({'type': 'info', 'language': selected_language, 'languageProbability': probability,
              'duration': duration, 'model': model_name, 'profile': profile, 'device': device,
              'computeType': compute_type, 'workers': state['workers']})
-    options = dict(beam_size=5, best_of=5, word_timestamps=True, task='transcribe',
+    options = dict(beam_size=5, best_of=5, word_timestamps=profile == 'accurate', task='transcribe',
                    condition_on_previous_text=False, language=selected_language,
                    temperature=(0.0, 0.2, 0.4), hallucination_silence_threshold=2.0,
                    vad_filter=profile != 'accurate')
@@ -741,7 +741,8 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
     for window, (decode_start, decode_end, core_start, core_end), segments in decode_windows(
             model, audio, initial_windows, options, sample_rate, state, emitter, transcription_waiting):
         for segment in segments:
-            for cue in cues_from_segment(segment, decode_start, duration, (core_start, core_end)):
+            for cue in cues_from_segment(segment, decode_start, duration, (core_start, core_end),
+                                         word_timestamps_expected=profile == 'accurate'):
                 cues.append({**cue, '_window': window, '_boundary': core_start})
                 emitter({'type': 'segment', **cue})
         # A consumed empty generator also means the silent tail was examined.
@@ -824,7 +825,7 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
         warnings.append(warning)
         emitter({'type': 'warning', 'message': warning})
     alignment_fallbacks = sum(not cue.get('words') for cue in cues)
-    if alignment_fallbacks:
+    if profile == 'accurate' and alignment_fallbacks:
         warning = f'단어별 시간 정렬이 불완전한 대사 {alignment_fallbacks}개는 원래의 유효한 구간 시간으로 보관했습니다. 단어 시간을 임의로 추정하지 않았으며, 이 제한은 음성 누락과 별도로 표시합니다.'
         warnings.append(warning)
         emitter({'type': 'warning', 'message': warning})
@@ -843,7 +844,8 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
                'workers': state['workers'], 'parallelMemoryFallback': state['oomFallback'],
                'recognitionRevision': RECOGNITION_REVISION,
                'processingComplete': profile == 'accurate' and processed == duration,
-               'durationSeconds': duration, 'processedSeconds': processed, 'wordTimestamps': all(bool(cue.get('words')) for cue in cues),
+               'durationSeconds': duration, 'processedSeconds': processed,
+               'wordTimestamps': profile == 'accurate' and all(bool(cue.get('words')) for cue in cues),
                'audit': audit, 'warnings': warnings}
     emitter({'type': 'transcript', 'segments': cues})
     emitter({'type': 'progress', 'phase': 'completed', 'completedSeconds': processed, 'totalSeconds': duration, 'percent': 100.0})
