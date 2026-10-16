@@ -82,7 +82,9 @@
       : hasSummary(record) ? 'ready' : record.analysisMode === 'local' ? 'extraction-only' : 'summary-missing';
     return { code, repairable: true, reason: ({ ready: '저장된 분석 결과를 사용할 수 있습니다.', 'extraction-only': '로컬 추출은 이미지와 원문 자막을 저장합니다. 자동 요약 방식으로 다시 분석하면 줄거리도 생성합니다.', 'summary-missing': '저장된 결과에 줄거리가 없습니다. 분석 설정과 오류 안내를 확인해 다시 분석하세요.', partial: '분석 일부가 완료되지 않았습니다. 아래 안내를 확인해 다시 분석하세요.', failed: record.error || '분석에 실패했습니다. 아래 안내를 확인해 다시 분석하세요.' })[code] };
   };
-  const healthLabel = record => ({ ready: '정리 완료', 'extraction-only': '로컬 추출 · 자동 요약 전', 'summary-missing': '요약 실패 / 누락', partial: '일부 완료 · 복구 필요', failed: '분석 실패 · 복구 필요' })[healthFor(record).code] || '미분석';
+  const healthLabel = record => translationNeedsRecovery(record) ? '한국어 자막 미번역 · 복구 필요'
+    : completedTranslationRepair(record)?.label
+      || ({ ready: '정리 완료', 'extraction-only': '로컬 추출 · 자동 요약 전', 'summary-missing': '요약 실패 / 누락', partial: '일부 완료 · 복구 필요', failed: '분석 실패 · 복구 필요' })[healthFor(record).code] || '미분석';
   const codexReady = () => !!(state.config?.providers?.codex?.available && state.config.providers.codex.loggedIn && state.config.providers?.speech?.available);
 
   function codexUnavailableReason() {
@@ -105,6 +107,49 @@
     if (seconds == null || !Number.isFinite(Number(seconds))) return '시간 미상';
     const milliseconds = Math.round(Math.max(0, Number(seconds)) * 1000);
     return `${time(milliseconds / 1000)}.${String(milliseconds % 1000).padStart(3, '0')}`;
+  }
+
+  function translationNeedsRecovery(record) {
+    if (!record || hasTranslatedSubtitles(record)) return false;
+    const total = record.transcript?.length ?? record.transcriptCount ?? 0;
+    const progress = record.subtitleTranslationProgress;
+    const validProgress = total > 0 && progress?.language === 'ko' && progress.totalCues === total
+      && Number.isSafeInteger(progress.completedCues) && progress.completedCues >= 0 && progress.completedCues <= total;
+    if (validProgress && progress.translationComplete === true && progress.completedCues === total) return false;
+    return record.subtitleRepairStatus === 'failed' || record.subtitleRepairStatus === 'partial'
+      || total > 0 && (!!record.subtitleError || validProgress && progress.completedCues < total);
+  }
+
+  function translationRepairLabel(record) {
+    return translationNeedsRecovery(record) ? '남은 한국어 자막 번역 계속' : '한국어 자막 번역만 복구';
+  }
+
+  function completedTranslationRepair(record) {
+    if (record?.operation !== 'translation-only' || record.subtitleRepairStatus !== 'completed') return null;
+    const total = record.transcript?.length || 0;
+    const translated = hasTranslatedSubtitles(record) || total > 0 && record.subtitleTranslationProgress?.translationComplete === true
+      && partialTranslatedSubtitles(record).length === total;
+    if (!translated) return null;
+    const analysisNeedsCheck = !hasSummary(record) || ['failed', 'summary-missing'].includes(healthFor(record).code);
+    const sourceNeedsCheck = record.status !== 'completed' || record.transcriptionQuality?.complete === false
+      || record.subtitleTranslationProgress?.sourceComplete === false;
+    const remaining = analysisNeedsCheck ? '분석 확인 필요' : sourceNeedsCheck ? '원어 확인 필요' : '';
+    return { active: false, tone: remaining ? 'partial' : 'ready',
+      label: `한국어 번역 완료${remaining ? ` · ${remaining}` : ''}`,
+      detail: `저장된 원문 대사의 한국어 번역은 모두 끝났습니다.${remaining ? ' 원래 분석과 원어 인식의 확인 사항은 별도로 유지됩니다.' : ' 저장된 한국어 자막을 사용할 수 있습니다.'}` };
+  }
+
+  function detailRepairNote(record) {
+    return translationNeedsRecovery(record)
+      ? `${record.subtitleError || '한국어 번역이 완료되지 않았습니다.'} ‘남은 한국어 자막 번역 계속’으로 저장된 원문과 시간을 사용해 이어서 번역할 수 있습니다.`
+      : completedTranslationRepair(record)?.detail || `${healthFor(record).reason} 현재 분석 설정으로 다시 분석하며 기존 결과는 보존합니다.`;
+  }
+
+  function translationInProgress(record) {
+    const job = state.job;
+    return ['running', 'cancelling'].includes(job?.status) && fileActivity(record)?.active === true
+      && (job.operation === 'translation-only' || ['translation', 'translation_review'].includes(job.stageKey)
+        || /^한국어 자막 (?:번역|검수)/.test(job.stage || ''));
   }
 
   async function request(url, options) {
@@ -348,6 +393,52 @@
 
   function mergeRecords(records) {
     if (!Array.isArray(records)) return;
+    const related = new Map([...state.records.values(), ...records].filter(record => record?.id).map(record => [record.id, record]));
+    const sourceCount = record => record?.transcript?.length ?? record?.transcriptCount ?? 0;
+    const translatedCount = record => {
+      const total = sourceCount(record);
+      if (record?.catalogView === 'summary') return Number.isSafeInteger(record.subtitleTranslatedCount)
+        && record.subtitleTranslatedCount >= 0 && record.subtitleTranslatedCount <= total ? record.subtitleTranslatedCount : null;
+      if (hasTranslatedSubtitles(record)) return total;
+      const partial = record?.subtitleTranslationPartial, source = record?.transcript, progress = record?.subtitleTranslationProgress;
+      if (!Array.isArray(partial) || !Array.isArray(source) || progress?.version !== 1 || progress.language !== 'ko'
+        || progress.complete !== false || progress.totalCues !== total || progress.completedCues !== partial.length
+        || typeof progress.sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(progress.sourceFingerprint)) return 0;
+      return partial.length <= total && partial.every((cue, index) => cue && typeof cue.text === 'string' && cue.text.trim()
+        && cue.start === source[index]?.start && cue.end === source[index]?.end && Number.isFinite(cue.start)
+        && Number.isFinite(cue.end) && cue.end > cue.start && (cue.id === undefined || cue.id === source[index]?.id)) ? partial.length : 0;
+    };
+    const savedTime = result => {
+      const values = [result?.savedAt, result?.analyzedAt, result?.editedAt].map(value => Date.parse(value || '')).filter(Number.isFinite);
+      return values.length ? Math.max(...values) : 0;
+    };
+    const sourceHash = record => record?.subtitleTranslationSourceFingerprint || record?.subtitleTranslationProgress?.sourceFingerprint;
+    const sameSource = (left, right) => {
+      if (!sourceCount(left) || sourceCount(left) !== sourceCount(right)) return false;
+      if (Array.isArray(left.transcript) && Array.isArray(right.transcript)) return JSON.stringify(left.transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))
+        === JSON.stringify(right.transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]));
+      const leftHash = sourceHash(left), rightHash = sourceHash(right);
+      return typeof leftHash === 'string' && /^[a-f0-9]{64}$/i.test(leftHash) && typeof rightHash === 'string'
+        && leftHash.toLowerCase() === rightHash.toLowerCase();
+    };
+    const directTranslationUpdate = (next, previous) => {
+      if (next?.operation !== 'translation-only' || next.repairOf !== previous?.id || savedTime(next) < savedTime(previous)
+        || !sameSource(next, previous) || ['summary', 'plot'].some(key => (next[key] || '') !== (previous[key] || ''))) return false;
+      const count = translatedCount(next), retained = translatedCount(previous);
+      return count !== null && retained !== null && (next.subtitleRepairStatus === 'completed' ? count >= retained
+        : ['failed', 'partial'].includes(next.subtitleRepairStatus) && count > retained);
+    };
+    const retainedTranslationUpdate = (next, previous) => {
+      const visited = new Set();
+      while (next && !visited.has(next.id)) {
+        visited.add(next.id);
+        if (next.repairOf === previous?.id) return directTranslationUpdate(next, previous);
+        const parent = related.get(next.repairOf);
+        if (!parent || !directTranslationUpdate(next, parent)) return false;
+        next = parent;
+      }
+      return false;
+    };
     records.forEach(record => {
       if (!record || !record.id || !record.path) return;
       const key = pathKey(record.path);
@@ -359,17 +450,18 @@
       const priority = result => hasSummary(result) ? result.status === 'completed' ? 4 : 3
         : healthFor(result).code === 'extraction-only' && result.status === 'completed' ? 2
         : result.status === 'completed' || result.status === 'partial' ? 1 : 0;
-      const savedTime = result => {
-        const savedAt = Date.parse(result?.savedAt || '');
-        const analyzedAt = Date.parse(result?.analyzedAt || '');
-        const editedAt = Date.parse(result?.editedAt || '');
-        return Math.max(Number.isFinite(savedAt) ? savedAt : 0, Number.isFinite(analyzedAt) ? analyzedAt : 0, Number.isFinite(editedAt) ? editedAt : 0);
-      };
       if (previous?.id === record.id && savedTime(record) < savedTime(previous)) return;
-      if (previous?.operation === 'translation-only' && previous.subtitleRepairStatus === 'completed'
-          && savedTime(previous) > savedTime(record) && hasSummary(previous)) return;
-      const translatedRepair = record.operation === 'translation-only' && record.subtitleRepairStatus === 'completed'
-        && record.repairOf === previous?.id && savedTime(record) >= savedTime(previous);
+      const directLink = (next, parent) => !!parent?.id && next?.operation === 'translation-only' && next.repairOf === parent.id
+        && savedTime(next) >= savedTime(parent);
+      // A translation-only attempt cannot displace a completed/longer Korean
+      // subtitle, even when both analyses have the same partial status rank.
+      if (directLink(record, previous) && !directTranslationUpdate(record, previous)) return;
+      if (directLink(previous, record) && !directTranslationUpdate(previous, record)) {
+        state.records.set(key, record);
+        return;
+      }
+      if (retainedTranslationUpdate(previous, record)) return;
+      const translatedRepair = retainedTranslationUpdate(record, previous);
       if (!previous || previous.id === record.id || translatedRepair || priority(record) > priority(previous)
           || (priority(record) === priority(previous) && savedTime(record) > savedTime(previous))) {
         state.records.set(key, record);
@@ -446,9 +538,12 @@
       label: `${taskLabel(state.requestFailure)} 요청 실패`, detail: state.requestFailure.message };
     const repair = job?.source === 'repair';
     if (job && !isActive(job) && (knownTarget || (repairPath && pathKey(repairPath) === key) || attempt)) {
+      if (attempt && (translationNeedsRecovery(attempt) || attempt.subtitleRepairStatus === 'failed')) return { active: false, tone: 'partial',
+        label: attempt.subtitleError || job.status === 'cancelled' ? '한국어 자막 번역 중단 · 복구 필요' : '한국어 자막 미번역 · 복구 필요',
+        detail: attempt.subtitleError || detailRepairNote(attempt) };
       if (job.operation === 'translation-only' && attempt?.subtitleRepairStatus === 'completed') return { active: false,
-        tone: attempt.status === 'completed' ? 'ready' : 'partial', label: '한국어 자막 번역 복구 완료',
-        detail: '저장된 원문 대사의 번역을 마쳤습니다. 원문 음성의 누락·신뢰도 경고는 별도로 유지됩니다.' };
+        tone: attempt.status === 'completed' ? 'ready' : 'partial', label: completedTranslationRepair(attempt)?.label || '한국어 자막 번역 복구 완료',
+        detail: completedTranslationRepair(attempt)?.detail || '저장된 원문 대사의 번역을 마쳤습니다. 원문 음성의 누락·신뢰도 경고는 별도로 유지됩니다.' };
       if (attempt && ['ready', 'extraction-only'].includes(healthFor(attempt).code)) return null;
       if (job.status === 'failed' || job.status === 'cancelled') return { active: false, tone: job.status === 'failed' ? 'failed' : 'partial',
         label: `${repair ? '복구' : '분석'} ${job.status === 'failed' ? '실패' : '중지됨'}`, detail: job.error || '기존에 저장한 결과는 보관됩니다.' };
@@ -456,7 +551,7 @@
         tone: healthFor(attempt).code === 'failed' ? 'failed' : 'partial', label: `${repair ? '복구' : '분석'} ${healthFor(attempt).code === 'failed' ? '실패' : '일부 완료'}`,
         detail: attempt.error || healthFor(attempt).reason };
     }
-    return null;
+    return completedTranslationRepair(recordFor(file) || file);
   }
 
   function activityText(activity) {
@@ -482,7 +577,7 @@
     const activity = fileActivity(record);
     const translating = (state.pendingRequest?.operation === 'translation-only' || state.job?.operation === 'translation-only') && activity?.active;
     $('catalogDetailRepair').textContent = activity?.active && !translating ? activity.label : '복구 / 다시 분석';
-    $('catalogSubtitleRepair').textContent = translating ? activity.label : '한국어 자막 번역만 복구';
+    $('catalogSubtitleRepair').textContent = translating ? activity.label : translationRepairLabel(record);
     $('catalogDetailHealth').classList.toggle('catalog-activity-health', activity?.active === true);
     $('catalogDetailProgress').classList.toggle('hidden', !activity?.active);
     if (activity) {
@@ -492,9 +587,10 @@
       state.detailActivityPath = pathKey(record.path);
     } else if (state.detailActivityPath === pathKey(record.path)) {
       $('catalogDetailHealth').textContent = healthLabel(record);
-      $('catalogDetailRepairNote').textContent = `${healthFor(record).reason} 현재 분석 설정으로 다시 분석하며 기존 결과는 보존합니다.`;
+      $('catalogDetailRepairNote').textContent = detailRepairNote(record);
       state.detailActivityPath = '';
     }
+    if ($('catalogTranscript').dataset.translationActive !== String(translationInProgress(record))) renderTranscript(record);
   }
 
   function updateSelectionUI() {
@@ -663,7 +759,7 @@
         repair.addEventListener('click', () => repairResult(record.id));
         statusCell.append(repair);
         if (record.transcript?.length || record.transcriptCount > 0) {
-          const translate = make('button', 'catalog-detail-link catalog-repair-button', activity?.active && state.job?.operation === 'translation-only' ? activity.label : '자막 번역만 복구');
+          const translate = make('button', 'catalog-detail-link catalog-repair-button', activity?.active && state.job?.operation === 'translation-only' ? activity.label : translationRepairLabel(record));
           translate.type = 'button'; translate.title = '원문과 시간은 유지하고 한국어 번역만 복구합니다.';
           translate.disabled = state.starting || isActive(state.job) || !state.config;
           translate.addEventListener('click', () => repairTranslation(record.id));
@@ -1104,7 +1200,11 @@
     const total = Number(job.total) || 0;
     const overall = job.status === 'completed' ? 100 : Math.min(100, total ? (completed + (active ? (Number(job.percent) || 0) / 100 : 0)) / total * 100 : 0);
     $('catalogJob').classList.remove('hidden');
-    const jobTitle = job.operation === 'translation-only'
+    const translationIncomplete = !active && job.results?.some(record => translationNeedsRecovery(record) || record.subtitleRepairStatus === 'failed');
+    const partialResults = !active && job.results?.some(record => record.status === 'partial' || record.status === 'failed');
+    const jobTitle = job.status === 'completed' && translationIncomplete ? '한국어 번역 미완료 · 복구 필요'
+      : job.status === 'completed' && partialResults && job.operation !== 'translation-only' ? '분석 일부 완료 · 확인 필요'
+      : job.operation === 'translation-only'
       ? ({ completed: '작업 완료', cancelled: '중지됨', failed: '작업 실패', cancelling: '중지 중…' })[job.status] || '번역 중'
       : ({ completed: '분석 완료', cancelled: '분석 중지됨', failed: '분석 작업 실패', cancelling: '분석 중지 중…' })[job.status] || '영상 분석 중';
     $('catalogJobTitle').textContent = job.operation === 'translation-only' ? `한국어 자막 번역 복구 · ${jobTitle.replace(/^영상 /, '')}` : job.source === 'auto-pick' ? `뽑은 영상 자동 ${jobTitle.replace(/^영상 /, '')}` : job.source === 'repair' ? `복구 · ${jobTitle}` : jobTitle;
@@ -1141,11 +1241,18 @@
       clearTimeout(state.pollTimer);
       const resultCount = Array.isArray(job.results) ? job.results.filter(hasResult).length : 0;
       const retainedCount = Array.isArray(job.results) ? job.results.filter(record => record.status !== 'completed' && recordFor(record)?.status === 'completed' && recordFor(record).id !== record.id).length : 0;
-      const problems = Array.isArray(job.results) ? job.results.filter(record => ['failed', 'partial', 'summary-missing'].includes(healthFor(record).code)) : [];
-      const completedMessage = job.status === 'failed' ? job.error || '분석 작업에 실패했습니다.' : job.operation === 'translation-only'
+      const problems = Array.isArray(job.results) ? job.results.filter(record => translationNeedsRecovery(record) || record.subtitleRepairStatus === 'failed'
+        || ['failed', 'partial', 'summary-missing'].includes(healthFor(record).code)) : [];
+      const translationIncomplete = Array.isArray(job.results) && job.results.some(record => translationNeedsRecovery(record) || record.subtitleRepairStatus === 'failed');
+      const translationFailed = Array.isArray(job.results) && job.results.some(record => record.subtitleRepairStatus === 'failed');
+      const completedMessage = job.status === 'failed' ? job.error || '분석 작업에 실패했습니다.'
+        : job.status === 'completed' && translationFailed ? `한국어 자막 번역 복구에 실패했습니다. 기존 원문과 저장된 번역은 보관합니다. ${resultCount}개 결과의 오류 안내를 확인해 주세요.`
+          : job.status === 'completed' && translationIncomplete
+          ? `한국어 번역은 완료되지 않았습니다. 확인된 결과 ${resultCount}개를 이 PC에 저장했습니다. 저장된 원문과 시간으로 ‘남은 한국어 자막 번역 계속’을 실행해 주세요.`
+          : job.operation === 'translation-only'
         ? `${job.status === 'cancelled' ? '자막 번역을 중지했습니다.' : '자막 번역 복구 작업을 마쳤습니다.'} 결과 ${resultCount}개를 이 PC에 저장했습니다. 원문·줄거리·이미지는 보존합니다.`
         : `${job.status === 'cancelled' ? '분석을 중지했습니다.' : '분석을 마쳤습니다.'} 결과 ${resultCount}개를 이 PC에 자동 저장했습니다. 프로그램을 다시 열어도 줄거리·대사·이미지가 남아 있습니다.`;
-      const problemReason = problems[0] && ((job.operation === 'translation-only' && problems[0].subtitleError) || problems[0].error || healthFor(problems[0]).reason || problems[0].warnings?.[0]);
+      const problemReason = problems[0] && (problems[0].subtitleError || problems[0].error || healthFor(problems[0]).reason || problems[0].warnings?.[0]);
       const message = `${completedMessage}${problems.length ? ` 복구가 필요한 결과 ${problems.length}개 · ${problemReason}` : ''}${retainedCount ? ` 재분석이 완료되지 않은 영상 ${retainedCount}개는 이전에 완료된 결과와 이미지를 계속 표시합니다.` : ''}`;
       if (job.source === 'auto-pick') autoNotice(message, job.status === 'failed' || problems.length > 0);
       else notice(message, job.status === 'failed' || problems.length > 0);
@@ -1300,7 +1407,7 @@
     const versionLabel = stamp => [validVersion(stamp?.clientVersion) ? `프로그램 ${stamp.clientVersion}` : '', validVersion(stamp?.serverVersion) ? `분석 서버 ${stamp.serverVersion}` : ''].filter(Boolean).join(' / ');
     $('catalogAnalysisVersions').textContent = `분석 버전: ${versionLabel(versions.analysis) || '기록 없음 · 이전 결과의 버전은 추정하지 않습니다.'}${versionLabel(versions.translation) ? ` · 자막 번역 복구 버전: ${versionLabel(versions.translation)}` : ''}`;
     $('catalogDetailHealth').textContent = healthLabel(record);
-    $('catalogDetailRepairNote').textContent = `${healthFor(record).reason} 현재 분석 설정으로 다시 분석하며 기존 결과는 보존합니다.`;
+    $('catalogDetailRepairNote').textContent = detailRepairNote(record);
     $('catalogDetailRepair').classList.toggle('hidden', healthFor(record).repairable === false);
     $('catalogDetailRepair').disabled = state.starting || isActive(state.job) || !state.config;
     $('catalogSubtitleRepair').disabled = state.starting || isActive(state.job) || !state.config || !record.transcript?.length;
@@ -1351,9 +1458,10 @@
         $('catalogSubtitleView').value = 'both';
         $('catalogSubtitleDownloadLanguage').value = 'ko';
       }
-      // Update only subtitle controls: a later repair warning or a closed dialog
-      // must not be overwritten by completion of this asynchronous hash check.
+      // The live request/job keeps priority over saved completion. Refresh the
+      // row and detail only after validating a retained partial translation.
       renderTranscript(record);
+      render();
     }
   }
 
@@ -1390,6 +1498,8 @@
     const translations = completeTranslation ? record.subtitleTranslation : partialTranslatedSubtitles(record);
     const translated = translations.length > 0;
     const partial = translated && !completeTranslation;
+    const translating = translationInProgress(record);
+    $('catalogTranscript').dataset.translationActive = String(translating);
     const sourceKind = String(record.transcriptSource || '').split(':')[0];
     const language = record.transcriptLanguage && record.transcriptLanguage !== 'auto' ? ` · 원문 ${languageNames[record.transcriptLanguage] || record.transcriptLanguage}` : '';
     $('catalogTranscriptSource').textContent = `출처: ${sourceNames[sourceKind] || record.transcriptSource || '없음'} · ${transcript.length.toLocaleString()}구간${language}${translated ? partial ? ' · 한국어 부분 번역 있음' : ' · 한국어 번역 있음' : ''}`;
@@ -1406,10 +1516,18 @@
     $('catalogSubtitleVtt').disabled = !transcript.length || state.subtitleDownloading;
     $('catalogSubtitleSaveFolder').disabled = !translated || state.subtitleFolderSaving || state.subtitleDownloading || state.starting || isActive(state.job);
     $('catalogSubtitleSaveFolder').textContent = state.subtitleFolderSaving ? '폴더에 저장 중…' : '영상 폴더에 저장';
-    const message = partial ? `검수된 한국어 부분 자막 ${translations.length.toLocaleString()} / ${transcript.length.toLocaleString()}구간을 표시합니다. 원어 인식이나 번역 확인이 남아 있어 전체 영상 자막이 아닙니다. 부분 SRT / VTT로 직접 저장할 수 있습니다.${record.subtitleError ? `\n${record.subtitleError}` : ''}`
-      : record.subtitleError ? `한국어 자막 생성 실패 · ${record.subtitleError} 원문 자막은 그대로 보관됩니다.`
-      : translated ? '한국어 번역은 원문 자막의 시작·종료 시각을 그대로 사용합니다. SRT / VTT를 영상과 함께 사용할 수 있습니다.'
-      : '한국어 번역 자막은 아직 없습니다. 자동 요약 방식에서 ‘한국어 번역 자막도 생성’을 켜고 복구 / 다시 분석하세요. 원문 SRT / VTT는 바로 저장할 수 있습니다.';
+    const lastTranslated = translations.length ? `마지막 번역 시각 ${subtitleTime(translations[translations.length - 1].end)}` : '마지막 번역 시각 없음';
+    const counts = `한국어 번역 ${translations.length.toLocaleString()} / ${transcript.length.toLocaleString()}구간 · ${lastTranslated}`;
+    const allSourceCuesTranslated = completeTranslation || translated && translations.length === transcript.length
+      && record.subtitleTranslationProgress?.translationComplete === true;
+    const status = translating ? '이 영상의 한국어 번역이 진행 중입니다. 아직 처리되지 않은 구간은 미번역 상태로 표시합니다.'
+      : allSourceCuesTranslated ? partial ? '저장된 원문 대사의 한국어 번역은 모두 끝났습니다. 원어 인식 확인이 남아 부분 자막으로 보관합니다.'
+        : '한국어 번역은 원문 자막의 시작·종료 시각을 그대로 사용합니다. SRT / VTT를 영상과 함께 사용할 수 있습니다.'
+        : record.subtitleError ? '한국어 번역이 중단되었습니다. ‘남은 한국어 자막 번역 계속’으로 저장된 원문과 시간을 사용해 이어서 번역할 수 있습니다.'
+          : '한국어 미번역 구간이 남아 있습니다. 번역 복구가 필요합니다. 저장된 원문과 시간으로 한국어 번역만 복구할 수 있습니다.';
+    const message = [partial ? `검수된 한국어 부분 자막 ${translations.length.toLocaleString()} / ${transcript.length.toLocaleString()}구간을 표시합니다.` : '',
+      counts, status, partial ? '부분 SRT / VTT로 직접 저장할 수 있습니다.' : '',
+      record.subtitleError ? `${partial && allSourceCuesTranslated ? '원어 확인 안내' : translating ? '이전 번역 안내' : '원인'}: ${record.subtitleError}` : ''].filter(Boolean).join('\n');
     $('catalogSubtitleNotice').textContent = message;
     $('catalogSubtitleNotice').classList.remove('hidden');
     $('catalogSubtitleNotice').classList.toggle('catalog-error', !!record.subtitleError);
@@ -1422,7 +1540,8 @@
       if (view !== 'ko') body.append(make('p', translated && view === 'both' ? 'catalog-transcript-original' : '', segment.text));
       if (translated && view !== 'original') {
         if (translations[index]) body.append(make('p', 'catalog-transcript-translation', translations[index].text));
-        else body.append(make('p', 'catalog-muted', `한국어 번역 대기${view === 'ko' ? ` · 원문: ${segment.text}` : ''}`));
+        else body.append(make('p', 'catalog-muted', `${translating ? '한국어 번역 중 · 아직 처리되지 않은 구간'
+          : record.subtitleError ? '한국어 미번역 · 번역이 중단되었습니다' : '한국어 미번역 · 번역 복구가 필요합니다'}${view === 'ko' ? ` · 원문: ${segment.text}` : ''}`));
       }
       line.append(make('span', 'catalog-transcript-time', `${subtitleTime(segment.start)}${segment.end != null ? ` – ${subtitleTime(segment.end)}` : ''}`), body);
       lines.append(line);

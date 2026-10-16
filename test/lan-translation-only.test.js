@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const { createLanAnalysis, sendRemoteAnalysis, validateMetadata } = require('../lib/lan-analysis');
 const { reportedRemoteServerVersion } = require('../lib/analysis-provenance');
 const { subtitleText, validatePartialTranslation } = require('../lib/subtitle-utils');
+const { saveKoreanSubtitle } = require('../lib/subtitle-sidecar');
 
 const appVersion = require('../package.json').version;
 const transcript = [{ id: 7, start: 1, end: 3, text: '合成テスト', words: [{ start: 1.1, end: 2.9, word: '合成テスト', probability: 0.9 }] }];
@@ -256,6 +257,111 @@ test('a failed text repair preserves previous subtitles and analysis error while
   assert.equal(result.subtitleError, 'translation quota fixture');
   assert.deepEqual(result.subtitleTranslation, original.subtitleTranslation);
   assert.deepEqual(result.transcript, original.transcript);
+});
+
+function prefixProgress(source, count) {
+  return { version: 1, sourceFingerprint: crypto.createHash('sha256').update(JSON.stringify(source.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex'),
+    totalCues: source.length, completedCues: count, language: 'ko', complete: false, sourceComplete: false,
+    translationComplete: false, sourceProcessed: true, sourceAuditComplete: false };
+}
+
+function prefixSource() {
+  return [{ id: 10, start: 1.25, end: 2.75, text: '合成の第一案内。' },
+    { id: 20, start: 3.125, end: 4.875, text: '合成の第二案内。' },
+    { id: 30, start: 6.01, end: 7.999, text: '合成の第三案内。' }];
+}
+
+test('a failed later batch retains a newly approved longer prefix and writes those exact timed cues to the client partial SRT', async t => {
+  const source = prefixSource(), oldPrefix = [{ ...source[0], text: '이전에 보관한 첫 안내입니다.' }];
+  const newer = source.slice(0, 2).map((cue, index) => ({ ...cue, text: `새로 검증한 안내 ${index + 1}입니다.` }));
+  const newError = 'Owned synthetic batch three unavailable';
+  const f = await fixture(t, async pkg => ({ ...pkg.record, status: 'partial', subtitleRepairStatus: 'failed', subtitleError: newError,
+    subtitleTranslationPartial: newer, subtitleTranslationProgress: prefixProgress(source, 2) }));
+  assert.equal(path.dirname(f.dataDir), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(f.dataDir).startsWith('videorandom-translation-lan-'));
+  const video = path.join(f.dataDir, 'owned-prefix-fixture.mp4');
+  const ownedBytes = Buffer.from('Owned synthetic placeholder. Never decoded or transcribed.');
+  await fs.writeFile(video, ownedBytes);
+  const original = { id: 'a'.repeat(32), path: video, ...metadata({ transcript: source }), status: 'partial',
+    error: 'retained original analysis warning', summary: '저장된 합성 안내 요약', labels: ['합성'], frames: [],
+    subtitleRepairStatus: 'failed', subtitleError: 'older attempt failure', subtitleTranslationPartial: oldPrefix,
+    subtitleTranslationProgress: prefixProgress(source, 1), analysisProvenance: { schemaVersion: 1,
+      analysis: { clientVersion: '1.6.6', serverVersion: '1.6.5', recordedAt: '2026-10-10T01:02:03.000Z' } } };
+  const before = structuredClone(original);
+  const result = await sendRemoteAnalysis(original, { remoteUrl: f.base, connectionCode: f.status.connectionCode, dataDir: f.dataDir,
+    operation: 'translation-only', subtitleQuality: 'fast', transcriptLanguage: 'ja' });
+  assert.equal(result.subtitleRepairStatus, 'failed');
+  assert.equal(result.subtitleError, newError);
+  assert.equal(result.subtitleTranslationProgress.completedCues, 2);
+  assert.equal(result.subtitleTranslationProgress.translationComplete, false);
+  assert.deepEqual(result.subtitleTranslationPartial, newer);
+  assert.equal(result.status, 'partial');
+  assert.equal(result.subtitleLanguage, undefined);
+  for (const key of ['transcript', 'transcriptSource', 'transcriptionQuality', 'summary', 'labels', 'frames', 'error']) {
+    assert.deepEqual(result[key], before[key], key);
+  }
+  assert.deepEqual(result.analysisProvenance.analysis, original.analysisProvenance.analysis);
+  assert.equal(result.analysisProvenance.translation.serverVersion, appVersion);
+  assert.deepEqual(original, before, 'accepting additional approved output does not mutate the previous record');
+  const saved = await saveKoreanSubtitle(result);
+  assert.equal(saved.status, 'saved');
+  assert.equal(saved.partial, true);
+  assert.equal(saved.path, path.join(f.dataDir, 'owned-prefix-fixture.ko.partial.srt'));
+  const srt = await fs.readFile(saved.path, 'utf8');
+  assert.ok(srt.includes('00:00:01,250 --> 00:00:02,750'));
+  assert.ok(srt.includes('00:00:03,125 --> 00:00:04,875'));
+  assert.ok(srt.includes(newer[1].text));
+  assert.equal(srt.includes('00:00:06,010'), false);
+  assert.deepEqual(await fs.readFile(video), ownedBytes);
+});
+
+test('failed repairs never replace a valid completed translation or an equal or longer checked prefix with less approved output', async t => {
+  const source = prefixSource();
+  const oldCues = source.map((cue, index) => ({ ...cue, text: `보관된 안내 ${index + 1}입니다.` }));
+  let returnedCount = 1;
+  const f = await fixture(t, async pkg => ({ ...pkg.record, status: 'partial', subtitleRepairStatus: 'failed', subtitleError: 'new owned failure',
+    subtitleTranslationPartial: source.slice(0, returnedCount).map((cue, index) => ({ ...cue, text: `실패 전 새 안내 ${index + 1}입니다.` })),
+    subtitleTranslationProgress: prefixProgress(source, returnedCount) }));
+  for (const variant of [{ retainedCount: 2, returnedCount: 1 }, { retainedCount: 2, returnedCount: 2 }, { retainedCount: 3, returnedCount: 2 },
+    { full: true, retainedCount: 3, returnedCount: 2 }]) {
+    returnedCount = variant.returnedCount;
+    const original = { id: 'b'.repeat(32), path: 'C:/synthetic-only/owned-prefix.mp4', ...metadata({ transcript: source }),
+      status: variant.full ? 'completed' : 'partial', ...(variant.full ? { subtitleLanguage: 'ko', subtitleTranslation: oldCues }
+        : { subtitleTranslationPartial: oldCues.slice(0, variant.retainedCount), subtitleTranslationProgress: prefixProgress(source, variant.retainedCount) }) };
+    const result = await sendRemoteAnalysis(original, { remoteUrl: f.base, connectionCode: f.status.connectionCode, dataDir: f.dataDir,
+      operation: 'translation-only', subtitleQuality: 'fast' });
+    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(result.subtitleError, 'new owned failure');
+    if (variant.full) assert.deepEqual(result.subtitleTranslation, original.subtitleTranslation);
+    else {
+      assert.deepEqual(result.subtitleTranslationPartial, original.subtitleTranslationPartial);
+      assert.deepEqual(result.subtitleTranslationProgress, original.subtitleTranslationProgress);
+    }
+  }
+});
+
+test('failed repairs cannot replace an old prefix with longer output having invalid IDs, timing, fingerprint or counters', async t => {
+  const source = prefixSource();
+  const oldPrefix = [{ ...source[0], text: '기존 안내입니다.' }];
+  const newer = source.slice(0, 2).map((cue, index) => ({ ...cue, text: `새 안내 ${index + 1}입니다.` }));
+  let changes;
+  const f = await fixture(t, async pkg => ({ ...pkg.record, status: 'partial', subtitleRepairStatus: 'failed', subtitleError: 'owned batch unavailable',
+    subtitleTranslationPartial: newer, subtitleTranslationProgress: prefixProgress(source, 2), ...changes }));
+  for (changes of [
+    { subtitleTranslationPartial: [{ ...newer[0], id: 999 }, newer[1]] },
+    { subtitleTranslationPartial: [newer[0], { ...newer[1], end: newer[1].end + 0.1 }] },
+    { subtitleTranslationProgress: { ...prefixProgress(source, 2), sourceFingerprint: '0'.repeat(64) } },
+    { subtitleTranslationProgress: { ...prefixProgress(source, 2), completedCues: 3 } }
+  ]) {
+    const original = { id: 'c'.repeat(32), path: 'C:/synthetic-only/owned-prefix.mp4', ...metadata({ transcript: source }), status: 'partial',
+      subtitleTranslationPartial: oldPrefix, subtitleTranslationProgress: prefixProgress(source, 1) };
+    const result = await sendRemoteAnalysis(original, { remoteUrl: f.base, connectionCode: f.status.connectionCode, dataDir: f.dataDir,
+      operation: 'translation-only', subtitleQuality: 'fast' });
+    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.deepEqual(result.subtitleTranslationPartial, oldPrefix);
+    assert.deepEqual(result.subtitleTranslationProgress, original.subtitleTranslationProgress);
+    assert.ok(result.subtitleError);
+  }
 });
 
 test('one translation lane can finish beside a held ASR job while ordinary analysis remains serialized', async t => {

@@ -96,10 +96,14 @@ test('summary list API is opt-in and full detail, default full list and export p
   assert.deepEqual(compact[0].health, recordHealth(f.records[1]));
   const full = (await (await f.request('/results')).json()).results;
   for (const record of f.records) {
-    assert.deepEqual(full.find(result => result.id === record.id), { ...record, health: recordHealth(record) });
+    const metadata = compact.find(result => result.id === record.id);
+    const derived = { subtitleTranslatedCount: metadata.subtitleTranslatedCount,
+      subtitleTranslationSourceFingerprint: metadata.subtitleTranslationSourceFingerprint };
+    assert.match(derived.subtitleTranslationSourceFingerprint, /^[a-f0-9]{64}$/);
+    assert.deepEqual(full.find(result => result.id === record.id), { ...record, ...derived, health: recordHealth(record) });
     const detailResponse = await f.request(`/results/${record.id}`);
     assert.equal(detailResponse.status, 200);
-    assert.deepEqual(await detailResponse.json(), { ...record, health: recordHealth(record) });
+    assert.deepEqual(await detailResponse.json(), { ...record, ...derived, health: recordHealth(record) });
     const persisted = JSON.parse(await fs.readFile(path.join(f.dataDir, 'results', record.id + '.json'), 'utf8'));
     assert.deepEqual(persisted, record, 'detail hydration and compact listing do not rewrite persisted data');
   }
@@ -110,6 +114,22 @@ test('summary list API is opt-in and full detail, default full list and export p
   assert.equal(await download.text(), 'synthetic full export');
   assert.deepEqual(f.exported().selected, f.records, 'even a summary query cannot replace the full exporter input with compact records');
   assert.equal(f.exported().context.dataDir, f.dataDir);
+});
+
+test('editing a full detail response preserves derived subtitle identity without persisting presentation metadata', async t => {
+  const f = await apiFixture(t), id = f.records[0].id;
+  const before = await (await f.request(`/results/${id}`)).json();
+  const response = await f.request(`/results/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ summary: '수정한 합성 열차 안내입니다.' }) });
+  assert.equal(response.status, 200);
+  const edited = await response.json();
+  assert.equal(edited.subtitleTranslationSourceFingerprint, before.subtitleTranslationSourceFingerprint);
+  assert.equal(edited.subtitleTranslatedCount, before.subtitleTranslatedCount);
+  assert.equal(edited.summary, '수정한 합성 열차 안내입니다.');
+  const persisted = JSON.parse(await fs.readFile(path.join(f.dataDir, 'results', id + '.json'), 'utf8'));
+  assert.equal(persisted.subtitleTranslatedCount, undefined);
+  assert.equal(persisted.subtitleTranslationSourceFingerprint, undefined);
+  assert.deepEqual(persisted.transcript, f.records[0].transcript);
 });
 
 test('detail API returns 404 for unknown and malformed saved IDs', async t => {

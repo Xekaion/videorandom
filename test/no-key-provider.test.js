@@ -6,6 +6,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
 const { createNoKeyProvider, isVerifiedFullTranscription } = require('../lib/no-key-provider');
+const crypto = require('crypto');
 
 function mockSpawn(handler, { statusHandler } = {}) {
     const calls = [];
@@ -1004,4 +1005,228 @@ test('fast translation-only repair retains current accurate proof and ordinary f
         assert.equal(result.subtitleTranslationPartial, undefined);
         assert.deepEqual(result.transcriptionQuality, quality);
     }
+});
+
+const longJapanese = '合成の列車が到着します。安全のためにホームの内側で待ち、案内と出発時間を確認してください。';
+const faithfulKorean = '합성 열차가 도착합니다. 안전을 위해 승강장 안쪽에서 기다리고 안내와 출발 시간을 확인하세요.';
+async function translationGuardFixture(t, { count = 1, text = () => longJapanese, respond } = {}) {
+    const source = Array.from({ length: count }, (_, index) => ({ id: index, start: index * 13 + 0.25,
+        end: index * 13 + 3.75, text: text(index) }));
+    const duration = count * 13 + 5;
+    const f = await fixture(t, { transcript: source, transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
+        transcriptionQuality: fullQuality(duration), duration, summary: '보관된 합성 열차 안내', frames: [] });
+    const requests = [];
+    const mocked = mockSpawn(async call => {
+        assert.equal(call.args[0], 'exec', 'the fixture must not invoke recognition, login probes or summary');
+        const input = JSON.parse(call.input.split('자료 JSON:\n').at(-1));
+        const item = { input, start: input.subtitles[0].index, count: input.subtitles.length, review: Boolean(input.draftSubtitles) };
+        requests.push(item);
+        const response = respond ? await respond(item) : null;
+        await writeResponse(call, response || { subtitles: input.subtitles.map(cue => ({ index: cue.index, text: faithfulKorean })), terms: [] });
+    });
+    const instance = provider(mocked.spawnImpl);
+    return { ...f, source, requests, mocked, instance,
+        run: settings => instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'accurate', ...settings }) };
+}
+
+test('a short accurate draft reaches source review and only its corrected final translation is committed', async t => {
+    const f = await translationGuardFixture(t, { respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
+        text: item.review ? faithfulKorean : '네.' })), terms: [] }) });
+    const result = await f.run();
+    assert.deepEqual(f.requests.map(item => item.review), [false, true]);
+    assert.deepEqual(f.requests[1].input.omissionCheckIndexes, [0]);
+    assert.equal(result.subtitleTranslation[0].text.replace(/\n/g, ' '), faithfulKorean);
+    assert.equal(result.subtitleRepairStatus, 'completed');
+    const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
+    assert.equal(saved.translationVersion, 4); assert.equal(saved.subtitles[0].text.includes('네.'), false);
+});
+
+test('fast translation still rejects a short result without starting an additional review', async t => {
+    const f = await translationGuardFixture(t, { respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index, text: '네.' })), terms: [] }) });
+    const result = await f.run({ subtitleQuality: 'fast' });
+    assert.equal(f.requests.length, 1); assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.match(result.subtitleError, /지나치게 짧아/); assert.equal(result.subtitleTranslation, undefined);
+});
+
+test('faithful numeric compression and full-width digits count as translation content in both profiles and checkpoints', async t => {
+    for (const profile of ['fast', 'accurate']) {
+        const f = await translationGuardFixture(t, { text: () => '一億二千三百四十五万六千七百八十九、'.repeat(3),
+            respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
+                text: '１２３，４５６，７８９ · １２３，４５６，７８９ · １２３，４５６，７８９' })), terms: [] }) });
+        const result = await f.run({ subtitleQuality: profile });
+        assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+        const calls = f.requests.length;
+        await f.run({ subtitleQuality: profile });
+        assert.equal(f.requests.length, calls, 'numeric subtitles pass the exact checkpoint validator as well');
+    }
+});
+
+test('proper-name comparison normalizes harmless whitespace and NFC while preserving real semantic conflicts', async t => {
+    const f = await translationGuardFixture(t, { count: 81, text: () => '太郎は駅にいます。', respond: item => {
+        if (item.start === 80) assert.deepEqual(item.input.properNames, [{ source: '太郎', translation: '타로' }]);
+        if (item.review) assert.deepEqual(item.input.draftTerms, [{ source: '太郎', translation: '타로' }]);
+        return { subtitles: item.input.subtitles.map(cue => ({ index: cue.index, text: '타로는 역에 있습니다.' })),
+            terms: [{ source: item.start === 0 ? ' 太郎 ' : '太郎', translation: item.start === 0 ? '타로'.normalize('NFD') + ' ' : '타로' }] };
+    } });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError); assert.equal(result.subtitleTranslation.length, 81);
+    const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
+    assert.deepEqual(saved.terms, [{ source: '太郎', translation: '타로' }]);
+});
+
+test('a genuinely conflicting proper-name mapping stops the new draft before review or length correction', async t => {
+    const f = await translationGuardFixture(t, { count: 81, text: () => '太郎は駅にいます。', respond: item => ({
+        subtitles: item.input.subtitles.map(cue => ({ index: cue.index, text: item.start === 80 ? '네.' : '타로는 역에 있습니다.' })),
+        terms: [{ source: '太郎', translation: item.start === 80 ? '다로' : '타로' }]
+    }) });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'failed'); assert.match(result.subtitleError, /표기가 앞 구간과 일치하지 않습니다/);
+    assert.deepEqual(f.requests.map(item => [item.start, item.review]), [[0, false], [0, true], [80, false]]);
+    assert.equal(result.subtitleTranslationPartial.length, 80);
+});
+
+test('one final-review length failure can use at most four smaller fully reviewed groups without committing the rejected draft', async t => {
+    const progress = [];
+    const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
+        text: item.review && item.count > 20 ? '네.' : faithfulKorean })), terms: [] }) });
+    const result = await f.run({ onProgress: stage => progress.push(stage) });
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.equal(f.requests.length, 10, 'one original draft/review plus at most eight bounded correction calls');
+    assert.deepEqual(f.requests.map(item => [item.start, item.count]), [[0, 80], [0, 80], [0, 20], [0, 20], [20, 20], [20, 20], [40, 20], [40, 20], [60, 20], [60, 20]]);
+    assert.ok(result.subtitleTranslation.every(cue => cue.text.replace(/\n/g, ' ') === faithfulKorean));
+    assert.ok(progress.some(stage => /작은 묶음 1\/4/.test(stage)));
+    assert.deepEqual(result.transcript, f.source);
+});
+
+test('the length correction budget is global and a second failing large batch stops with the first reviewed prefix', async t => {
+    const f = await translationGuardFixture(t, { count: 160, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
+        text: item.review && item.count > 20 ? '네.' : faithfulKorean })), terms: [] }) });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'failed'); assert.match(result.subtitleError, /지나치게 짧아/);
+    assert.equal(f.requests.length, 12); assert.equal(result.subtitleTranslationPartial.length, 80);
+    assert.equal(f.requests.some(item => item.start >= 80 && item.count <= 20), false);
+    assert.equal(result.subtitleTranslationProgress.translationComplete, false);
+});
+
+test('a failing small correction group stops without recursion and preserves only already reviewed groups', async t => {
+    const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
+        text: item.review && (item.count > 20 || item.start === 20) ? '네.' : faithfulKorean })), terms: [] }) });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 6);
+    assert.equal(result.subtitleTranslationPartial.length, 20);
+    assert.ok(result.subtitleTranslationPartial.every(cue => cue.text.replace(/\n/g, ' ') === faithfulKorean));
+    const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
+    assert.equal(saved.subtitles.length, 20); assert.equal(saved.translationComplete, false);
+});
+
+for (const failure of ['safety refusal', 'quota usage limit', '401 authentication failed', '503 service unavailable', 'execution timeout']) {
+    test(`an upstream ${failure} never starts length correction or automatic retries`, async t => {
+        const f = await translationGuardFixture(t, { count: 80, respond: item => {
+            if (item.review) throw Object.assign(new Error('Owned synthetic ' + failure), { exitCode: 1 });
+            return null;
+        } });
+        const result = await f.run();
+        assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 2);
+        assert.match(result.subtitleError, new RegExp(failure)); assert.equal(result.subtitleTranslation, undefined);
+        assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
+    });
+}
+
+for (const failure of ['wrong-index', 'wrong-count', 'foreign-text', 'unconfirmed-term']) {
+    test(`a ${failure} error takes precedence over a short review and never starts correction`, async t => {
+        const f = await translationGuardFixture(t, { count: 80, respond: item => {
+            const subtitles = item.input.subtitles.map(cue => ({ index: cue.index, text: item.review ? '네.' : faithfulKorean }));
+            const terms = item.review ? [] : [{ source: '太郎', translation: '타로' }];
+            if (item.review && failure === 'wrong-index') subtitles[0].index++;
+            if (item.review && failure === 'wrong-count') subtitles.pop();
+            if (item.review && failure === 'foreign-text') subtitles[0].text = 'これは翻訳されていません。';
+            if (item.review && failure !== 'unconfirmed-term') terms.push({ source: '太郎', translation: '타로' });
+            return { subtitles, terms };
+        } });
+        const result = await f.run();
+        assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 2);
+        assert.doesNotMatch(result.subtitleError, /지나치게 짧아/);
+    });
+}
+
+for (const refusal of ['이 요청의 번역을 제공할 수 없습니다.', '정책상 이 자료의 번역은 불가합니다.',
+    '정책으로 인해 요청하신 텍스트를 번역해 드릴 수 없습니다.', '이러한 콘텐츠의 번역을 도와드릴 수 없습니다.',
+    '해당 내용은 번역할 수 없습니다.', '이 내용은 번역을 할 수 없습니다.', '요청하신 대사는 번역할 수 없습니다.',
+    'I cannot provide a translation of this content.']) {
+    test(`an explicit task refusal inside structured subtitles never becomes a length correction: ${refusal}`, async t => {
+        const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
+            text: item.review ? refusal : faithfulKorean })), terms: [] }) });
+        const result = await f.run();
+        assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 2);
+        assert.match(result.subtitleError, /요청을 거절/);
+    });
+}
+
+test('ordinary dialogue about being unable to help is not classified as a translation-service refusal', async t => {
+    const f = await translationGuardFixture(t, { respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
+        text: '내가 지금 바빠서 도와줄 수 없어. 오늘 저녁에는 다시 이야기하자.' })), terms: [] }) });
+    assert.equal((await f.run()).subtitleRepairStatus, 'completed'); assert.equal(f.requests.length, 2);
+});
+
+for (const phase of ['draft', 'review']) for (const refusal of [
+    '죄송하지만 해당 요청을 도와드릴 수 없습니다.', '이 요청을 도와드릴 수 없습니다.', '요청하신 작업을 수행할 수 없습니다.'
+]) test(`an explicit scoped task refusal in the ${phase} stops without correction: ${refusal}`, async t => {
+    const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
+        text: item.review === (phase === 'review') ? refusal : faithfulKorean })), terms: [] }) });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'failed'); assert.match(result.subtitleError, /요청을 거절/);
+    assert.equal(f.requests.length, phase === 'draft' ? 1 : 2);
+    assert.equal(f.requests.some(item => item.count <= 20), false);
+    assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
+});
+
+test('the ordinary dialogue sentence cannot help is allowed without a task or request subject', async t => {
+    const f = await translationGuardFixture(t, { text: () => '助けることができません。', respond: item => ({
+        subtitles: item.input.subtitles.map(cue => ({ index: cue.index, text: '도와줄 수 없다.' })), terms: []
+    }) });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.equal(result.subtitleTranslation[0].text, '도와줄 수 없다.'); assert.equal(f.requests.length, 2);
+});
+
+async function seedVersionThreePrefix(f, change = () => {}, prefixLength = 80) {
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify(f.source.map(cue => [cue.id, cue.start, cue.end, cue.text]))).digest('hex');
+    const payload = { version: 1, translationVersion: 3, targetLanguage: 'ko', subtitleQuality: 'accurate', reviewPasses: 2,
+        language: 'ko', sourceFingerprint: fingerprint, totalCues: f.source.length, completedCues: prefixLength,
+        complete: false, sourceComplete: true, translationComplete: false,
+        subtitles: f.source.slice(0, prefixLength).map((cue, index) => ({ index, ...cue, text: faithfulKorean })), terms: [] };
+    change(payload);
+    const index = crypto.createHash('sha256').update(`videorandom-subtitles\0${3}\0ko\0accurate\0${fingerprint}`).digest('hex');
+    const directory = path.join(f.dataDir, 'checkpoints');
+    await fs.promises.mkdir(directory, { recursive: true });
+    await fs.promises.writeFile(path.join(directory, index + '-translation-ko-v3.json'), JSON.stringify(payload));
+}
+
+test('an exact fully reviewed 160-cue version-three prefix migrates to version four without retranslating the prefix', async t => {
+    const f = await translationGuardFixture(t, { count: 161 });
+    await seedVersionThreePrefix(f, saved => { saved.terms = [{ source: ' 太郎 ', translation: '타로'.normalize('NFD') + ' ' }]; }, 160);
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.deepEqual(f.requests.map(item => item.start), [160, 160]);
+    const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
+    assert.equal(saved.translationVersion, 4); assert.equal(saved.subtitles.length, 161);
+    assert.deepEqual(saved.terms, [{ source: '太郎', translation: '타로' }]);
+});
+
+for (const [label, change] of [
+    ['older version two', saved => { saved.translationVersion = 2; }],
+    ['older version one', saved => { saved.translationVersion = 1; }],
+    ['single-pass unreviewed prefix', saved => { saved.reviewPasses = 1; }],
+    ['different quality profile', saved => { saved.subtitleQuality = 'fast'; }],
+    ['different target language', saved => { saved.targetLanguage = 'ja'; }],
+    ['different cue ID', saved => { saved.subtitles[0].id = 'changed'; }],
+    ['different cue time', saved => { saved.subtitles[0].start = 0.75; }],
+    ['different source fingerprint', saved => { saved.sourceFingerprint = '0'.repeat(64); }],
+    ['untranslated prefix', saved => { saved.subtitles[0].text = 'これは翻訳されていません。'; }],
+    ['unverified short prefix', saved => { saved.subtitles[0].text = '네.'; }]
+]) test(`version-three migration rejects an incompatible checkpoint: ${label}`, async t => {
+    const f = await translationGuardFixture(t, { count: 81 }); await seedVersionThreePrefix(f, change);
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.deepEqual(f.requests.map(item => item.start), [0, 0, 80, 80]);
 });

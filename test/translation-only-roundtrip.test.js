@@ -171,3 +171,157 @@ test('saved Japanese cues repair Korean subtitles through service, engine, LAN, 
     assert.equal(journal.includes('駅へ行きましょう'), false);
     assert.equal(journal.includes(hostStatus.connectionCode), false);
   });
+
+test('failed remote translation repairs keep the newly reviewed prefix and resume remaining batches without overwriting complete SRT',
+  { timeout: 30000 }, async t => {
+    const directory = path.resolve(await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-translation-roundtrip-')));
+    const dataDir = path.join(directory, 'client'), hostDataDir = path.join(directory, 'host');
+    const mediaDir = path.join(directory, 'media'), video = path.join(mediaDir, '합성 장편 열차 안내.mp4');
+    const originalId = '5'.repeat(32);
+    const source = Array.from({ length: 161 }, (_, index) => ({ id: index, start: index * 13 + 0.25, end: index * 13 + 3.75,
+      text: `合成の列車案内です。番号は ${index} です。` }));
+    const translated = index => `검수한 합성 열차 안내 ${index}번입니다.`;
+    const order = [], forbidden = [];
+    let failReviewAt = 80, host, service, server;
+    t.after(async () => {
+      if (service) await service.stop();
+      if (server?.listening) await new Promise(resolve => { server.close(resolve); server.closeAllConnections?.(); });
+      if (host) await host.stop();
+      assert.equal(path.dirname(directory), path.resolve(os.tmpdir()));
+      assert.ok(path.basename(directory).startsWith('videorandom-translation-roundtrip-'));
+      await fs.rm(directory, { recursive: true, force: true });
+    });
+    await fs.mkdir(mediaDir, { recursive: true });
+    await fs.mkdir(path.join(dataDir, 'results'), { recursive: true });
+    const dummyVideo = Buffer.from('Owned synthetic long-video placeholder. No decoding or recognition is allowed.');
+    await fs.writeFile(video, dummyVideo);
+    const stat = await fs.stat(video);
+    const original = { id: originalId, name: path.basename(video), path: video, ext: 'MP4', size: 1, duration: 2100,
+      status: 'partial', hasAudio: true, analysisMode: 'remote', analysisProvider: 'codex-chatgpt',
+      analyzedAt: '2026-10-10T01:02:03.000Z', savedAt: '2026-10-10T01:03:04.000Z',
+      summary: '합성 장편 열차 안내의 보관된 요약입니다.', plot: '안내자가 기차 정보를 순서대로 읽는다.', dialogueSummary: '합성 열차 안내',
+      labels: ['열차'], warnings: [], frames: [], sourceFile: { sizeBytes: stat.size, mtimeMs: stat.mtimeMs },
+      transcript: source, transcriptSource: 'audio:faster-whisper large-v3', transcriptLanguage: 'ja',
+      transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+        language: 'ja', device: 'cuda', complete: true, processingComplete: true, duration: 2100, processedUntil: 2100,
+        audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false, speechSeconds: 563.5, uncoveredSpeechSeconds: 0 }, warnings: [] },
+      subtitleError: 'Synthetic earlier translation interrupted' };
+    assert.equal(isVerifiedFullTranscription(original, 'accurate'), true);
+    const originalBytes = JSON.stringify(original);
+    await fs.writeFile(path.join(dataDir, 'results', originalId + '.json'), originalBytes);
+    const completeSrtPath = path.join(mediaDir, '합성 장편 열차 안내.ko.srt');
+    const completeSrt = '1\n00:00:00,000 --> 00:00:01,000\n독립적으로 보관된 기존 완성 자막입니다.\n';
+    await fs.writeFile(completeSrtPath, completeSrt);
+
+    // A fake child is the only provider path. Its bounded synthetic batches
+    // use the real validation/checkpoint code without creating any process.
+    const spawnImpl = (binary, args, spawnOptions) => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
+      child.killed = false;
+      const chunks = [];
+      child.stdin.on('data', chunk => chunks.push(chunk));
+      child.kill = () => { if (!child.killed) { child.killed = true; queueMicrotask(() => child.emit('close', null)); } };
+      child.stdin.on('finish', () => queueMicrotask(async () => {
+        try {
+          assert.equal(binary, 'owned-fake-codex'); assert.equal(args[0], 'exec');
+          assert.equal(args.includes('--image'), false); assert.equal(args.includes('login'), false);
+          assert.equal(spawnOptions.shell, false); assert.equal(spawnOptions.windowsHide, true);
+          const schemaPath = args[args.indexOf('--output-schema') + 1], outputPath = args[args.indexOf('--output-last-message') + 1];
+          for (const filename of [schemaPath, outputPath]) {
+            const relative = path.relative(hostDataDir, path.resolve(filename));
+            assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+          }
+          const schema = JSON.parse(await fs.readFile(schemaPath, 'utf8'));
+          assert.ok(schema.properties.subtitles); assert.equal(schema.properties.summary, undefined);
+          const input = JSON.parse(Buffer.concat(chunks).toString('utf8').split('자료 JSON:\n').at(-1));
+          const start = input.subtitles[0].index, review = Boolean(input.draftSubtitles);
+          order.push(`${review ? 'review' : 'draft'}:${start}`);
+          assert.deepEqual(input.subtitles.map(cue => cue.text), source.slice(start, start + input.subtitles.length).map(cue => cue.text));
+          if (review && start === failReviewAt) {
+            child.stderr.write('503 Synthetic translation review service unavailable');
+            child.emit('close', 1); return;
+          }
+          await fs.writeFile(outputPath, JSON.stringify({ subtitles: input.subtitles.map(cue => ({ index: cue.index,
+            text: review ? translated(cue.index) : `미검수 합성 초안 ${cue.index}번입니다.` })), terms: [] }));
+          if (!child.killed) child.emit('close', 0);
+        } catch (error) { child.emit('error', error); }
+      }));
+      return child;
+    };
+    const provider = createNoKeyProvider({ spawnImpl, environment: { VIDEORANDOM_CODEX: 'owned-fake-codex',
+      VIDEORANDOM_PYTHON: 'forbidden-fake-python' }, platform: 'win32', statusCacheMs: 0 });
+    host = createLanAnalysis({ dataDir: hostDataDir, processPackage: async (pkg, context) => {
+      assert.equal(pkg.operation, 'translation-only'); assert.equal(pkg.audioPath, null); assert.equal(pkg.transcribeAudio, false);
+      assert.deepEqual(pkg.record.frames, []); assert.deepEqual(await fs.readdir(pkg.framesDir), []);
+      return provider.translateKoreanOnly(pkg.record, { dataDir: hostDataDir, signal: context.signal, onProgress: context.onProgress,
+        subtitleQuality: pkg.subtitleQuality, forceTranslation: pkg.forceTranslation });
+    } });
+    const hostStatus = await host.start({ port: 0, host: '127.0.0.1' });
+    const deny = name => async () => { forbidden.push(name); throw new Error('Media prerequisite invoked: ' + name); };
+    const engine = createCatalogEngine({ extractionImpl: { analyzeVideo: deny('extract'), getToolsStatus: deny('tools'), runProcess: deny('media-process') },
+      providerImpl: { getProviderStatus: deny('provider-status'), analyzeExtracted: deny('summary'), translateKoreanOnly: deny('client-translate'), transcribeLocalAudio: deny('ASR') } });
+    service = createAnalysisService({ dataDir, engine, exporter: {}, deferAutoStart: true,
+      connectionStore: { getConnection: async () => ({ remoteUrl: '', connectionCode: '', remembered: false }),
+        saveConnection: async value => ({ ...value, remembered: true }) }, lan: { status: () => ({ running: false }), stop: async () => {} } });
+    await service.ready;
+    const app = express(); app.use(express.json()); app.use('/api/analysis', service.router);
+    server = await new Promise(resolve => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+    const base = `http://127.0.0.1:${server.address().port}/api/analysis`;
+    const request = (endpoint, body) => httpJsonFixture(base, endpoint, body);
+    const repair = async id => {
+      const started = await request(`/results/${id}/subtitles/repair`, { options: { mode: 'remote', subtitleQuality: 'accurate',
+        remoteUrl: `http://127.0.0.1:${hostStatus.port}`, connectionCode: hostStatus.connectionCode } });
+      assert.equal(started.status, 202, started.data.error);
+      for (let count = 0; count < 500; count++) {
+        const job = (await request('/jobs/' + started.data.id)).data;
+        if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+          assert.equal(job.results.length, 1, job.error); return job.results[0];
+        }
+        await delay(10);
+      }
+      throw new Error('Owned synthetic round-trip repair did not finish');
+    };
+    const preserved = ['transcript', 'transcriptionQuality', 'transcriptSource', 'transcriptLanguage', 'sourceFile', 'summary', 'plot', 'dialogueSummary', 'analyzedAt', 'frames'];
+    const checkPartial = async (record, count) => {
+      assert.equal(record.status, 'partial'); assert.equal(record.subtitleRepairStatus, 'failed');
+      assert.match(record.subtitleError, /503.*Synthetic translation review service unavailable/);
+      assert.equal(record.subtitleTranslationProgress.translationComplete, false);
+      assert.equal(record.subtitleTranslationProgress.completedCues, count);
+      assert.equal(record.subtitleTranslationPartial.length, count);
+      assert.deepEqual(record.subtitleTranslationPartial.map(cue => cue.text), source.slice(0, count).map((cue, index) => translated(index)));
+      for (const key of preserved) assert.deepEqual(record[key], original[key], key);
+      const saved = JSON.parse(await fs.readFile(path.join(dataDir, 'results', record.id + '.json'), 'utf8'));
+      assert.equal(saved.subtitleTranslationPartial.length, count);
+      assert.equal(record.subtitleAutoSave.status, 'saved'); assert.equal(record.subtitleAutoSave.partial, true);
+      assert.ok(record.subtitleAutoSave.path.endsWith('.ko.partial.srt'));
+      const partialSrt = await fs.readFile(record.subtitleAutoSave.path, 'utf8');
+      assert.equal(partialSrt, subtitleText(record, { language: 'ko', format: 'srt', partial: true }));
+      assert.equal((partialSrt.match(/^\d+\n\d{2}:/gm) || []).length, count);
+      assert.equal(await fs.readFile(completeSrtPath, 'utf8'), completeSrt);
+    };
+
+    const first = await repair(originalId);
+    assert.deepEqual(order, ['draft:0', 'review:0', 'draft:80', 'review:80']);
+    await checkPartial(first, 80);
+
+    // This user-authorized second repair starts with a verified eighty-cue
+    // prefix. A later failed review must still deliver the new 160-cue prefix.
+    failReviewAt = 160; order.length = 0;
+    const second = await repair(first.id);
+    assert.deepEqual(order, ['draft:80', 'review:80', 'draft:160', 'review:160']);
+    await checkPartial(second, 160);
+    assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'results', first.id + '.json'), 'utf8')).subtitleTranslationPartial.length, 80);
+
+    // Explicitly repair the remainder after the synthetic outage is cleared;
+    // no automatic retries or paid/account calls exist in this fixture.
+    failReviewAt = null; order.length = 0;
+    const completed = await repair(second.id);
+    assert.deepEqual(order, ['draft:160', 'review:160']);
+    assert.equal(completed.subtitleRepairStatus, 'completed'); assert.equal(completed.subtitleTranslation.length, 161);
+    assert.equal(completed.subtitleTranslationPartial, undefined);
+    assert.equal(completed.subtitleTranslationProgress.translationComplete, true);
+    assert.equal(await fs.readFile(completeSrtPath, 'utf8'), completeSrt);
+    assert.deepEqual(forbidden, []); assert.deepEqual(await fs.readFile(video), dummyVideo);
+    assert.equal(await fs.readFile(path.join(dataDir, 'results', originalId + '.json'), 'utf8'), originalBytes);
+  });

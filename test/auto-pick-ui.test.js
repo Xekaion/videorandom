@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
+const { catalogRecord: compactRecord } = require('../lib/catalog-record');
 const fingerprint = transcript => crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex');
 
 const publicDir = path.join(__dirname, '..', 'public');
@@ -1296,7 +1297,7 @@ test('reviewed partial Korean cues remain visible and download explicitly as par
   assert(ui.elements.get('catalogSubtitleNotice').textContent.includes('부분 자막 1 / 2구간'));
   const lines = ui.elements.get('catalogTranscript').childNodes;
   assert.deepEqual(lines[0].childNodes[1].childNodes.map(node => node.textContent), ['こんにちは。', '안녕하세요.']);
-  assert.deepEqual(lines[1].childNodes[1].childNodes.map(node => node.textContent), ['また明日。', '한국어 번역 대기']);
+  assert.deepEqual(lines[1].childNodes[1].childNodes.map(node => node.textContent), ['また明日。', '한국어 미번역 · 번역이 중단되었습니다']);
   ui.elements.get('catalogSubtitleView').value = 'ko';
   await ui.elements.get('catalogSubtitleView').dispatch('change');
   assert(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes[0].textContent.includes('원문: また明日。'));
@@ -1305,6 +1306,148 @@ test('reviewed partial Korean cues remain visible and download explicitly as par
   assert(ui.body.childNodes.some(element => element.download?.endsWith('.ko.partial.srt') && element.clicked));
   assert(ui.elements.get('catalogSubtitleAutoSaveNotice').textContent.includes('영상 폴더에 저장 버튼'));
   assert.equal(ui.elements.get('catalogSubtitleAutoSaveNotice').classList.contains('hidden'), false);
+});
+
+test('saved untranslated cues show interruption or repair need with exact counts, last translated time, and the real cause', async () => {
+  for (const failed of [false, true]) {
+    const record = { ...partialTimedRecord(), subtitleError: failed ? '합성 번역 서비스 HTTP 503' : undefined };
+    const ui = await boot({ records: [record] });
+    await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+    const notice = ui.elements.get('catalogSubtitleNotice').textContent;
+    assert(notice.includes('한국어 번역 1 / 2구간'));
+    assert(notice.includes('마지막 번역 시각 00:00:03.500'));
+    assert(notice.includes(failed ? '한국어 번역이 중단되었습니다' : '번역 복구가 필요합니다'));
+    if (failed) assert(notice.includes(record.subtitleError));
+    assert.equal(notice.includes('진행 중입니다'), false);
+    assert.equal(ui.elements.get('catalogSubtitleRepair').textContent, '남은 한국어 자막 번역 계속');
+    assert.equal(ui.elements.get('catalogDetailHealth').textContent, '한국어 자막 미번역 · 복구 필요');
+    const missing = ui.elements.get('catalogTranscript').childNodes[1].childNodes[1];
+    assert.deepEqual(missing.childNodes.map(node => node.textContent), ['また明日。',
+      failed ? '한국어 미번역 · 번역이 중단되었습니다' : '한국어 미번역 · 번역 복구가 필요합니다']);
+    ui.elements.get('catalogSubtitleView').value = 'original';
+    await ui.elements.get('catalogSubtitleView').dispatch('change');
+    assert.deepEqual(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes.map(node => node.textContent), ['また明日。']);
+  }
+});
+
+test('only the current video running translation marks missing cues as in progress and terminal polling removes that label', async () => {
+  const record = partialTimedRecord();
+  const neighbour = { ...partialTimedRecord(), id: 'other-transcript', path: picked('다른 합성 안내.mp4').path, name: '다른 합성 안내.mp4' };
+  const active = processingJob(record, { id: 'subtitle-activity', operation: 'translation-only', stage: '한국어 자막 번역 2/4' });
+  const attempted = { ...record, id: 'stopped-translation', operation: 'translation-only', repairOf: record.id,
+    subtitleRepairStatus: 'partial', subtitleError: '합성 번역 연결 중단' };
+  const terminal = { ...active, status: 'completed', completed: 1, results: [attempted] };
+  const ui = await boot({ records: [record, neighbour], initialActiveJob: active, jobResponse: () => terminal });
+  await catalogRow(ui, neighbour.path).childNodes[1].childNodes[0].dispatch('click');
+  assert(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes[1].textContent.includes('한국어 미번역'));
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes[1].textContent,
+    '한국어 번역 중 · 아직 처리되지 않은 구간');
+  assert(ui.elements.get('catalogSubtitleNotice').textContent.includes('이 영상의 한국어 번역이 진행 중입니다'));
+  await ui.runTimers(1500);
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes[1].textContent,
+    '한국어 미번역 · 번역이 중단되었습니다');
+  assert(ui.elements.get('catalogJobTitle').textContent.includes('한국어 번역 미완료'));
+  assert.equal(ui.elements.get('catalogJobTitle').textContent.includes('작업 완료'), false);
+  assert(ui.elements.get('catalogNotice').textContent.includes('한국어 번역은 완료되지 않았습니다'));
+  assert(ui.elements.get('catalogNotice').textContent.includes(attempted.subtitleError));
+});
+
+test('all translated source cues with an unfinished source audit are not labeled as an interrupted translation', async () => {
+  const original = partialTimedRecord();
+  const record = { ...original, operation: 'translation-only', subtitleRepairStatus: 'completed',
+    subtitleTranslationPartial: timedRecord().subtitleTranslation,
+    subtitleTranslationProgress: { ...original.subtitleTranslationProgress, completedCues: 2, translationComplete: true },
+    subtitleError: '합성 원문 발화 신뢰도 확인 필요' };
+  const completed = processingJob(record, { operation: 'translation-only', status: 'completed', completed: 1, results: [record] });
+  const ui = await boot({ records: [record], initialActiveJob: completed });
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  const notice = ui.elements.get('catalogSubtitleNotice').textContent;
+  assert(notice.includes('한국어 번역 2 / 2구간'));
+  assert(notice.includes('마지막 번역 시각 00:00:08.250'));
+  assert(notice.includes('한국어 번역은 모두 끝났습니다'));
+  assert(notice.includes('원어 인식 확인이 남아'));
+  assert(notice.includes(record.subtitleError));
+  assert.equal(notice.includes('번역이 중단되었습니다'), false);
+  assert.equal(ui.elements.get('catalogJobTitle').textContent.includes('한국어 번역 미완료'), false);
+  assert.equal(ui.elements.get('catalogSubtitleRepair').textContent, '한국어 자막 번역만 복구');
+  assert.equal(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes[1].textContent, '내일 또 만나요.');
+});
+
+test('reopened saved successful translation repairs retain their completed label independently of the old job', async () => {
+  for (const partial of [false, true]) {
+    const source = partialTimedRecord();
+    const record = { ...source, operation: 'translation-only', subtitleRepairStatus: 'completed', subtitleError: undefined,
+      ...(partial ? { subtitleTranslationPartial: timedRecord().subtitleTranslation,
+        subtitleTranslationProgress: { ...source.subtitleTranslationProgress, completedCues: 2, translationComplete: true } }
+        : { subtitleLanguage: 'ko', subtitleTranslation: timedRecord().subtitleTranslation,
+          subtitleTranslationPartial: undefined, subtitleTranslationProgress: undefined }) };
+    for (let reopen = 0; reopen < 2; reopen++) {
+      const ui = await boot({ records: [plain(record)] });
+      await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+      assert.equal(ui.elements.get('catalogDetailHealth').textContent, '한국어 번역 완료 · 원어 확인 필요');
+      assert.equal(classNode(catalogRow(ui, record.path), 'catalog-status').textContent, '한국어 번역 완료 · 원어 확인 필요');
+      assert(ui.elements.get('catalogDetailRepairNote').textContent.includes('한국어 번역은 모두 끝났습니다'));
+      assert.equal(ui.elements.get('catalogDetailProgress').classList.contains('hidden'), true);
+      assert.equal(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes[1].textContent, '내일 또 만나요.');
+      assert.equal(ui.calls.some(call => call.url.includes('/jobs/')), false);
+    }
+  }
+});
+
+test('persisted repair labels preserve active-job priority and never turn missing summaries or unverified legacy Korean cues into a ready analysis', async () => {
+  const saved = { ...timedRecord(), operation: 'translation-only', subtitleRepairStatus: 'completed', status: 'partial' };
+  const active = processingJob(saved, { operation: 'translation-only', stage: '한국어 자막 번역 1/1' });
+  const busy = await boot({ records: [saved], initialActiveJob: active });
+  await catalogRow(busy, saved.path).childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(busy.elements.get('catalogDetailHealth').textContent, '자막 번역 중…');
+  assert.equal(busy.elements.get('catalogDetailProgress').classList.contains('hidden'), false);
+  for (const record of [
+    { ...saved, summary: '', plot: '', status: 'failed' },
+    { ...timedRecord(), summary: '', plot: '', status: 'failed' },
+    { ...partialTimedRecord(), operation: 'translation-only', subtitleRepairStatus: 'completed',
+      subtitleTranslationPartial: timedRecord().subtitleTranslation,
+      subtitleTranslationProgress: { ...partialTimedRecord().subtitleTranslationProgress, completedCues: 2, translationComplete: true, sourceFingerprint: '0'.repeat(64) } }
+  ]) {
+    const ui = await boot({ records: [record] });
+    await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+    assert.notEqual(ui.elements.get('catalogDetailHealth').textContent, '정리 완료');
+    if (!record.summary && record.operation === 'translation-only') {
+      assert.equal(ui.elements.get('catalogDetailHealth').textContent, '한국어 번역 완료 · 분석 확인 필요');
+    } else if (!record.summary || record.subtitleTranslationProgress) {
+      assert.equal(ui.elements.get('catalogDetailHealth').textContent.includes('한국어 번역 완료'), false);
+    }
+  }
+});
+
+test('continue remaining Korean translation preserves the repair route and never forces a full translation or whole-video analysis', async () => {
+  const record = partialTimedRecord();
+  const ui = await boot({ records: [record] });
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(ui.elements.get('catalogSubtitleRepair').textContent, '남은 한국어 자막 번역 계속');
+  await ui.elements.get('catalogSubtitleRepair').dispatch('click');
+  const request = ui.calls.find(call => call.url === '/api/analysis/results/timed/subtitles/repair');
+  assert(request);
+  assert.equal(request.body.forceTranslation, undefined);
+  assert.equal(request.body.options.transcribeAudio, false);
+  assert.equal(request.body.options.subtitleLanguage, 'ko');
+  assert.equal(ui.calls.some(call => call.url === '/api/analysis/results/timed/repair' || call.url === '/api/analysis/jobs'), false);
+});
+
+test('a failed translation-only attempt is not called completed even when older usable Korean cues are preserved', async () => {
+  const record = { ...timedRecord(), operation: 'translation-only', subtitleRepairStatus: 'failed',
+    subtitleError: '합성 재번역 요청 실패', status: 'partial' };
+  const completed = processingJob(record, { operation: 'translation-only', status: 'completed', completed: 1, results: [record] });
+  const ui = await boot({ records: [record], initialActiveJob: { ...completed, status: 'running', completed: 0, results: [] },
+    jobResponse: () => completed });
+  await ui.runTimers(1500);
+  assert.equal(ui.elements.get('catalogJobTitle').textContent.includes('작업 완료'), false);
+  assert(ui.elements.get('catalogNotice').textContent.includes('번역 복구에 실패했습니다'));
+  assert(ui.elements.get('catalogNotice').textContent.includes(record.subtitleError));
+  await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(ui.elements.get('catalogSubtitleRepair').textContent, '한국어 자막 번역만 복구');
+  assert.equal(ui.elements.get('catalogTranscript').childNodes[0].childNodes[1].childNodes[1].textContent, '안녕하세요.');
 });
 
 function delayedBrowserHash() {
@@ -1644,13 +1787,99 @@ test('detail distinguishes unknown original versions and a recorded Korean-only 
 test('successful translation repair with remaining source warnings stays selected over an older completed analysis', async () => {
   const older = { ...timedRecord(), savedAt: '2026-10-15T00:00:00.000Z' };
   const newer = { ...partialTimedRecord(), id: 'new-translation', operation: 'translation-only', repairOf: older.id,
-    subtitleRepairStatus: 'completed', savedAt: '2026-10-16T00:00:00.000Z' };
+    subtitleRepairStatus: 'completed', subtitleTranslationPartial: timedRecord().subtitleTranslation,
+    subtitleTranslationProgress: { ...partialTimedRecord().subtitleTranslationProgress, completedCues: 2, translationComplete: true },
+    savedAt: '2026-10-16T00:00:00.000Z' };
   const ui = await boot({ records: [newer, older] });
   await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
   assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
   assert(ui.elements.get('catalogSubtitleNotice').textContent.includes('부분'));
   await ui.elements.get('catalogRefresh').dispatch('click');
   assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+});
+
+test('a newer failed Korean repair with a longer retained prefix stays selected over its completed source in both reload orders', async () => {
+  const source = { ...timedRecord(), id: 'completed-source-no-korean', subtitleLanguage: undefined, subtitleTranslation: undefined,
+    savedAt: '2026-10-15T00:00:00.000Z' };
+  const repaired = { ...source, id: 'failed-with-retained-prefix', operation: 'translation-only', repairOf: source.id,
+    status: 'partial', subtitleRepairStatus: 'failed', subtitleError: '합성 번역 길이 검사 중단',
+    subtitleTranslationPartial: partialTimedRecord().subtitleTranslationPartial,
+    subtitleTranslationProgress: partialTimedRecord().subtitleTranslationProgress, savedAt: '2026-10-16T00:00:00.000Z' };
+  for (const compact of [false, true]) for (const reverse of [false, true]) {
+    const records = reverse ? [repaired, source] : [source, repaired];
+    const ui = await boot({ records: compact ? records.map(compactRecord) : records });
+    if (compact) {
+      const fetch = ui.sandbox.fetch;
+      ui.sandbox.fetch = async (url, options) => url === '/api/analysis/results/' + repaired.id
+        ? { ok: true, json: async () => plain(repaired) } : fetch(url, options);
+    }
+    await catalogRow(ui, source.path).childNodes[1].childNodes[0].dispatch('click');
+    assert.equal(ui.elements.get('catalogEditSummary').value, source.summary);
+    assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+    assert.equal(ui.elements.get('catalogTranscript').childNodes[0].childNodes[1].childNodes[1].textContent, '안녕하세요.');
+    assert(ui.elements.get('catalogSubtitleNotice').textContent.includes('한국어 번역 1 / 2구간'));
+    assert(ui.elements.get('catalogSubtitleNotice').textContent.includes(repaired.subtitleError));
+    await ui.elements.get('catalogRefresh').dispatch('click');
+    assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+    await ui.elements.get('catalogSubtitleSrt').dispatch('click');
+    assert(ui.calls.some(call => call.url === `/api/analysis/results/${repaired.id}/subtitles?format=srt&language=ko&partial=1`));
+    assert.equal(ui.calls.some(call => call.method === 'POST' && call.url.includes('/repair')), false);
+  }
+});
+
+test('failed Korean repair selection cannot replace its source completed or longer subtitles', async () => {
+  const complete = { ...timedRecord(), id: 'protected-complete', status: 'partial', savedAt: '2026-10-15T00:00:00.000Z' };
+  const longer = { ...partialTimedRecord(), id: 'protected-longer', status: 'completed',
+    subtitleTranslationPartial: timedRecord().subtitleTranslation,
+    subtitleTranslationProgress: { ...partialTimedRecord().subtitleTranslationProgress, completedCues: 2 },
+    savedAt: '2026-10-15T00:00:00.000Z' };
+  for (const original of [complete, longer]) for (const compact of [false, true]) for (const reverse of [false, true]) {
+    const failed = { ...partialTimedRecord(), id: 'shorter-failed-repair', operation: 'translation-only', repairOf: original.id,
+      subtitleRepairStatus: 'failed', savedAt: '2026-10-16T00:00:00.000Z' };
+    const records = reverse ? [failed, original] : [original, failed];
+    const ui = await boot({ records: compact ? records.map(compactRecord) : records });
+    if (compact) {
+      const fetch = ui.sandbox.fetch;
+      ui.sandbox.fetch = async (url, options) => url === '/api/analysis/results/' + original.id
+        ? { ok: true, json: async () => plain(original) } : fetch(url, options);
+    }
+    await catalogRow(ui, original.path).childNodes[1].childNodes[0].dispatch('click');
+    assert.equal(ui.elements.get('catalogTranscript').childNodes[1].childNodes[1].childNodes[1].textContent, '내일 또 만나요.');
+    assert.equal(ui.elements.get('catalogSubtitleNotice').textContent.includes('한국어 번역 2 / 2구간'), true);
+  }
+});
+
+test('compact failed-repair polling advances an already opened full source using its derived metadata', async () => {
+  const original = { ...timedRecord(), id: 'opened-completed-source', subtitleLanguage: undefined, subtitleTranslation: undefined,
+    savedAt: '2026-10-15T00:00:00.000Z' };
+  const repaired = { ...original, id: 'compact-repair-after-full-detail', operation: 'translation-only', repairOf: original.id,
+    status: 'partial', subtitleRepairStatus: 'failed', subtitleError: '합성 번역 검사 실패',
+    subtitleTranslationPartial: partialTimedRecord().subtitleTranslationPartial,
+    subtitleTranslationProgress: partialTimedRecord().subtitleTranslationProgress, savedAt: '2026-10-16T00:00:00.000Z' };
+  const detail = record => {
+    const compact = compactRecord(record);
+    return { ...record, subtitleTranslatedCount: compact.subtitleTranslatedCount,
+      subtitleTranslationSourceFingerprint: compact.subtitleTranslationSourceFingerprint };
+  };
+  const active = processingJob(original, { id: 'mixed-translation-poll', operation: 'translation-only' });
+  const ui = await boot({ records: [compactRecord(original)], translationRepairResponse: active,
+    jobResponse: () => ({ ...active, status: 'completed', completed: 1, results: [compactRecord(repaired)] }) });
+  const fetch = ui.sandbox.fetch;
+  const detailRequests = [];
+  ui.sandbox.fetch = async (url, options) => {
+    if (url === '/api/analysis/results/' + original.id) { detailRequests.push(url); return { ok: true, json: async () => plain(detail(original)) }; }
+    if (url === '/api/analysis/results/' + repaired.id) { detailRequests.push(url); return { ok: true, json: async () => plain(detail(repaired)) }; }
+    return fetch(url, options);
+  };
+  await catalogRow(ui, original.path).childNodes[1].childNodes[0].dispatch('click');
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'original');
+  await ui.elements.get('catalogSubtitleRepair').dispatch('click');
+  await ui.runTimers(1500);
+  await catalogRow(ui, original.path).childNodes[1].childNodes[0].dispatch('click');
+  assert(detailRequests.includes('/api/analysis/results/' + repaired.id));
+  assert.equal(ui.elements.get('catalogSubtitleView').value, 'both');
+  assert(ui.elements.get('catalogSubtitleNotice').textContent.includes('한국어 번역 1 / 2구간'));
+  assert(ui.elements.get('catalogSubtitleNotice').textContent.includes(repaired.subtitleError));
 });
 
 test('an unusable interrupted waiting job can be dismissed without starting analysis or removing results', async () => {
