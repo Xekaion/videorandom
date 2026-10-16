@@ -89,12 +89,23 @@ test('async route boundary catches synchronous and rejected errors without expos
   app.use(apiErrorHandler);
   const server = await startLocalServer(app, { port: 0 });
   t.after(() => new Promise(resolve => server.server.close(resolve)));
+  // The OS may allocate an ephemeral port on the browser's restricted-port
+  // list. This boundary test owns an HTTP server and does not use a browser.
+  const request = endpoint => new Promise((resolve, reject) => {
+    const req = http.get({ hostname: '127.0.0.1', port: server.port, path: endpoint }, res => {
+      let body = '';
+      res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; });
+      res.on('error', reject);
+      res.on('end', () => { try { resolve({ status: res.statusCode, body: JSON.parse(body) }); } catch (error) { reject(error); } });
+    });
+    req.on('error', reject);
+  });
   for (const endpoint of ['/reject', '/sync']) {
-    const response = await fetch(`http://127.0.0.1:${server.port}${endpoint}`);
+    const response = await request(endpoint);
     assert.equal(response.status, 500);
-    assert.doesNotMatch((await response.json()).error, /private/);
+    assert.doesNotMatch(response.body.error, /private/);
   }
-  assert.equal((await (await fetch(`http://127.0.0.1:${server.port}/health`)).json()).ready, true);
+  assert.equal((await request('/health')).body.ready, true);
 });
 
 test('path and scan validation retain ordinary comma roots and exclusions', () => {

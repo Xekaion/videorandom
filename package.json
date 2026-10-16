@@ -1,13 +1,14 @@
 {
   "name": "videorandom",
-  "version": "1.8.2",
+  "version": "1.9.0",
   "description": "Video Roulette - Premium Random Video Picker for Windows",
   "main": "server.js",
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
     "test": "node --test test/*.test.js",
-    "build": "pkg . --targets node18-win-x64 --compress GZip --output videorandom.exe"
+    "build": "pkg . --targets node18-win-x64 --compress GZip --output videorandom.exe",
+    "postbuild": "node scripts/write_update_manifest.js"
   },
   "pkg": {
     "scripts": [
@@ -18,6 +19,8 @@
       "public/**/*",
       "scripts/transcribe_local.py",
       "scripts/recover_recent.ps1",
+      "scripts/apply_update.ps1",
+      "scripts/launch_update.ps1",
       "node_modules/ffmpeg-static/ffmpeg.exe",
       "node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe"
     ]

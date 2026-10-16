@@ -10,6 +10,11 @@ const { recoverRecentVideos } = require('./lib/windows-recent');
 const { startLocalServer, startExistingAnalysisHost } = require('./lib/app-server');
 const { asyncRoute, apiErrorHandler, requestObject, filePathInput, scanInput } = require('./lib/http-route-utils');
 const { acquireDataDirLease, dataStoreId, assertCompatibleInstances } = require('./lib/data-dir-lease');
+const { createAppUpdateService } = require('./lib/app-update');
+const { createUpdateController } = require('./lib/app-update-controller');
+const { createUpdateRestarter, readUpdateOutcome } = require('./lib/app-update-restart');
+const crypto = require('crypto');
+const { createUpdateRequestGate } = require('./lib/update-request-gate');
 
 const app = express();
 const APP_VERSION = require('./package.json').version;
@@ -24,6 +29,14 @@ let analysisService = null;
 let historyService = null;
 let initialized = false;
 let dataLease = null;
+let updateController = null;
+let localServer = null;
+let updateClosing = false;
+const bootstrapToken = /^[a-f0-9]{32}$/.test(process.env.VIDEORANDOM_UPDATE_BOOTSTRAP || '') ? process.env.VIDEORANDOM_UPDATE_BOOTSTRAP : '';
+let bootstrapping = Boolean(bootstrapToken);
+let bootstrapActivation = null;
+let bootstrapError = '';
+const updateRequestGate = createUpdateRequestGate({ isBlocked: () => updateClosing || bootstrapping });
 
 // Middleware
 app.use('/api/history/import-json', express.json({ limit: '64mb' }));
@@ -49,13 +62,36 @@ app.use('/api', (req, res, next) => {
   if (initialized || req.path === '/app-info') return next();
   res.status(503).json({ error: '프로그램을 시작하고 있습니다. 잠시 후 다시 시도해 주세요.' });
 });
+app.use('/api', updateRequestGate.middleware);
 app.use(express.static(path.join(__dirname, 'public'), { setHeaders: res => res.setHeader('Cache-Control', 'no-cache') }));
 app.use('/api/analysis', (req, res, next) => analysisService.router(req, res, next));
 app.use('/api/history', (req, res, next) => historyService.router(req, res, next));
 app.get('/api/app-info', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ application: 'videorandom', version: APP_VERSION, features: ['catalog', 'history'], dataStoreId: storeId, ready: initialized, ...startupInfo });
+  res.json({ application: 'videorandom', version: APP_VERSION, features: ['catalog', 'history', 'managed-update-v1'], dataStoreId: storeId,
+    ready: initialized, updating: updateClosing || bootstrapping, ...startupInfo });
 });
+app.post('/api/updates/complete', asyncRoute(async (req, res) => {
+  const token = typeof req.body?.token === 'string' ? req.body.token : '';
+  if (!bootstrapToken || !/^[a-f0-9]{32}$/.test(token) || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(bootstrapToken))) {
+    return res.status(401).json({ error: '업데이트 시작 확인 정보가 올바르지 않습니다.' });
+  }
+  await completeBootstrap();
+  res.json({ ready: true, currentVersion: APP_VERSION });
+}));
+app.use('/api/updates', asyncRoute(async (req, res, next) => {
+  if (!updateController) return res.status(503).json({ error: '업데이트 기능을 준비하고 있습니다.' });
+  if (bootstrapping && req.method === 'GET' && req.path === '/') return res.json({ ...updateController.getState(), phase: bootstrapError ? 'error' : 'applying',
+    busy: !bootstrapError, error: bootstrapError, activationRequired: Boolean(bootstrapError), restartRequired: true,
+    message: bootstrapError ? '새 버전은 실행 중입니다. 시작 확인을 다시 시도할 수 있습니다.' : '새 버전의 시작을 확인하고 있습니다.' });
+  if (bootstrapping && req.method === 'POST' && req.path === '/apply') {
+    if (req.body && (Array.isArray(req.body) || Object.keys(req.body).length)) return res.status(400).json({ error: '업데이트 요청 형식이 올바르지 않습니다.' });
+    await completeBootstrap();
+    return res.json(updateController.getState());
+  }
+  if (bootstrapping && req.method !== 'GET') return res.status(503).json({ error: '새 버전의 시작을 확인하고 있습니다. 잠시 후 다시 시도해 주세요.' });
+  updateController.router(req, res, next);
+}));
 app.post('/api/history/recover-windows', asyncRoute(async (req, res) => {
   try {
     const recovered = await recoverRecentVideos();
@@ -404,6 +440,65 @@ app.post('/api/play', asyncRoute(async (req, res) => {
 
 app.use(apiErrorHandler);
 
+async function completeBootstrap() {
+  if (!bootstrapping) return;
+  if (bootstrapActivation) return bootstrapActivation;
+  bootstrapActivation = (async () => {
+    bootstrapError = '';
+    const hostPreference = process.env.VIDEORANDOM_START_HOST;
+    const startHost = hostPreference === '1' || (hostPreference !== '0' && await analysisService.getHostAutoStart());
+    if (startHost) await analysisService.startHost();
+    await analysisService.activateAutoAnalysis();
+    bootstrapping = false;
+    updateController.start();
+  })();
+  try { await bootstrapActivation; }
+  catch (error) { bootstrapError = '새 버전의 분석 서버 시작을 확인하지 못했습니다. 분석 서버 포트 사용 상태를 확인한 뒤 시작 확인을 다시 시도해 주세요.'; throw error; }
+  finally { bootstrapActivation = null; }
+}
+
+async function configureUpdates() {
+  const restarter = createUpdateRestarter({ dataDir, currentVersion: APP_VERSION });
+  const outcome = await readUpdateOutcome(dataDir);
+  const initialFailure = outcome && ['rolled-back', 'error'].includes(outcome.phase) ? { version: outcome.version,
+    message: '업데이트를 완료하지 못했습니다. 이전 실행 파일과 분석 결과·연결 설정은 보존했습니다. 업데이트를 다시 시도할 수 있습니다.' } : undefined;
+  updateController = createUpdateController({ dataDir, currentVersion: APP_VERSION,
+    downloader: createAppUpdateService({ dataDir, currentVersion: APP_VERSION }),
+    supported: restarter.supported && process.env.VIDEORANDOM_DISABLE_UPDATES !== '1', initialFailure,
+    prepareUpdate: () => analysisService.prepareUpdate(),
+    getUpdateStatus: () => {
+      const analysis = analysisService.getUpdateStatus();
+      return { ...analysis, busy: analysis.busy || updateRequestGate.getActiveCount() > 0, message: analysis.message || analysis.error };
+    },
+    cancelUpdate: async () => { updateClosing = false; await restarter.cancel(); await analysisService.cancelUpdate(); },
+    applyUpdate: async staged => {
+      // Admission closes synchronously before the first filesystem await.
+      // No running analysis or user pause state is changed by this handoff.
+      updateClosing = true;
+      try {
+        const current = analysisService.getUpdateStatus();
+        if (current.busy || current.blocked || updateRequestGate.getActiveCount()) throw new Error('진행 중인 작업의 저장이 끝난 뒤 업데이트할 수 있습니다.');
+        const host = analysisService.getUpdateStatus().remote;
+        await restarter.arm(staged, { port: PORT, storeId, hostRunning: host.running === true,
+          hostPort: host.port || Number(process.env.VIDEORANDOM_HOST_PORT) || 3001 });
+        await historyService.flush();
+        await analysisService.finishUpdate();
+        await new Promise((resolve, reject) => {
+          localServer.close(error => error ? reject(error) : resolve());
+          localServer.closeIdleConnections?.();
+        });
+        dataLease.release();
+        process.exit(0);
+      } catch (error) {
+        updateClosing = false;
+        await restarter.cancel().catch(() => {});
+        throw error;
+      }
+    }
+  });
+  await updateController.ready;
+}
+
 // Start Server
 async function start() {
   const result = await startLocalServer(app, { port: requestedPort, version: APP_VERSION, dataStoreId: storeId });
@@ -411,6 +506,7 @@ async function start() {
   startupInfo = { requestedPort, port: PORT, portConflict: result.portConflict };
   if (result.server) result.server.on('error', error => console.error('프로그램 서버 오류:', error.message));
   if (result.server) {
+    localServer = result.server;
     try {
       assertCompatibleInstances(result.conflicts, storeId);
       dataLease = acquireDataDirLease(dataDir, { version: APP_VERSION });
@@ -418,8 +514,9 @@ async function start() {
       analysisService = createAnalysisService({ dataDir, deferAutoStart: true });
       historyService = createHistoryService({ dataDir });
       await Promise.all([analysisService.ready, historyService.ready]);
+      await configureUpdates();
       initialized = true;
-      await analysisService.activateAutoAnalysis();
+      if (!bootstrapping) await analysisService.activateAutoAnalysis();
     } catch (error) {
       initialized = false;
       if (analysisService) await analysisService.stop().catch(() => {});
@@ -439,11 +536,18 @@ async function start() {
     try {
       const hostPreference = process.env.VIDEORANDOM_START_HOST;
       const shouldStartHost = hostPreference === '1' || (hostPreference !== '0' && analysisService && await analysisService.getHostAutoStart());
-      if (shouldStartHost) {
+      if (shouldStartHost && !bootstrapping) {
         const host = result.reused ? await startExistingAnalysisHost(PORT) : await analysisService.startHost();
         console.log('분석 서버 시작:', host.addresses.join(', '));
       }
     } catch (error) { console.error('분석 서버 시작 실패:', error.message); }
+    if (updateController && !bootstrapping) updateController.start();
+    if (bootstrapping) {
+      // If only the activation response was lost, keep this verified instance
+      // available and activate it without killing or rolling back any jobs.
+      const timer = setTimeout(() => completeBootstrap().catch(error => console.error('업데이트 시작 확인 실패:', error.message)), 120000);
+      timer.unref?.();
+    }
     if (process.env.VIDEORANDOM_NO_OPEN === '1') return;
     await open(localUrl);
     console.log(`🚀 Browser opened automatically!`);

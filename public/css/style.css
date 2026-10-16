@@ -1595,6 +1595,20 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 /* Permanent PC history, available before any directory scan. */
 .header-link { color: #c8b6ec; font-size: 12px; text-decoration: none; white-space: nowrap; }
 .header-link:hover, .header-link:focus-visible { color: #e4d9fa; text-decoration: underline; }
+.app-update-toggle { border: 0; background: none; font: inherit; font-size: 12px; cursor: pointer; padding: 6px 0; }
+.app-update-panel { border: 1px solid rgba(6,182,212,.28); border-radius: 12px; background: rgba(17,17,32,.97); padding: 18px 20px; margin-bottom: 18px; }
+.app-update-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
+.app-update-heading h2 { font-size: 16px; margin-bottom: 6px; }
+.app-update-heading p, .app-update-note { font-size: 11px; color: var(--color-text-muted); line-height: 1.8; }
+.app-update-status { margin: 16px 0 10px; font-size: 13px; color: #b1edf4; line-height: 1.8; }
+.app-update-error { color: #fda4af; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid rgba(244,63,94,.25); border-radius: 8px; background: rgba(244,63,94,.07); padding: 10px 12px; font-size: 12px; line-height: 1.8; margin: 10px 0; }
+.app-update-progress { display: block; width: 100%; height: 8px; accent-color: var(--color-accent); margin: 12px 0 16px; }
+.app-update-preference { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.8; }
+.app-update-preference input { flex: 0 0 auto; margin: 4px 0 0; accent-color: var(--color-accent); }
+.app-update-note { margin-top: 7px; }
+.app-update-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.app-update-panel .btn { font-size: 12px; padding: 9px 12px; }
+@media (max-width: 620px) { .app-update-panel { padding: 16px; } .app-update-actions .btn { flex-grow: 1; } }
 .app-version { color: #a5e6ef; font-family: var(--font-mono); font-size: 11px; border: 1px solid rgba(6,182,212,.25); border-radius: 6px; background: rgba(6,182,212,.07); padding: 5px 8px; white-space: nowrap; }
 .startup-notice { padding: 15px 20px; border: 1px solid rgba(245,158,11,.35); border-radius: 12px; color: #fde68a; background: rgba(245,158,11,.08); font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; }
 .complete-history-card { padding: 26px; }

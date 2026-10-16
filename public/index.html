@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.8.2">
+  <link rel="stylesheet" href="css/style.css?v=1.9.0">
 </head>
 <body>
 
@@ -40,7 +40,8 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link" href="#videoCatalog">영상 분석</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.6.0</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.0</span>
+        <button id="appUpdateToggle" class="header-link app-update-toggle" type="button" aria-expanded="false" aria-controls="appUpdatePanel">업데이트</button>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
         </button>
@@ -51,6 +52,16 @@
     </header>
 
     <p id="startupNotice" class="startup-notice hidden" role="status"></p>
+
+    <section id="appUpdatePanel" class="app-update-panel hidden" aria-labelledby="appUpdateTitle">
+      <div class="app-update-heading"><div><h2 id="appUpdateTitle" tabindex="-1">프로그램 업데이트</h2><p id="appUpdateVersions">실행 버전을 확인하고 있습니다.</p></div><button id="appUpdateClose" class="btn btn-secondary" type="button" aria-label="업데이트 패널 닫기">닫기 ×</button></div>
+      <p id="appUpdateStatus" class="app-update-status" role="status" aria-live="polite">업데이트 상태를 확인하고 있습니다.</p>
+      <progress id="appUpdateProgress" class="app-update-progress hidden" max="100" aria-label="업데이트 다운로드 진행률"></progress>
+      <p id="appUpdateError" class="app-update-error hidden" role="alert"></p>
+      <label class="app-update-preference"><input id="appUpdateAuto" type="checkbox" disabled><span>새 버전을 자동으로 확인하고, 작업이 끝나면 적용</span></label>
+      <p class="app-update-note">영상 분석·자막 복구가 진행 중이면 업데이트 적용을 기다립니다. 이 PC의 분석 결과와 연결 설정은 유지됩니다.</p>
+      <div class="app-update-actions"><button id="appUpdateCheck" class="btn btn-secondary" type="button">새 버전 확인</button><button id="appUpdateDownload" class="btn btn-primary hidden" type="button">업데이트 다운로드</button><button id="appUpdateApply" class="btn btn-primary hidden" type="button">업데이트 적용</button><button id="appUpdateReconnect" class="btn btn-secondary hidden" type="button">다시 연결</button></div>
+    </section>
 
     <main class="app-content">
       
@@ -556,5 +567,6 @@
   <script src="js/catalog-sort.js?v=1.6.0" defer></script>
   <script src="js/analysis-progress.js?v=1.7.1" defer></script>
   <script src="js/catalog.js?v=1.8.2" defer></script>
+  <script src="js/app-update.js?v=1.9.0" defer></script>
 </body>
 </html>
