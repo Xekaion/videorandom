@@ -120,6 +120,41 @@ test('LAN phase workload survives polling with age and strips untrusted diagnost
   } finally { release(); }
 });
 
+test('LAN translation and chunk ETA retain measured units and expire across stage changes', async t => {
+  let context, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, async (pkg, current) => {
+    context = current;
+    current.onProgress('한국어 자막 검수', 92, { phase: 'translation', completedCues: 160, totalCues: 1819,
+      elapsedSeconds: 40, remainingSeconds: 415, sampleAgeSeconds: 20, transcript: 'private speech', path: 'C:/private' });
+    await gate;
+    return { ...pkg.record, status: 'completed' };
+  });
+  try {
+    const created = await (await f.submit()).json();
+    for (let n = 0; !context && n < 100; n++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert(context);
+    const request = async () => (await f.request('/v1/jobs/' + created.id)).json();
+    const translating = await request();
+    assert.equal(translating.phaseProgress.completedCues, 160);
+    assert.equal(translating.phaseProgress.totalCues, 1819);
+    assert.equal(translating.phaseProgress.remainingSeconds, 415);
+    assert(translating.phaseProgress.sampleAgeSeconds >= 20);
+    assert.equal(JSON.stringify(translating.phaseProgress).includes('private'), false);
+    context.onProgress('summary', 80, { phase: 'summary', completedChunks: 2, totalChunks: 8,
+      remainingSeconds: 60, sampleAgeSeconds: 121 });
+    const stale = await request();
+    assert.equal(stale.phaseProgress.phase, 'summary');
+    assert.equal(stale.phaseProgress.completedChunks, 2);
+    assert.equal(stale.phaseProgress.completedCues, undefined);
+    assert.equal(stale.phaseProgress.remainingSeconds, undefined);
+    context.onProgress('완료 기록 저장 중', 99);
+    assert.equal((await request()).phaseProgress, undefined);
+    release();
+    assert.equal((await finished(f, created.id)).phaseProgress, undefined);
+  } finally { release(); }
+});
+
 test('uploads process authenticated data without host paths and retains JPEG frames', async t => {
   let received;
   const f = await fixture(t, async (pkg, context) => {

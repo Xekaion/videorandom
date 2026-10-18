@@ -10,11 +10,11 @@
   const verifiedPartialSources = new WeakMap();
   const state = {
     scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0, detailLoading: false, transcriptLimit: 200,
-    config: null, job: null, pollTimer: null, starting: false, exporting: false, interruptedJobs: [], jobRecoveryError: '',
+    config: null, job: null, jobReceivedAt: 0, jobConnectionError: '', pollTimer: null, starting: false, exporting: false, interruptedJobs: [], jobRecoveryError: '',
     pendingRequest: null, requestFailure: null, jobTargets: { id: '', keys: new Set() }, detailActivityPath: '',
     refreshing: false, detailId: null, detailPath: '', detailRequest: 0, saving: false, subtitleDownloading: false, subtitleFolderSaving: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
-    autoPick: null, autoTimer: null, autoSettingsTimer: null, settingsRevision: 0, noticeRevision: 0, fastSave: null, fastNoticeRevision: null,
+    autoPick: null, queue: null, queueBusy: false, queuePolling: false, queueLoadError: false, queueUnsupported: false, queueRenderKey: '', queueRevision: 0, autoTimer: null, autoSettingsTimer: null, settingsRevision: 0, noticeRevision: 0, fastSave: null, fastNoticeRevision: null,
     autoPolling: false, autoBusy: false, autoResuming: false, autoResumeError: '', autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
     resultsReady: false, autoSavedCount: null, autoResultsLoading: false, autoResultsWanted: null,
     winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: '', speechInfo: { jobId: '', fileKey: '', metadata: null }
@@ -85,7 +85,10 @@
   function phaseTimingText(job) {
     const known = state.speechInfo;
     const metadata = known.jobId === job?.id && known.fileKey === speechFileKey(job) ? known.metadata : null;
-    const details = job?.phaseProgress ? { ...job.phaseProgress, ...metadata, ...window.videoAnalysisProgress?.normalizeSpeechMetadata(job.phaseProgress) } : null;
+    const receivedAge = state.job === job && state.jobReceivedAt ? Math.max(0, Date.now() - state.jobReceivedAt) / 1000 : 0;
+    const phase = window.videoAnalysisProgress?.ageProgressDetails?.(job?.phaseProgress, receivedAge) || job?.phaseProgress;
+    const details = phase ? { ...phase, ...metadata, ...window.videoAnalysisProgress?.normalizeSpeechMetadata(phase) } : null;
+    if (isActive(job) && state.jobConnectionError) return '작업 상태 연결 확인 중';
     const timing = isActive(job) ? window.videoAnalysisProgress?.formatProgressDetails(details) || '' : '';
     if (timing) return timing;
     return metadata ? `음성 인식 사용 기록: ${window.videoAnalysisProgress.formatSpeechMetadata(metadata)}` : '';
@@ -256,6 +259,160 @@
     renderWinnerAnalysis();
   }
 
+  function queueNotice(message = '', error = false) {
+    $('catalogQueueNotice').textContent = message;
+    $('catalogQueueNotice').classList.toggle('hidden', !message);
+    $('catalogQueueNotice').classList.toggle('catalog-error', error);
+  }
+
+  async function readQueue() {
+    const revision = state.queueRevision;
+    try {
+      const queue = await request('/api/analysis/queue?view=summary');
+      if (revision === state.queueRevision) {
+        if (state.queueUnsupported) queueNotice();
+        state.queueUnsupported = false;
+      }
+      return queue;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      if (revision === state.queueRevision) {
+        state.queueUnsupported = true;
+        queueNotice('대기열 관리는 이 PC 프로그램을 1.9.5로 다시 실행하면 사용할 수 있습니다. 현재 작업과 대기 목록은 계속 확인합니다.');
+      }
+      return request('/api/analysis/auto-pick?view=summary');
+    }
+  }
+
+  function applyQueue(value) {
+    const queue = value?.queue || value;
+    if (!queue || !Array.isArray(queue.pending)) return;
+    state.queue = queue;
+    applyAutoPick(queue);
+    renderQueue();
+  }
+
+  function renderQueue() {
+    const queue = state.queue;
+    if (!queue) return;
+    const pending = queue.pending || [];
+    const batch = Array.isArray(queue.currentBatch) ? queue.currentBatch : [];
+    const nextBatch = batch.filter(file => file.status === 'scheduled');
+    $('catalogQueueCount').textContent = `${pending.length + nextBatch.length}`;
+    $('catalogQueuePause').disabled = state.queueBusy || state.queueUnsupported;
+    $('catalogQueuePause').textContent = queue.paused ? '대기 분석 재개' : '다음 분석 일시 중지';
+    $('catalogQueuePause').setAttribute('aria-pressed', String(queue.paused === true));
+    $('catalogQueuePause').title = '이미 시작된 작업에 포함된 영상은 계속 처리하고, 추가 대기열의 다음 작업부터 일시 중지합니다.';
+    $('catalogQueueClear').disabled = state.queueBusy || state.queueUnsupported || !pending.length;
+    $('catalogQueueRefresh').disabled = state.queuePolling || state.queueBusy;
+    $('catalogQueueStatus').textContent = queue.paused ? `일시 중지됨 · 대기 ${pending.length}개 보관 중`
+      : nextBatch.length ? `현재 작업 안에 다음 영상 ${nextBatch.length}개 · 추가 대기 ${pending.length}개`
+      : pending.length ? `다음 영상 ${pending.length}개 대기 중` : '대기 중인 영상이 없습니다.';
+    const reason = queue.waitingReason || (queue.paused ? '대기열이 일시 중지되어 있습니다. 재개하면 다음 영상을 처리합니다. 현재 진행 중인 작업은 계속됩니다.' : '');
+    $('catalogQueueReason').textContent = reason;
+    $('catalogQueueReason').classList.toggle('hidden', !reason);
+    const renderKey = JSON.stringify([state.queueBusy, state.queueUnsupported, nextBatch, pending]);
+    if (renderKey === state.queueRenderKey) return;
+    state.queueRenderKey = renderKey;
+    const focusedPath = document.activeElement?.dataset?.queuePath;
+    const focusedAction = document.activeElement?.dataset?.queueAction;
+    const fragment = document.createDocumentFragment();
+    const newButtons = [];
+    const appendRow = (file, index, locked) => {
+      const row = make('li', `catalog-queue-item${locked ? ' catalog-queue-locked' : ''}`);
+      row.append(make('span', 'catalog-queue-position', String(index + 1)));
+      const body = make('div', 'catalog-queue-file');
+      body.append(make('strong', '', file.name || file.path), make('span', '', locked ? '현재 작업에 포함 · 앞선 영상이 끝나면 시작'
+        : file.status === 'disabled' ? '자동 분석 꺼짐 · 뽑은 영상 대기 보관' : file.source === 'manual' ? '직접 추가한 영상' : '뽑은 영상 자동 분석'));
+      body.title = file.path;
+      row.append(body);
+      const controls = make('div', 'catalog-queue-item-actions');
+      if (locked) controls.append(make('span', 'catalog-queue-locked-label', '작업 포함'));
+      else {
+        const addAction = (text, label, disabled, handler) => {
+          const button = make('button', 'btn-mini', text);
+          button.type = 'button'; button.disabled = state.queueBusy || state.queueUnsupported || disabled;
+          button.dataset.queuePath = file.path; button.dataset.queueAction = label;
+          button.setAttribute('aria-label', `${file.name || '영상'} ${label}`);
+          button.title = label;
+          button.addEventListener('click', handler);
+          controls.append(button);
+          newButtons.push(button);
+        };
+        const position = Number(file.position) || pending.indexOf(file) + 1;
+        addAction('↑', '대기 순서 위로', position <= 1, () => mutateQueue('/move', 'POST', { filePath: file.path, position: position - 1 }));
+        addAction('↓', '대기 순서 아래로', position >= pending.length, () => mutateQueue('/move', 'POST', { filePath: file.path, position: position + 1 }));
+        addAction('제거', '대기열에서 제거', false, () => mutateQueue('/pending', 'DELETE', { filePath: file.path }));
+      }
+      row.append(controls); fragment.append(row);
+    };
+    nextBatch.forEach((file, index) => appendRow(file, index, true));
+    pending.forEach((file, index) => appendRow(file, nextBatch.length + index, false));
+    if (!nextBatch.length && !pending.length) {
+      const empty = make('li', 'catalog-queue-empty', '분석할 다음 영상을 추가해 보세요.');
+      fragment.append(empty);
+    }
+    $('catalogQueueItems').replaceChildren(fragment);
+    if (focusedPath) newButtons.find(button => !button.disabled && button.dataset.queuePath === focusedPath && button.dataset.queueAction === focusedAction)?.focus();
+  }
+
+  async function refreshQueue() {
+    if (state.queuePolling || state.queueBusy || state.autoPolling) return;
+    state.queuePolling = true;
+    const revision = state.queueRevision;
+    renderQueue();
+    try {
+      const result = await readQueue();
+      if (revision === state.queueRevision) {
+        applyQueue(result);
+        if (state.queueLoadError && !state.queueUnsupported) queueNotice();
+        state.queueLoadError = false;
+      }
+    } catch (error) { state.queueLoadError = true; queueNotice(`대기열 확인 실패 · ${error.message}`, true); }
+    finally { state.queuePolling = false; renderQueue(); updateSelectionUI(); }
+  }
+
+  async function mutateQueue(suffix, method, body) {
+    if (state.queueBusy || state.queueUnsupported) return;
+    state.queueBusy = true;
+    state.queueRevision++;
+    renderQueue(); updateSelectionUI();
+    try {
+      const result = await request(`/api/analysis/queue${suffix}`, jsonOptions(method, body));
+      applyQueue(result);
+      queueNotice(suffix === '/pending' ? '대기 목록을 갱신했습니다.' : suffix === '/move' ? '분석 순서를 바꿨습니다.'
+        : (result.queue || result).paused ? '다음 분석을 일시 중지했습니다. 현재 작업은 계속됩니다.' : '대기 분석을 재개했습니다.');
+    } catch (error) {
+      queueNotice(`대기열 변경 실패 · ${error.message}`, true);
+    } finally {
+      state.queueBusy = false; renderQueue(); updateSelectionUI();
+      await refreshQueue();
+    }
+  }
+
+  async function enqueueSelected() {
+    const files = allFiles().filter(file => state.selected.has(pathKey(file.path))).map(file => file.path);
+    return enqueueFiles(files);
+  }
+
+  async function enqueueFiles(files) {
+    if (state.queueBusy || state.queueUnsupported || !state.settingsReady) return;
+    if (!files.length) return;
+    if (files.length > MAX_BATCH) { queueNotice(`한 번에 최대 ${MAX_BATCH.toLocaleString()}개를 추가할 수 있습니다.`, true); return; }
+    let options;
+    try { options = analysisOptions(); }
+    catch (error) { queueNotice(error.message, true); $('catalogSettings').open = true; return; }
+    state.queueBusy = true;
+    state.queueRevision++;
+    renderQueue(); updateSelectionUI();
+    try {
+      const result = await request('/api/analysis/queue', jsonOptions('POST', { files, options }));
+      applyQueue(result);
+      queueNotice(`${Number(result.addedCount) || 0}개 영상을 대기열에 추가했습니다.${result.skippedCount ? ` 이미 대기·진행 중인 ${result.skippedCount}개는 중복 추가하지 않았습니다.` : ''}`);
+    } catch (error) { queueNotice(`대기 추가 실패 · ${error.message}`, true); }
+    finally { state.queueBusy = false; renderQueue(); updateSelectionUI(); await refreshQueue(); }
+  }
+
   function scheduleAutoPoll(delay = 3000) {
     clearTimeout(state.autoTimer);
     const queue = state.autoPick;
@@ -316,20 +473,23 @@
   }
 
   async function refreshAutoPick() {
-    if (state.autoPolling) return;
+    if (state.autoPolling || state.queueBusy) { scheduleAutoPoll(1000); return; }
+    if (state.queuePolling) { scheduleAutoPoll(1000); return; }
     state.autoPolling = true;
+    const revision = state.queueRevision;
     try {
-      const result = await request('/api/analysis/auto-pick?view=summary');
+      const result = await readQueue();
+      if (revision !== state.queueRevision) return;
       if (state.autoTransportError) autoNotice();
       state.autoTransportError = false;
-      applyAutoPick(result);
+      applyQueue(result);
     }
     catch (error) {
       state.autoTransportError = true;
       autoNotice(`자동 분석 상태 연결 재시도 중 · ${error.message}`, true);
       clearTimeout(state.autoTimer);
       state.autoTimer = setTimeout(refreshAutoPick, 5000);
-    } finally { state.autoPolling = false; }
+    } finally { state.autoPolling = false; updateSelectionUI(); }
   }
 
   // Incomplete connection settings are valid here: the server preserves the pick
@@ -584,6 +744,9 @@
           detail: cancelling ? '현재 작업을 안전하게 중지하고 있습니다.' : waiting ? '앞선 작업이 끝나면 시작합니다.' : [job.stage || '분석을 준비하고 있습니다.', phaseTimingText(job)].filter(Boolean).join(' · ') };
       }
     }
+    const queued = state.queue?.pending?.find(file => pathKey(file.path) === key);
+    if (queued) return { active: false, tone: 'queued', label: state.queue.paused ? '대기 · 일시 중지됨' : '분석 대기',
+      detail: `대기 순서 ${queued.position || state.queue.pending.indexOf(queued) + 1}번${queued.status === 'disabled' ? ' · 뽑은 영상 자동 분석 꺼짐' : ''}` };
     if (state.requestFailure?.keys.has(key)) return { active: false, tone: 'failed',
       label: `${taskLabel(state.requestFailure)} 요청 실패`, detail: state.requestFailure.message };
     const repair = job?.source === 'repair';
@@ -655,6 +818,9 @@
     const modeUnavailable = $('catalogMode').value === 'codex' && !codexReady();
     $('catalogAnalyze').disabled = !state.selected.size || isActive(state.job) || state.starting || !state.config || state.config.tools?.available === false || modeUnavailable;
     $('catalogAnalyze').title = state.config?.tools?.available === false ? 'FFmpeg와 FFprobe를 설치해야 분석할 수 있습니다.' : modeUnavailable ? codexUnavailableReason() : '';
+    $('catalogQueueAdd').disabled = !state.selected.size || state.queueBusy || state.queueUnsupported || !state.settingsReady || !state.config || state.config.tools?.available === false || modeUnavailable;
+    $('catalogQueueAdd').textContent = state.queueBusy ? '대기열 저장 중…' : `＋ 선택 영상 대기 추가${state.selected.size ? ` (${state.selected.size})` : ''}`;
+    $('catalogQueueAdd').title = isActive(state.job) ? '현재 분석을 계속하면서 선택한 영상을 다음 대기열에 추가합니다.' : '현재 설정으로 선택 영상을 차례대로 분석합니다.';
     const exportCount = exportRecords().length;
     $('catalogExport').disabled = !exportCount || state.exporting || isActive(state.job);
     $('catalogExport').title = isActive(state.job) ? '분석이 끝나면 엑셀로 저장할 수 있습니다.' : '';
@@ -662,6 +828,7 @@
     $('catalogSave').disabled = state.saving || isActive(state.job);
     $('catalogDetailRepair').disabled = state.starting || isActive(state.job) || !state.config;
     document.querySelectorAll('.catalog-repair-button').forEach(button => { button.disabled = state.starting || isActive(state.job) || !state.config; });
+    document.querySelectorAll('.catalog-enqueue-button').forEach(button => { button.disabled = state.queueBusy || state.queueUnsupported || !state.settingsReady || !state.config || state.config.tools?.available === false || modeUnavailable; });
     renderDetailActivity();
     const detail = findRecord(state.detailId);
     $('catalogSubtitleRepair').disabled = state.starting || isActive(state.job) || !state.config || !detail
@@ -698,6 +865,7 @@
       const row = make('tr');
       row.setAttribute('aria-busy', String(activity?.active === true));
       if (activity?.active) row.classList.add('catalog-row-active');
+      if (state.selected.has(key)) row.classList.add('catalog-row-selected');
       const selectCell = make('td', 'catalog-select-cell');
       const checkbox = make('input');
       checkbox.type = 'checkbox';
@@ -705,6 +873,7 @@
       checkbox.setAttribute('aria-label', `${file.name} 선택`);
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) state.selected.add(key); else state.selected.delete(key);
+        row.classList.toggle('catalog-row-selected', checkbox.checked);
         updateSelectionUI();
       });
       selectCell.append(checkbox);
@@ -720,7 +889,18 @@
       const path = make('span', 'catalog-file-path', file.path);
       path.title = file.path;
       nameCell.append(name, path);
-      if (record?.duration != null) nameCell.append(make('span', 'catalog-file-duration', time(record.duration)));
+      const metadata = make('div', 'catalog-file-metadata');
+      if (record?.duration != null) metadata.append(make('span', 'catalog-file-duration', time(record.duration)));
+      const fileState = activity?.active ? '진행 중' : activity?.tone === 'queued' ? '분석 대기'
+        : activity && ['failed', 'partial'].includes(activity.tone) ? '복구 필요'
+        : !record ? '미분석' : healthFor(record).code === 'ready' ? '정리 완료'
+        : healthFor(record).code === 'extraction-only' ? '추출 완료' : '복구 필요';
+      const stateTone = activity?.active ? 'active' : activity?.tone === 'queued' ? 'queued'
+        : fileState === '복구 필요' ? 'attention' : record ? 'ready' : 'pending';
+      const stateChip = make('span', `catalog-file-state catalog-file-state-${stateTone}`, fileState);
+      stateChip.title = activity?.detail || healthFor(record).reason;
+      metadata.append(stateChip);
+      nameCell.append(metadata);
       const actions = make('div', 'catalog-file-actions');
       const play = make('button', 'btn-mini play catalog-play-button', '▶ 재생');
       play.type = 'button';
@@ -734,6 +914,11 @@
         finally { play.disabled = !file.path; }
       });
       actions.append(play);
+      const enqueue = make('button', 'btn-mini catalog-enqueue-button', '＋ 대기');
+      enqueue.type = 'button';
+      enqueue.setAttribute('aria-label', `${file.name || '영상'} 분석 대기열에 추가`);
+      enqueue.addEventListener('click', () => enqueueFiles([file.path]));
+      actions.append(enqueue);
       if (record) {
         const details = make('button', 'catalog-detail-link', '상세 보기 →');
         details.type = 'button';
@@ -1075,6 +1260,7 @@
       renderToolStatus();
       renderHost();
       applyAutoPick(config.autoPick);
+      refreshQueue();
       if (config.activeJob && !isActive(state.job)) trackJob(config.activeJob);
       if (firstLoad && (!persistedOptions || state.settingsTouched)) {
         syncAutoPick().catch(error => autoNotice(`자동 분석 설정 저장 실패 · ${error.message}`, true));
@@ -1250,6 +1436,7 @@
     const total = Number(job.total) || 0;
     const overall = job.status === 'completed' ? 100 : Math.min(100, total ? (completed + (active ? (Number(job.percent) || 0) / 100 : 0)) / total * 100 : 0);
     $('catalogJob').classList.remove('hidden');
+    $('catalogJobIdle').classList.add('hidden');
     const translationIncomplete = !active && job.results?.some(record => translationNeedsRecovery(record) || record.subtitleRepairStatus === 'failed');
     const partialResults = !active && job.results?.some(record => record.status === 'partial' || record.status === 'failed');
     const jobTitle = job.status === 'completed' && translationIncomplete ? '한국어 번역 미완료 · 복구 필요'
@@ -1257,8 +1444,39 @@
       : job.operation === 'translation-only'
       ? ({ completed: '작업 완료', cancelled: '중지됨', failed: '작업 실패', cancelling: '중지 중…' })[job.status] || '번역 중'
       : ({ completed: '분석 완료', cancelled: '분석 중지됨', failed: '분석 작업 실패', cancelling: '분석 중지 중…' })[job.status] || '영상 분석 중';
-    $('catalogJobTitle').textContent = job.operation === 'translation-only' ? `한국어 자막 번역 복구 · ${jobTitle.replace(/^영상 /, '')}` : job.source === 'auto-pick' ? `뽑은 영상 자동 ${jobTitle.replace(/^영상 /, '')}` : job.source === 'repair' ? `복구 · ${jobTitle}` : jobTitle;
+    $('catalogJobTitle').textContent = job.operation === 'translation-only' ? `한국어 자막 번역 복구 · ${jobTitle.replace(/^영상 /, '')}` : job.source === 'auto-pick' ? `${job.queueSource === 'manual' ? '대기열' : '뽑은 영상 자동'} ${jobTitle.replace(/^영상 /, '')}` : job.source === 'repair' ? `복구 · ${jobTitle}` : jobTitle;
     $('catalogJobProgress').value = overall;
+    const terminalLabel = !active ? job.status === 'cancelled' ? '중지' : job.status === 'failed' ? '실패' : translationIncomplete || partialResults ? '일부 완료' : '' : '';
+    $('catalogJobPercent').textContent = terminalLabel || `${Math.round(overall)}%`;
+    $('catalogJobPercent').classList.toggle('catalog-job-terminal', !!terminalLabel);
+    $('catalogJobProgress').classList.toggle('hidden', !!terminalLabel);
+    $('catalogJobFile').textContent = job.currentFile || (total > 1 ? `${total}개 영상 분석 작업` : '영상 분석');
+    const receivedAge = state.job === job && state.jobReceivedAt ? Math.max(0, Date.now() - state.jobReceivedAt) / 1000 : 0;
+    const agedProgress = window.videoAnalysisProgress?.ageProgressDetails?.(job.phaseProgress, receivedAge) || job.phaseProgress;
+    const presentation = active ? window.videoAnalysisProgress?.progressPresentation?.(agedProgress) : null;
+    $('catalogJobStage').textContent = active ? job.stage || '분석 준비 중' : jobTitle;
+    $('catalogJobElapsed').textContent = Number.isFinite(job.elapsedMs) ? time(job.elapsedMs / 1000 + (active ? receivedAge : 0)) : '측정 중';
+    $('catalogJobCount').textContent = `${completed.toLocaleString()} / ${total.toLocaleString()}개`;
+    $('catalogJobEtaLabel').textContent = active ? '현재 단계 예상 잔여' : '작업 상태';
+    const remaining = presentation?.remainingSeconds;
+    const roundedMinutes = Number.isFinite(remaining) ? Math.ceil(remaining / 60) : 0;
+    const remainingLabel = Number.isFinite(remaining) ? remaining >= 3600
+      ? `약 ${Math.floor(roundedMinutes / 60)}시간${roundedMinutes % 60 ? ` ${roundedMinutes % 60}분` : ''}`
+      : remaining >= 60 ? `약 ${Math.ceil(remaining / 60)}분` : `약 ${Math.max(1, Math.ceil(remaining))}초` : '';
+    $('catalogJobEta').textContent = active ? state.jobConnectionError ? '연결 확인 중' : presentation?.stale ? '진행 확인 중' : remainingLabel || '처리 속도 측정 중'
+      : translationIncomplete || partialResults || job.status === 'failed' ? '중단 · 확인 필요' : job.status === 'cancelled' ? '중지됨' : '완료';
+    $('catalogJobEta').classList.toggle('catalog-eta-stale', presentation?.stale === true);
+    const phaseCount = presentation && Number.isFinite(presentation.completed) && Number.isFinite(presentation.total)
+      ? presentation.unit === 'audioSeconds' ? `음성 처리 ${time(presentation.completed)} / ${time(presentation.total)}`
+      : `${presentation.unit === 'cues' ? '검수 저장' : '요약 완료'} ${presentation.completed.toLocaleString()} / ${presentation.total.toLocaleString()}${presentation.unit === 'cues' ? '구간' : '묶음'}` : '';
+    const speechMetadata = window.videoAnalysisProgress?.normalizeSpeechMetadata?.(job.phaseProgress);
+    const speechLabel = speechMetadata && Object.keys(speechMetadata).length ? window.videoAnalysisProgress?.formatSpeechMetadata?.(speechMetadata) : '';
+    $('catalogJobPhase').textContent = active ? [phaseCount, speechLabel].filter(Boolean).join(' · ') || (presentation ? '' : phaseTimingText(job)) : '';
+    $('catalogJobEtaNote').classList.toggle('hidden', !active);
+    const problem = !active && job.results?.find(record => translationNeedsRecovery(record) || record.subtitleRepairStatus === 'failed' || ['partial', 'failed'].includes(record.status));
+    const failure = active && state.jobConnectionError ? `작업 상태 연결 확인 중 · ${state.jobConnectionError}` : job.error || problem?.subtitleError || problem?.error || (problem ? healthFor(problem).reason : '');
+    $('catalogJobError').textContent = failure ? `${active ? '현재 작업 안내' : '완료되지 않은 이유'}: ${failure}` : '';
+    $('catalogJobError').classList.toggle('hidden', !failure);
     const timing = Number.isFinite(job.elapsedMs) ? ` · 경과 ${time(job.elapsedMs / 1000)}${active && Number.isFinite(job.stageElapsedMs) ? ` · 현재 단계 ${time(job.stageElapsedMs / 1000)}` : ''}` : '';
     const phaseTiming = phaseTimingText(job);
     $('catalogJobText').textContent = `${completed}/${total}개 처리${job.currentFile ? ` · ${job.currentFile}` : ''}${active && job.stage ? ` · ${job.stage}` : ''}${timing}${phaseTiming ? ` · ${phaseTiming}` : ''}${job.error ? ` · ${job.error}` : ''}`;
@@ -1283,6 +1501,8 @@
     if (paths) state.jobTargets = { id: job.id, keys: new Set(paths.map(pathKey)) };
     else if (state.jobTargets.id !== job.id) state.jobTargets = { id: job.id, keys: new Set() };
     state.job = job;
+    state.jobReceivedAt = Date.now();
+    state.jobConnectionError = '';
     rememberSpeechInfo(job);
     mergeRecords(job.results);
     displayJob(job);
@@ -1338,12 +1558,15 @@
         clearTimeout(state.pollTimer);
         state.job = null;
         $('catalogJob').classList.add('hidden');
+        $('catalogJobIdle').classList.remove('hidden');
         await refresh();
         notice('작업 상태가 초기화되었습니다. 저장된 결과를 불러왔습니다. 남은 영상을 선택해 다시 분석할 수 있습니다.', true);
         updateSelectionUI();
         return;
       }
       notice(`분석 상태 연결 재시도 중 · ${error.message}`, true);
+      state.jobConnectionError = error.message;
+      displayJob(state.job);
       schedulePoll(id, 5000);
     }
   }
@@ -1789,6 +2012,10 @@
     });
     $('catalogAutoEnabled').addEventListener('change', event => changeAutoPick({ enabled: event.target.checked }));
     $('catalogAutoResume').addEventListener('click', () => changeAutoPick({ resume: true }));
+    $('catalogQueueRefresh').addEventListener('click', refreshQueue);
+    $('catalogQueueAdd').addEventListener('click', enqueueSelected);
+    $('catalogQueuePause').addEventListener('click', () => mutateQueue('', 'PUT', { paused: state.queue?.paused !== true }));
+    $('catalogQueueClear').addEventListener('click', () => mutateQueue('/pending', 'DELETE', {}));
     $('winnerAutoResume').addEventListener('click', resumeWinnerAnalysis);
     $('catalogStorageCopy').addEventListener('click', () => copyText(state.config?.storage?.directory, '이 PC의 분석 결과 저장 폴더 경로를 복사했습니다. 파일 탐색기 주소창에 붙여 넣으면 열 수 있습니다.'));
     ['catalogRemoteUrl', 'catalogConnectionCode'].forEach(id => $(id).addEventListener('input', () => {

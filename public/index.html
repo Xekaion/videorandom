@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.9.4">
+  <link rel="stylesheet" href="css/style.css?v=1.9.5">
 </head>
 <body>
 
@@ -39,8 +39,8 @@
       </div>
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
-        <a class="header-link" href="#videoCatalog">영상 분석</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.4</span>
+        <a class="header-link header-analysis-link" href="#videoCatalog">분석 현황 · 대기열</a>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.5</span>
         <button id="appUpdateToggle" class="header-link app-update-toggle" type="button" aria-expanded="false" aria-controls="appUpdatePanel">업데이트</button>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
@@ -348,12 +348,40 @@
         <button class="btn btn-secondary" id="catalogRefresh" type="button"><i class="fa-solid fa-rotate" aria-hidden="true"></i> 결과 불러오기</button>
       </div>
 
-      <div class="catalog-storage" aria-labelledby="catalogStorageTitle">
-        <strong id="catalogStorageTitle">분석 결과는 이 PC에 자동 저장됩니다.</strong>
+      <section class="catalog-workspace" aria-labelledby="catalogWorkspaceTitle">
+        <div class="catalog-workspace-heading"><div><p class="catalog-eyebrow">ANALYSIS WORKSPACE</p><h3 id="catalogWorkspaceTitle">분석 작업</h3></div><a href="#catalogLibrary" class="catalog-jump-link">영상 선택 · 대기 추가 ↓</a></div>
+        <div class="catalog-workspace-grid">
+          <div class="catalog-current-panel">
+            <div id="catalogJobIdle" class="catalog-idle"><span class="catalog-live-label">현재 작업</span><strong>진행 중인 분석이 없습니다.</strong><p>아래 목록에서 영상을 선택해 대기열에 추가하세요.</p></div>
+            <div class="catalog-job hidden" id="catalogJob">
+              <div class="catalog-job-heading"><strong id="catalogJobTitle" role="status">분석 중</strong><button id="catalogCancel" class="btn btn-secondary" type="button">현재 작업 중지</button></div>
+              <p id="catalogJobFile" class="catalog-job-file"></p>
+              <div class="catalog-job-stage-line"><span id="catalogJobStage">분석 준비 중</span><div class="catalog-job-percent-wrap"><span>이번 작업 전체</span><strong id="catalogJobPercent">0%</strong></div></div>
+              <progress id="catalogJobProgress" max="100" value="0" aria-label="현재 분석 작업 전체 진행률"></progress>
+              <dl class="catalog-job-metrics"><div><dt>경과 시간</dt><dd id="catalogJobElapsed">—</dd></div><div><dt id="catalogJobEtaLabel">현재 단계 예상 잔여</dt><dd id="catalogJobEta">측정 중</dd></div><div><dt>처리 영상</dt><dd id="catalogJobCount">0 / 0</dd></div></dl>
+              <p id="catalogJobPhase" class="catalog-job-phase"></p>
+              <p id="catalogJobText" class="catalog-sr-only"></p>
+              <p id="catalogJobError" class="catalog-work-error hidden" role="alert"></p>
+              <p id="catalogJobEtaNote" class="catalog-job-eta-note">현재 단계의 처리 속도로 계산하며, 이후 단계와 다른 PC의 대기는 포함하지 않습니다.</p>
+            </div>
+          </div>
+          <div class="catalog-queue-panel" aria-labelledby="catalogQueueTitle">
+            <div class="catalog-queue-heading"><div><h4 id="catalogQueueTitle">이 PC의 대기열 <span id="catalogQueueCount">0</span></h4><p>위에서 아래 순서로 분석합니다.</p></div><button id="catalogQueueRefresh" class="btn btn-secondary" type="button" aria-label="대기열 새로고침">새로고침</button></div>
+            <div class="catalog-queue-controls"><button id="catalogQueuePause" class="btn btn-secondary" type="button" disabled>다음 분석 일시 중지</button><button id="catalogQueueClear" class="btn btn-secondary" type="button" disabled>대기 비우기</button></div>
+            <p id="catalogQueueStatus" class="catalog-queue-status" role="status">대기열을 불러오는 중…</p>
+            <p id="catalogQueueReason" class="catalog-work-error hidden" role="status"></p>
+            <ol id="catalogQueueItems" class="catalog-queue-items" aria-label="현재 작업의 남은 영상과 다음 분석 대기 영상"></ol>
+            <p id="catalogQueueNotice" class="catalog-queue-notice hidden" role="status"></p>
+            <p class="catalog-queue-scope">이 PC에서 등록한 영상만 표시합니다. 다른 PC가 서버에 보낸 전체 대기열은 포함하지 않습니다.</p>
+          </div>
+        </div>
+      </section>
+
+      <details class="catalog-storage" aria-labelledby="catalogStorageTitle">
+        <summary><strong id="catalogStorageTitle">분석 결과는 이 PC에 자동 저장됩니다.</strong><span id="catalogStorageCount" class="catalog-storage-count" role="status">저장된 결과 확인 중…</span></summary>
         <p>영상마다 분석이 끝나면 줄거리·전체 대사·대표 이미지를 이 PC(영상을 선택한 PC)에 저장합니다. 프로그램을 껐다 켜도 스캔 없이 다시 볼 수 있습니다. 저장된 결과를 보거나 엑셀로 내보낼 때는 분석 서버 연결이 필요 없습니다.</p>
         <div class="catalog-storage-path-row"><span>저장 폴더</span><code id="catalogStoragePath">%LOCALAPPDATA%\VideoRandom\catalog</code><button class="btn btn-secondary" id="catalogStorageCopy" type="button" disabled>폴더 경로 복사</button></div>
-        <p id="catalogStorageCount" class="catalog-storage-count" role="status">이 PC에 저장된 결과를 불러오는 중…</p>
-      </div>
+      </details>
 
       <div class="catalog-auto-pick" aria-labelledby="catalogAutoTitle">
         <div class="catalog-auto-heading">
@@ -481,6 +509,7 @@
         </div>
       </details>
 
+      <div class="catalog-library-heading" id="catalogLibrary"><h3>영상 목록</h3><p>영상을 선택하고 대기열에 추가하면 현재 작업 다음에 이어서 분석합니다.</p></div>
       <div class="catalog-toolbar">
         <div class="catalog-search-wrap">
           <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
@@ -508,7 +537,8 @@
         <span class="catalog-counts" id="catalogCounts">스캔한 영상이 없습니다.</span>
         <div class="catalog-actions">
           <button id="catalogClearSelection" class="btn btn-secondary" type="button" disabled>선택 해제</button>
-          <button id="catalogAnalyze" class="btn btn-primary" type="button" disabled><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> 선택 영상 분석</button>
+          <button id="catalogQueueAdd" class="btn btn-primary" type="button" disabled>＋ 선택 영상 대기 추가</button>
+          <button id="catalogAnalyze" class="btn btn-secondary" type="button" disabled><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> 선택 영상 지금 분석</button>
           <button id="catalogExport" class="btn catalog-export-btn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> 이미지 엑셀 저장</button>
         </div>
       </div>
@@ -518,11 +548,6 @@
         <p>저장된 결과는 유지합니다. 현재 분석 설정으로 남은 영상을 다시 시작할 수 있습니다. 처리 중이던 영상은 처음부터 다시 분석합니다.</p>
         <p id="catalogInterruptedError" class="catalog-error hidden"></p>
         <div id="catalogInterruptedItems"></div>
-      </div>
-      <div class="catalog-job hidden" id="catalogJob" aria-live="polite">
-        <div class="catalog-job-heading"><strong id="catalogJobTitle">분석 중</strong><button id="catalogCancel" class="btn btn-secondary" type="button">분석 중지</button></div>
-        <progress id="catalogJobProgress" max="100" value="0" aria-label="영상 분석 전체 진행률"></progress>
-        <p id="catalogJobText"></p>
       </div>
       <p class="catalog-notice hidden" id="catalogNotice" role="status"></p>
 
@@ -589,9 +614,9 @@
   <script src="js/app.js?v=1.6.0" defer></script>
   <script src="js/history.js?v=1.6.0" defer></script>
   <script src="js/catalog-sort.js?v=1.6.0" defer></script>
-  <script src="js/analysis-progress.js?v=1.9.4" defer></script>
-  <script src="js/catalog.js?v=1.9.4" defer></script>
-  <script src="js/diagnostics.js?v=1.9.4" defer></script>
-  <script src="js/app-update.js?v=1.9.4" defer></script>
+  <script src="js/analysis-progress.js?v=1.9.5" defer></script>
+  <script src="js/catalog.js?v=1.9.5" defer></script>
+  <script src="js/diagnostics.js?v=1.9.5" defer></script>
+  <script src="js/app-update.js?v=1.9.5" defer></script>
 </body>
 </html>

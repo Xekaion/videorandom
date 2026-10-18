@@ -6,7 +6,7 @@ const os = require('node:os');
 const express = require('express');
 const { createAnalysisService, validateOptions } = require('../lib/analysis-service');
 
-async function fixture(t, analyze) {
+async function fixture(t, analyze, { subtitleWriter } = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-service-'));
   const filePath = path.join(dataDir, '한글 영상.mp4');
   await fs.writeFile(filePath, 'test fixture');
@@ -15,7 +15,7 @@ async function fixture(t, analyze) {
     analyzeVideo: analyze || (async file => ({ ...file, duration: 60, status: 'completed', summary: '직접 검토할 요약', plot: '', dialogueSummary: '', labels: ['여행'], transcript: [{ start: 0, end: 5, text: '안녕하세요' }], frames: [], warnings: [], analyzedAt: new Date().toISOString() }))
   };
   const exporter = { createCatalogWorkbook: async records => Buffer.from(records.map(r => r.name).join('\n')) };
-  const service = createAnalysisService({ dataDir, engine, exporter });
+  const service = createAnalysisService({ dataDir, engine, exporter, subtitleWriter });
   await service.ready;
   service.registerFiles([{ name: path.basename(filePath), path: filePath, ext: 'MP4', size: 1 }]);
   const app = express();
@@ -43,6 +43,29 @@ async function waitForJob(request, id) {
   }
   throw new Error('Test job did not finish');
 }
+
+test('a returned transport failure clears its measured ETA before local persistence finishes', async t => {
+  let enteredSaving = false, releaseSaving;
+  const saving = new Promise(resolve => { releaseSaving = resolve; });
+  const f = await fixture(t, async (file, options, context) => {
+    context.onProgress('한국어 자막 번역', 95, { phase: 'translation', completedCues: 160, totalCues: 1819,
+      elapsedSeconds: 60, remainingSeconds: 600, sampleAgeSeconds: 0 });
+    return { ...file, status: 'partial', error: 'Synthetic transport failure', transcript: [], frames: [], warnings: [], labels: [] };
+  }, { subtitleWriter: async () => { enteredSaving = true; await saving; return null; } });
+  try {
+    const started = await (await f.request('/jobs', { files: [f.filePath], options: { mode: 'local' } })).json();
+    for (let n = 0; !enteredSaving && n < 100; n++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(enteredSaving, true);
+    const snapshot = await (await f.request('/jobs/' + started.id)).json();
+    assert.equal(snapshot.status, 'running');
+    assert.equal(snapshot.stageKey, 'saving');
+    assert.equal(snapshot.stage, '분석 결과 저장 중');
+    assert.equal(snapshot.phaseProgress, undefined);
+    releaseSaving();
+    const done = await waitForJob(f.request, started.id);
+    assert.equal(done.results[0].error, 'Synthetic transport failure');
+  } finally { releaseSaving(); }
+});
 
 test('analysis options reject invalid frames and API mode, and validate private server addresses', () => {
   assert.equal(validateOptions({ mode: 'local', apiKey: 'not sent' }).apiKey, '');

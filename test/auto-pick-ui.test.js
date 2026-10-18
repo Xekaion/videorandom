@@ -95,6 +95,11 @@ async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, 
         return { ok: resumeStatus < 400, status: resumeStatus, json: async () => plain(resumeResponse || { id: 'resumed-job', source: 'manual', status: 'running', total: 2, completed: 0, results: [] }) };
       }
       else if (url === '/api/analysis/jobs') result = { job: plain(manualResponse || { id: 'manual', source: 'manual', status: 'completed', total: body.files.length, completed: body.files.length, results: [] }) };
+      else if (route === '/api/analysis/queue' && method === 'GET') {
+        result = { ...plain(queue), scope: 'this-pc', sharedHostQueueKnown: false, currentBatch: [],
+          pending: queue.pending.map((file, index) => ({ ...plain(file), position: index + 1,
+            source: file.source || 'auto-pick', status: queue.enabled === false && file.source !== 'manual' ? 'disabled' : 'waiting' })) };
+      }
       else if (route === '/api/analysis/auto-pick') {
         if (method === 'PUT') {
           if (body.resume) {
@@ -308,6 +313,8 @@ test('queue polling detects sequential jobs through the cheap snapshot and expli
   ui.setQueue({ ...queue, paused: false, waitingReason: '', pendingCount: 1, pending: [picked('다음 영상.mp4')], activeAutoPath: picked().path, activeJob: job });
   await ui.runTimers(3000);
   assert.equal(ui.elements.get('catalogJobTitle').textContent, '뽑은 영상 자동 분석 중');
+  assert(ui.calls.some(call => call.url === '/api/analysis/queue?view=summary' && call.method === 'GET'));
+  assert(!ui.calls.some(call => call.url.split('?')[0] === '/api/analysis/auto-pick' && call.method === 'GET'));
   assert(ui.elements.get('catalogAutoStatus').textContent.includes('대기 1개'));
   assert.equal(ui.calls.filter(call => call.url.split('?')[0].endsWith('/config')).length, 1);
   const second = { ...job, id: 'auto-two', currentFile: '다음 영상.mp4' };
@@ -887,7 +894,7 @@ test('a new automatic analysis clears only its path stale repair failure while a
   // A different path has the same basename, so its fresh job must leave this
   // request failure visible while running and after its terminal response.
   ui.setQueue(queueFor(otherJob, other));
-  await ui.runTimers(300);
+  await ui.elements.get('catalogQueueRefresh').dispatch('click');
   assertRequestFailure();
   assertRowProcessing(ui, other, /^분석 중/, otherJob.stage, otherJob.percent);
   await ui.runTimers(1500);
@@ -898,13 +905,13 @@ test('a new automatic analysis clears only its path stale repair failure while a
   const oldRunning = { ...oldJob, status: 'running', completed: 0, percent: 23 };
   ui.setQueue(queueFor(oldRunning, record));
   next = oldJob;
-  await ui.runTimers(300);
+  await ui.elements.get('catalogQueueRefresh').dispatch('click');
   await ui.runTimers(1500);
   assertRequestFailure();
 
   const fresh = processingJob(record, { id: 'fresh-target-auto', source: 'auto-pick', repairOf: undefined, stage: '합성 줄거리 정리 중', percent: 68 });
   ui.setQueue(queueFor(fresh, record));
-  await ui.runTimers(300);
+  await ui.elements.get('catalogQueueRefresh').dispatch('click');
   assertRowProcessing(ui, record, /^분석 중/, fresh.stage, fresh.percent);
   const saved = { ...record, id: 'fresh-target-result', status: 'completed', summary: '새 자동 작업이 저장한 합성 줄거리',
     health: { code: 'ready', repairable: true, reason: '새 합성 분석이 완료되었습니다.' } };

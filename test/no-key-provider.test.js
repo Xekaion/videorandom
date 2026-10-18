@@ -201,18 +201,37 @@ test('external uploaded frames and no audio can be summarized without speech rec
 test('long transcript is summarized in ordered chunks with complete original text retained', async t => {
     const { dataDir, record } = await fixture(t, { transcript: [{ start: 0, end: 100, text: '처음' + '긴 대사 '.repeat(6500) + '마지막 대사' }] });
     const original = record.transcript[0].text;
+    let clock = 0;
+    const progress = [];
+    let completedChunks = 0;
     const mocked = mockSpawn(async call => {
+        clock += 10000;
         const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-        await writeResponse(call, schema.properties.plot ? summary() : { summary: '구간 줄거리', dialogue: '구간 대화', events: ['00:00:00 만남'] });
+        const chunkIndex = call.input.match(/구간 (\d+)\/\d+/)?.[1];
+        await writeResponse(call, schema.properties.plot ? summary() : { summary: '구간 줄거리 ' + chunkIndex, dialogue: '구간 대화', events: ['00:00:00 만남'] });
     });
-    const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir });
+    const timedProvider = createNoKeyProvider({ spawnImpl: mocked.spawnImpl, platform: 'win32', now: () => clock,
+        environment: { VIDEORANDOM_CODEX: 'mock-codex' }, statusCacheMs: 0 });
+    const result = await timedProvider.analyzeExtracted(record, { dataDir, onProgress(stage, percent, details) {
+        progress.push({ stage, percent, details });
+        if (details?.completedChunks > completedChunks) { completedChunks = details.completedChunks; clock += 15000; }
+    } });
     assert.equal(result.status, 'completed', result.error);
     assert.equal(result.transcript[0].text, original);
     const runs = mocked.calls.filter(call => call.args[0] === 'exec');
     assert.ok(runs.length > 2);
-    assert.ok(runs[0].input.includes('처음'));
-    assert.ok(runs[runs.length - 2].input.includes('마지막 대사'));
+    assert.ok(runs.slice(0, -1).some(call => call.input.includes('처음')));
+    assert.ok(runs.slice(0, -1).some(call => call.input.includes('마지막 대사')));
     assert.ok(runs.at(-1).input.includes('전체 대사를 순서대로 구간 요약'));
+    assert(runs.at(-1).input.indexOf('구간 1: 구간 줄거리 1') < runs.at(-1).input.indexOf('구간 2: 구간 줄거리 2'), 'parallel completion retains original summary order');
+    const measured = progress.filter(event => event.details?.phase === 'summary' && event.details.totalChunks);
+    assert.ok(measured.some(event => event.details.completedChunks === 0 && event.details.remainingSeconds === undefined));
+    assert.ok(measured.some(event => event.details.completedChunks >= 2 && event.details.remainingSeconds > 0));
+    assert.ok(measured.some(event => event.details.completedChunks === event.details.totalChunks && event.details.remainingSeconds === undefined));
+    const finalSummary = progress.find(event => event.stage === 'summary' && event.percent === 88);
+    assert.equal(finalSummary.details.completedChunks, undefined, 'final summary is a fresh unmeasured stage');
+    assert.equal(finalSummary.details.remainingSeconds, undefined);
+    assert.equal(progress.at(-1).details, undefined, 'completed jobs cannot retain a prior chunk estimate');
 });
 
 test('local speech JSONL streams UTF-8 segments and progress into retained full dialogue', async t => {
@@ -272,10 +291,11 @@ test('speech ETA uses observed phase work and never claims remaining whole-analy
             [20000, { type: 'progress', phase: 'transcription', completedSeconds: 40, totalSeconds: 100, percent: 32,
                 text: 'private material must not enter timing metadata' }],
             [30000, { type: 'progress', phase: 'transcription', completedSeconds: 40, totalSeconds: 100, percent: 32 }],
-            [40000, { type: 'progress', phase: 'audit', completedSeconds: 100, totalSeconds: 100, percent: 82 }],
-            [50000, { type: 'progress', phase: 'recovery', completedSeconds: 100, totalSeconds: 100, percent: 86 }],
-            [60000, { type: 'progress', phase: 'recovery', completedSeconds: 100, totalSeconds: 100, percent: 89 }],
-            [70000, { type: 'complete', segments: 0 }]
+            [141000, { type: 'progress', phase: 'transcription', completedSeconds: 40, totalSeconds: 100, percent: 32 }],
+            [151000, { type: 'progress', phase: 'audit', completedSeconds: 100, totalSeconds: 100, percent: 82 }],
+            [161000, { type: 'progress', phase: 'recovery', completedSeconds: 100, totalSeconds: 100, percent: 86 }],
+            [171000, { type: 'progress', phase: 'recovery', completedSeconds: 100, totalSeconds: 100, percent: 89 }],
+            [181000, { type: 'complete', segments: 0 }]
         ]) {
             clock = at;
             call.child.stdout.write(JSON.stringify(event) + '\n');
@@ -287,9 +307,11 @@ test('speech ETA uses observed phase work and never claims remaining whole-analy
     assert.equal(progress[1][2].remainingSeconds, undefined, 'a single completed window is too little timing evidence');
     assert.deepEqual(progress[2][2], { phase: 'transcription', profile: 'accurate', elapsedSeconds: 20, completedSeconds: 40, totalSeconds: 100, remainingSeconds: 30 });
     assert.equal(progress[3][2].remainingSeconds, 60, 'a heartbeat without completed work increases the conservative phase estimate');
-    assert.deepEqual(progress[4][2], { phase: 'audit', profile: 'accurate', elapsedSeconds: 0 });
-    assert.deepEqual(progress[5][2], { phase: 'recovery', profile: 'accurate', elapsedSeconds: 0 });
-    assert.deepEqual(progress[6][2], { phase: 'recovery', profile: 'accurate', elapsedSeconds: 10 });
+    assert.equal(progress[4][2].sampleAgeSeconds, 121);
+    assert.equal(progress[4][2].remainingSeconds, undefined, 'worker heartbeats cannot keep stale audio estimates alive');
+    assert.deepEqual(progress[5][2], { phase: 'audit', profile: 'accurate', elapsedSeconds: 0 });
+    assert.deepEqual(progress[6][2], { phase: 'recovery', profile: 'accurate', elapsedSeconds: 0 });
+    assert.deepEqual(progress[7][2], { phase: 'recovery', profile: 'accurate', elapsedSeconds: 10 });
     assert.ok(progress.every(([, , details]) => !('text' in details) && !('overallRemainingSeconds' in details)));
 });
 
