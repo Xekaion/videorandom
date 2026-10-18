@@ -97,7 +97,7 @@ test('accurate long translation overlaps one next draft after warmup while every
 
 for (const [label, options, expected] of [
     ['explicit pipeline off', { environment: { VIDEORANDOM_TRANSLATION_PIPELINE: 'off' } }, 12],
-    ['shorter source', { count: 479 }, 12], ['fast single pass', { quality: 'fast' }, 6]
+    ['fewer than four batches', { count: 319 }, 8], ['fast single pass', { quality: 'fast' }, 6]
 ]) test(`${label} preserves the serial request path`, async t => {
     const f = await fixture(t, { ...options, handler: async () => { await delay(1); } });
     const result = await f.run();

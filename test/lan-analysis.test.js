@@ -106,7 +106,7 @@ test('relay starts only explicitly and requires private client plus bearer authe
   const f = await fixture(t);
   assert.ok(f.status.connectionCode.length >= 24);
   const status = await (await f.request('/v1/status')).json();
-  assert.deepEqual(status, { ready: true, protocol: 1, appVersion: require('../package.json').version, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3', 'subtitle-translation-only-v1', 'managed-update-v1', 'diagnostics-v1'] });
+  assert.deepEqual(status, { ready: true, protocol: 1, appVersion: require('../package.json').version, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3', 'subtitle-translation-only-v1', 'managed-update-v1', 'diagnostics-v1', 'original-frame-fingerprints-v1'] });
   assert.equal(JSON.stringify(status).includes(f.status.connectionCode), false);
   assert.equal((await httpFixtureResponse(f.base + '/v1/status')).status, 401);
   assert.equal((await f.request('/v1/status', { headers: { Authorization: 'Bearer ' + 'x'.repeat(32) } })).status, 401);

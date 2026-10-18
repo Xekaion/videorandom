@@ -1,5 +1,6 @@
 """Stream ASR with full-audio processing and an independent coverage audit."""
 import argparse
+from bisect import bisect_left, bisect_right
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import gc
@@ -558,18 +559,59 @@ def rebuild_word_cues(words, templates, duration):
     return cues_from_segment(raw, 0, duration)
 
 
+class RecoveryTargetIndex:
+    """Reuse the unchanged target predicates without a full scan per word.
+
+    Prefix end bounds only exclude impossible intervals. Word intersections
+    still use the original subtraction and tolerance, including at boundaries.
+    """
+    def __init__(self, targets):
+        self.intervals, self.unordered = [], []
+        for start, end in targets:
+            if start <= end:
+                self.intervals.append((start, end))
+            elif not start > end:
+                # Normal recognition targets are finite. Preserve Python's
+                # original min/max behavior even for an unordered NaN input.
+                self.unordered.append((start, end))
+        self.intervals.sort()
+        self.starts = [start for start, _ in self.intervals]
+        self.ends = []
+        maximum = -math.inf
+        for _, end in self.intervals:
+            maximum = max(maximum, end)
+            self.ends.append(maximum)
+
+    def contains(self, point):
+        if point != point:
+            return False
+        index = bisect_right(self.starts, point) - 1
+        return index >= 0 and self.ends[index] >= point
+
+    def overlaps(self, start, end):
+        if any(min(end, right) - max(start, left) > 0.001 for left, right in self.unordered):
+            return True
+        index = bisect_left(self.starts, end) - 1
+        while index >= 0 and self.ends[index] > start:
+            left, right = self.intervals[index]
+            if min(end, right) - max(start, left) > 0.001:
+                return True
+            index -= 1
+        return False
+
+
 def recovery_candidates_for_targets(cues, targets, duration):
     """Select actual aligned words; a context cue's midpoint can miss its tail."""
+    targets = targets if isinstance(targets, RecoveryTargetIndex) else RecoveryTargetIndex(targets)
     selected = []
     for cue in cues:
-        if any(start <= (cue['start'] + cue['end']) / 2 <= end for start, end in targets):
+        if targets.contains((cue['start'] + cue['end']) / 2):
             # Preserve the established full-cue recovery path. A detector can
             # start after the actual opening word; trimming to its span would
             # discard native decoded dialogue even though this cue is in scope.
             selected.append(cue)
         elif cue.get('words'):
-            words = [word for word in cue['words'] if any(
-                min(word['end'], end) - max(word['start'], start) > 0.001 for start, end in targets)]
+            words = [word for word in cue['words'] if targets.overlaps(word['start'], word['end'])]
             selected.extend(rebuild_word_cues(words, [cue], duration))
     return selected
 
@@ -652,17 +694,78 @@ def recheck_fits_neighbors(candidates, original, old_index, replacements=None):
                    for neighbor in replacements.get(index, [old]))
 
 
+class RecoveryNeighborIndex:
+    """Skip distant neighbors, updating bounds when a recheck replaces a cue.
+
+    Internal nodes contain conservative time envelopes only. At a leaf, the
+    authoritative cue times and original 0.02-second comparison decide. A
+    replacement may extend outside the original cue, so its leaf and ancestors
+    are updated before the next recheck; no original bounds are assumed valid.
+    """
+    def __init__(self, original):
+        self.original, self.replacements = original, {}
+        self.size = 1
+        while self.size < len(original):
+            self.size *= 2
+        self.starts, self.ends = [math.inf] * (self.size * 2), [-math.inf] * (self.size * 2)
+        for index, cue in enumerate(original):
+            self.starts[self.size + index] = cue['start']
+            self.ends[self.size + index] = cue['end']
+        for index in range(self.size - 1, 0, -1):
+            self.starts[index] = min(self.starts[index * 2], self.starts[index * 2 + 1])
+            self.ends[index] = max(self.ends[index * 2], self.ends[index * 2 + 1])
+
+    def replace(self, index, cues):
+        self.replacements[index] = cues
+        node = self.size + index
+        self.starts[node] = min((cue['start'] for cue in cues), default=math.inf)
+        self.ends[node] = max((cue['end'] for cue in cues), default=-math.inf)
+        node //= 2
+        while node:
+            self.starts[node] = min(self.starts[node * 2], self.starts[node * 2 + 1])
+            self.ends[node] = max(self.ends[node * 2], self.ends[node * 2 + 1])
+            node //= 2
+
+    def fits(self, candidates, old_index):
+        for cue in candidates:
+            pending = [1]
+            while pending:
+                node = pending.pop()
+                if self.ends[node] <= cue['start'] or self.starts[node] >= cue['end']:
+                    continue
+                if node < self.size:
+                    pending.extend((node * 2, node * 2 + 1))
+                    continue
+                index = node - self.size
+                if index == old_index or index >= len(self.original):
+                    continue
+                for neighbor in self.replacements.get(index, [self.original[index]]):
+                    if min(cue['end'], neighbor['end']) - max(cue['start'], neighbor['start']) > 0.02:
+                        return False
+        return True
+
+
 def concordant_rechecks(original, candidates):
     """Confirm a native cue across several independently decoded reading cues."""
     used, replacements = set(), {}
+    # A recovery normally contains thousands of cues far away from the current
+    # native subtitle. Cache eligibility once, then search its inclusive time
+    # range. Keep the original candidate index for stable tie ordering and use.
+    eligible = []
+    for index, cue in enumerate(candidates):
+        score = cue_confidence(cue)
+        if cue.get('words') and not needs_review(cue) and score is not None and score >= 0.7:
+            eligible.append(((cue['start'] + cue['end']) / 2, index, cue))
+    eligible.sort(key=lambda entry: (entry[0], entry[1]))
+    midpoints = [midpoint for midpoint, _, _ in eligible]
+    neighbors = RecoveryNeighborIndex(original)
     for old_index, old in enumerate(original):
         if not (needs_review(old) or needs_alignment_review(old)):
             continue
-        matches = [(index, cue) for index, cue in enumerate(candidates) if index not in used
-                   and cue.get('words') and not needs_review(cue)
-                   and cue_confidence(cue) is not None and cue_confidence(cue) >= 0.7
-                   and old['start'] <= (cue['start'] + cue['end']) / 2 <= old['end']]
-        matches.sort(key=lambda pair: (pair[1]['start'], pair[1]['end']))
+        left = bisect_left(midpoints, old['start'])
+        right = bisect_right(midpoints, old['end'])
+        matches = [(index, cue) for _, index, cue in eligible[left:right] if index not in used]
+        matches.sort(key=lambda pair: (pair[1]['start'], pair[1]['end'], pair[0]))
         if not matches or not transcript_key(old['text']):
             continue
         if transcript_key(''.join(cue['text'] for _, cue in matches)) != transcript_key(old['text']):
@@ -673,11 +776,12 @@ def concordant_rechecks(original, candidates):
             continue
         # Do not displace a neighboring native subtitle to fit the new reading
         # breaks. Its actual words and times remain authoritative observations.
-        if not recheck_fits_neighbors([cue for _, cue in matches], original, old_index, replacements):
+        if not neighbors.fits([cue for _, cue in matches], old_index):
             continue
         flag = 'rechecked_confidence' if needs_review(old) else 'rechecked_alignment'
         replacements[old_index] = [{**cue, 'qualityFlags': list(dict.fromkeys(cue.get('qualityFlags', []) + [flag]))}
                                    for _, cue in matches]
+        neighbors.replace(old_index, replacements[old_index])
         used.update(index for index, _ in matches)
     result = [cue for index, old in enumerate(original) for cue in replacements.get(index, [old])]
     return result, [cue for index, cue in enumerate(candidates) if index not in used], len(used)
@@ -822,6 +926,7 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
                    for start, end, core_start, core_end in recovery_plan(targets, duration)]
         budget = sum(end - start for start, end, _, _ in windows)
         recovery_cues = []
+        target_index = RecoveryTargetIndex(targets)
 
         def recovery_waiting(window):
             emitter({'type': 'progress', 'phase': 'recovery', 'completedSeconds': duration,
@@ -835,7 +940,7 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
             candidates = []
             for segment in segments:
                 candidates.extend(recovery_candidates_for_targets(cues_from_segment(
-                    segment, start, duration, (core_start, core_end)), targets, duration))
+                    segment, start, duration, (core_start, core_end)), target_index, duration))
             recovery_cues.extend({**cue, '_window': window, '_boundary': core_start} for cue in candidates)
             rechecked += end - start
             emitter({'type': 'progress', 'phase': 'recovery', 'completedSeconds': duration,

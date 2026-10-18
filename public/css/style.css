@@ -1496,7 +1496,7 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-play-button { padding: 6px 10px; white-space: nowrap; }
 .catalog-text-clamp { line-height: 1.8; color: #cbd0da; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
 .catalog-labels { display: flex; flex-wrap: wrap; gap: 5px; }
-.catalog-label { border: 1px solid rgba(168,85,247,.2); background: rgba(168,85,247,.08); padding: 3px 7px; border-radius: 5px; font-size: 10px; line-height: 1.5; color: #d8b4fe; max-width: 100%; }
+.catalog-label { border: 1px solid rgba(168,85,247,.2); background: rgba(168,85,247,.08); padding: 2px 5px; border-radius: 5px; font-size: 8px; line-height: 1.35; color: #d8b4fe; max-width: 100%; }
 .catalog-muted { color: var(--color-text-muted); font-size: 12px; line-height: 1.8; }
 .catalog-frame-strip { display: flex; flex-wrap: wrap; gap: 5px; }
 .catalog-frame-thumb { padding: 0; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; overflow: hidden; background: #10101e; color: var(--color-text-muted); cursor: pointer; width: 59px; }

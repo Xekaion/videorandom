@@ -378,7 +378,14 @@ test('managed handoff finishes an in-flight image response and resumes the remai
   await fs.mkdir(path.join(clientDir, 'frames', id), { recursive: true });
   await Promise.all(frames.map(frame => fs.writeFile(path.join(clientDir, 'frames', id, frame.filename), JPEG)));
   let analyses = 0;
-  const f = await host(t, hostDir, async ({ record }) => { analyses++; return complete(record); });
+  const f = await host(t, hostDir, async ({ record }) => {
+    analyses++;
+    // The new exact-image reuse path needs no GET. Remove only this fixture's
+    // uploaded local copies so this test still exercises required image GETs
+    // across the managed handoff, including restoration of the second image.
+    await Promise.all(frames.map(frame => fs.unlink(path.join(clientDir, 'frames', id, frame.filename))));
+    return complete(record);
+  });
   const sendFile = f.service.app.response.sendFile;
   f.service.app.response.sendFile = function (filename, ...args) {
     if (path.basename(filename) !== frames[0].filename) return sendFile.call(this, filename, ...args);
