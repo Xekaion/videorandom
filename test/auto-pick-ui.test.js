@@ -1390,6 +1390,32 @@ test('saved untranslated cues show interruption or repair need with exact counts
   }
 });
 
+test('subtitle detail describes refusal detection evidence without guessing a missing source or promising a retry', async () => {
+  const cases = [
+    ['SUBTITLE_PROVIDER_REFUSAL', 'response-field', '응답의 거절 표시', false],
+    ['SUBTITLE_REFUSAL_TEXT_DETECTED', 'subtitle-text', '자막 속 작업 거절 문구 감지', true],
+    ['PROVIDER_REFUSAL', 'execution-error', '도구 실행 오류의 거절 표시', false],
+    ['SUBTITLE_PROVIDER_REFUSAL', undefined, '판정 근거: 미기록', true],
+    ['SUBTITLE_REFUSAL_TEXT_DETECTED', 'response-field<script>PRIVATE_SOURCE</script>', '판정 근거: 미기록', true]
+  ];
+  for (const [code, refusalSource, basis, unconfirmed] of cases) {
+    const record = { ...partialTimedRecord(), subtitleError: '합성 번역 중단',
+      subtitleDiagnostic: { code, refusalSource, rawResponse: 'PRIVATE_RAW_RESPONSE', reason: 'PRIVATE_REASON' } };
+    const ui = await boot({ records: [record] });
+    await catalogRow(ui, record.path).childNodes[1].childNodes[0].dispatch('click');
+    for (const id of ['catalogDetailRepairNote', 'catalogDetailWarnings', 'catalogSubtitleNotice']) {
+      const note = ui.elements.get(id).textContent;
+      assert.ok(note.includes(basis), `${id} shows ${code} evidence`);
+      assert.match(note, /구체적인 거절 사유는 기록되지 않았습니다/);
+      assert.equal(note.includes('실제 서비스가 요청을 거절했는지는 확정할 수 없습니다'), unconfirmed);
+      assert.doesNotMatch(note, /PRIVATE_SOURCE|PRIVATE_RAW_RESPONSE|PRIVATE_REASON|정책 카테고리|자동.*(?:재시도|완료)/);
+    }
+    assert.match(ui.elements.get('catalogSubtitleNotice').textContent, /한국어 번역 1 \/ 2구간/);
+    assert.doesNotMatch(ui.elements.get('catalogDetailRepairNote').textContent, /계속.*번역할 수 있습니다/);
+    assert.equal(ui.calls.some(call => call.method === 'POST'), false, 'opening an explanation never retries translation');
+  }
+});
+
 test('only the current video running translation marks missing cues as in progress and terminal polling removes that label', async () => {
   const record = partialTimedRecord();
   const neighbour = { ...partialTimedRecord(), id: 'other-transcript', path: picked('다른 합성 안내.mp4').path, name: '다른 합성 안내.mp4' };

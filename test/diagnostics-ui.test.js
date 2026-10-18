@@ -220,3 +220,28 @@ test('export is the fixed all-history download and persistence limits are stated
   assert.match(html, /연결이 끊긴 동안의 기록은 다시 연결되면 도착/);
   assert.match(html, /전체 JSONL은 현재 검색·필터와 관계없이/);
 });
+
+test('refusal diagnostics distinguish recorded detection sources and never infer an absent or malformed source', async () => {
+  const cases = [
+    { code: 'SUBTITLE_PROVIDER_REFUSAL', refusalSource: 'response-field', basis: '응답의 거절 표시', unconfirmed: false },
+    { code: 'SUBTITLE_REFUSAL_TEXT_DETECTED', refusalSource: 'subtitle-text', basis: '자막 속 작업 거절 문구 감지', unconfirmed: true },
+    { code: 'PROVIDER_REFUSAL', refusalSource: 'execution-error', basis: '도구 실행 오류의 거절 표시', unconfirmed: false },
+    { code: 'SUBTITLE_PROVIDER_REFUSAL', basis: '판정 근거: 미기록', unconfirmed: true },
+    { code: 'SUBTITLE_REFUSAL_TEXT_DETECTED', refusalSource: 'response-field<script>PRIVATE_SOURCE</script>', basis: '판정 근거: 미기록', unconfirmed: true },
+    { code: 'SUBTITLE_PROVIDER_REFUSAL', refusalSource: { text: 'PRIVATE_SOURCE' }, basis: '판정 근거: 미기록', unconfirmed: true }
+  ];
+  const ui = await boot({ response: result(cases.map((item, index) => event(String(index + 1).padStart(2, '0'), {
+    code: item.code, refusalSource: item.refusalSource, status: 'partial', level: 'error', message: '합성 번역 중단 기록', rawResponse: 'PRIVATE_RAW_RESPONSE' }))) });
+  await ui.open(true);
+  const rows = ui.elements.get('diagnosticsRows').childNodes;
+  for (const [index, item] of cases.entries()) {
+    const row = rows.find(node => textOf(node).includes(`작업 ${'owned-job'}`) && textOf(node).includes(item.basis)
+      && (item.unconfirmed === /실제 서비스가 요청을 거절했는지는 확정할 수 없습니다/.test(textOf(node))));
+    assert.ok(row, `source case ${index} is represented`);
+    assert.match(textOf(row), /구체적인 거절 사유는 기록되지 않았습니다/);
+  }
+  const all = textOf(ui.elements.get('diagnosticsRows'));
+  assert.doesNotMatch(all, /PRIVATE_SOURCE|PRIVATE_RAW_RESPONSE|<script>|정책 카테고리/);
+  assert.ok(rows.filter(row => textOf(row).includes('판정 근거: 미기록')).length >= 3);
+  assert.ok(ui.calls.every(call => !call.options?.method || call.options.method === 'GET'));
+});

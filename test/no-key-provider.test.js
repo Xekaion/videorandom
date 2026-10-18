@@ -1228,12 +1228,32 @@ for (const [failure, code] of [['safety refusal', 'PROVIDER_REFUSAL'], ['401 aut
         assert.equal(f.requests.length, 2);
         assert.equal(result.subtitleDiagnostic.stage, 'translation_review');
         assert.equal(result.subtitleDiagnostic.code, code);
+        assert.equal(result.subtitleDiagnostic.refusalSource, code === 'PROVIDER_REFUSAL' ? 'execution-error' : undefined);
+        assert.equal(events.find(event => event.event === 'error').refusalSource, code === 'PROVIDER_REFUSAL' ? 'execution-error' : undefined);
         assert.equal(result.subtitleDiagnostic.completedCues, 0);
         assert.equal('returnedCues' in result.subtitleDiagnostic, false);
         assert.equal(JSON.stringify([events, result.subtitleDiagnostic]).includes(secret), false);
         assert.equal(JSON.stringify([events, result.subtitleDiagnostic]).includes('C:\\private'), false);
     });
 }
+
+test('a refused local connection is a network error and stops after its first translation request', async t => {
+    const events = [];
+    const f = await translationGuardFixture(t, { count: 80, respond: () => {
+        throw Object.assign(new Error('ECONNREFUSED 127.0.0.1 synthetic-private-endpoint'), { exitCode: 1 });
+    } });
+    const result = await f.run({ onDiagnostic: event => events.push(event) });
+    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(f.requests.length, 1);
+    assert.equal(result.subtitleDiagnostic.stage, 'translation_draft');
+    assert.equal(result.subtitleDiagnostic.code, 'NETWORK_UNREACHABLE');
+    assert.equal(result.subtitleDiagnostic.systemCode, 'ECONNREFUSED');
+    assert.equal(result.subtitleDiagnostic.refusalSource, undefined);
+    assert.equal('returnedCues' in result.subtitleDiagnostic, false);
+    assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
+    assert.equal(events.filter(event => event.event === 'error').length, 1);
+    assert.equal(JSON.stringify([events, result.subtitleDiagnostic]).includes('synthetic-private-endpoint'), false);
+});
 
 test('full analysis forwards and retains a translation diagnostic before returning its partial result', async t => {
     const { dataDir, record } = await fixture(t, { transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
@@ -1453,7 +1473,10 @@ for (const refusal of ['이 요청의 번역을 제공할 수 없습니다.', '�
             text: item.review ? refusal : faithfulKorean })), terms: [] }) });
         const result = await f.run();
         assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 2);
-        assert.match(result.subtitleError, /요청을 거절/);
+        assert.match(result.subtitleError, /거절 문구를 감지/);
+        assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_REFUSAL_TEXT_DETECTED');
+        assert.equal(result.subtitleDiagnostic.refusalSource, 'subtitle-text');
+        assert.equal(result.subtitleDiagnostic.returnedCues, 80);
     });
 }
 
@@ -1469,7 +1492,10 @@ for (const phase of ['draft', 'review']) for (const refusal of [
     const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
         text: item.review === (phase === 'review') ? refusal : faithfulKorean })), terms: [] }) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.match(result.subtitleError, /요청을 거절/);
+    assert.equal(result.subtitleRepairStatus, 'failed'); assert.match(result.subtitleError, /거절 문구를 감지/);
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_REFUSAL_TEXT_DETECTED');
+    assert.equal(result.subtitleDiagnostic.refusalSource, 'subtitle-text');
+    assert.equal(result.subtitleDiagnostic.returnedCues, 80);
     assert.equal(f.requests.length, phase === 'draft' ? 1 : 2);
     assert.equal(f.requests.some(item => item.count <= 20), false);
     assert.equal(result.subtitleTranslationPartial?.length || 0, 0);

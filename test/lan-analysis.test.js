@@ -50,6 +50,39 @@ async function finished(f, id) {
   throw new Error('LAN job did not finish');
 }
 
+for (const [code, refusalSource] of [['SUBTITLE_PROVIDER_REFUSAL', 'response-field'],
+  ['SUBTITLE_REFUSAL_TEXT_DETECTED', 'subtitle-text'], ['PROVIDER_REFUSAL', 'execution-error']]) {
+  test(`LAN terminal and restart preserve safe refusal origin without replay: ${refusalSource}`, async t => {
+    let calls = 0;
+    const privateMarker = 'PRIVATE_REFUSAL_RESPONSE';
+    const f = await fixture(t, async ({ record }) => {
+      calls++;
+      return { ...record, status: 'partial', subtitleError: '합성 중단', subtitleDiagnostic: { code, refusalSource,
+        stage: 'translation_review', completedCues: 240, totalCues: 1819, startCue: 241, endCue: 320, expectedCues: 80,
+        rawResponse: privateMarker, refusalReason: privateMarker, prompt: privateMarker } };
+    });
+    const accepted = await (await f.submit()).json();
+    const done = await finished(f, accepted.id);
+    assert.equal(done.result.subtitleDiagnostic.code, code);
+    assert.equal(done.result.subtitleDiagnostic.refusalSource, refusalSource);
+    assert.equal(done.result.subtitleDiagnostic.startCue, 241);
+    assert.equal(JSON.stringify(done).includes(privateMarker), false);
+    const terminal = JSON.parse(await fs.readFile(path.join(f.dataDir, 'remote', 'jobs', accepted.id, 'terminal.json'), 'utf8'));
+    assert.equal(terminal.result.subtitleDiagnostic.refusalSource, refusalSource);
+    assert.equal(JSON.stringify(terminal).includes(privateMarker), false);
+    await f.service.stop();
+    const restored = createLanAnalysis({ dataDir: f.dataDir, processPackage: async () => { calls++; throw new Error('Restoring metadata must never replay a translation'); } });
+    const status = await restored.start({ port: 0, host: '127.0.0.1' });
+    try {
+      const response = await httpFixtureResponse(`http://127.0.0.1:${status.port}/v1/jobs/${accepted.id}`, { headers: { Authorization: 'Bearer ' + status.connectionCode } });
+      assert.equal(response.status, 200);
+      const restoredJob = await response.json();
+      assert.equal(restoredJob.result.subtitleDiagnostic.refusalSource, refusalSource);
+      assert.equal(calls, 1);
+    } finally { await restored.stop(); }
+  });
+}
+
 test('private address validation rejects public and malformed addresses', async () => {
   for (const value of ['127.0.0.1', '10.1.2.3', '172.16.1.1', '172.31.255.2', '192.168.55.166', '169.254.1.3', '::1', '::ffff:192.168.1.1', 'fdab::1234', 'fc00::1']) assert.equal(privateAddress(value), true, value);
   for (const value of ['8.8.8.8', '172.32.0.1', '172.15.1.1', '100.64.1.1', '192.0.0.1', '0.0.0.0', '::', 'fe80::1', '2001:4860::1', 'localhost', 'garbage']) assert.equal(privateAddress(value), false, value);

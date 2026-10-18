@@ -9,6 +9,9 @@
   const integer = value => Number.isSafeInteger(value) && value >= 0 && value <= 10000000;
   const SYSTEM_CODES = new Set(['ENOENT', 'ENOSPC', 'EACCES', 'EPERM', 'EROFS', 'EIO', 'EMFILE', 'ENFILE', 'ENOTDIR', 'EISDIR',
     'EHOSTUNREACH', 'ENETUNREACH', 'ECONNREFUSED', 'ENOTFOUND', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'MODULE_NOT_FOUND']);
+  const REFUSAL_CODES = new Set(['PROVIDER_REFUSAL', 'SUBTITLE_PROVIDER_REFUSAL', 'SUBTITLE_REFUSAL_TEXT_DETECTED']);
+  const REFUSAL_SOURCES = Object.assign(Object.create(null), { 'response-field': '응답의 거절 표시',
+    'subtitle-text': '자막 속 작업 거절 문구 감지', 'execution-error': '도구 실행 오류의 거절 표시' });
   const openAndVisible = () => element('diagnosticsPanel').open && document.hidden !== true && document.visibilityState !== 'hidden';
   const node = (tag, className, value) => { const item = document.createElement(tag); if (className) item.className = className; if (value !== undefined) item.textContent = String(value); return item; };
   const stages = Object.assign(Object.create(null), { translation_draft: '한국어 번역 초안', translation_review: '한국어 번역 검수', translation: '한국어 번역',
@@ -27,6 +30,7 @@
     for (const key of ['totalCues', 'completedCues', 'expectedCues', 'returnedCues', 'startCue', 'endCue']) if (integer(value[key])) item[key] = value[key];
     if (Number.isInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) item.httpStatus = value.httpStatus;
     if (SYSTEM_CODES.has(value.systemCode)) item.systemCode = value.systemCode;
+    if (typeof value.refusalSource === 'string' && Object.hasOwn(REFUSAL_SOURCES, value.refusalSource)) item.refusalSource = value.refusalSource;
     if (Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100) item.percent = value.percent;
     return item;
   }
@@ -93,6 +97,11 @@
       const technicalCodes = [event.httpStatus ? `HTTP ${event.httpStatus}` : '', event.systemCode ? `시스템 ${event.systemCode}` : ''].filter(Boolean).join(' · ');
       if (technicalCodes) message.append(node('span', 'diagnostics-meta', technicalCodes));
       if (event.message) message.append(node('p', '', safeText(event.message, 1000)));
+      if (REFUSAL_CODES.has(event.code)) {
+        const basis = REFUSAL_SOURCES[event.refusalSource];
+        message.append(node('p', 'diagnostics-meta', `판정 근거: ${basis || '미기록 · 이전 버전에서는 구분해 저장하지 않았습니다.'}${basis ? '.' : ''} 구체적인 거절 사유는 기록되지 않았습니다.`));
+        if (!basis || event.refusalSource === 'subtitle-text') message.append(node('p', 'diagnostics-meta', '이 기록만으로 실제 서비스가 요청을 거절했는지는 확정할 수 없습니다.'));
+      }
       row.append(pc, video, progress, message); rows.append(row);
     }
     if (!state.events.length) { const row = node('tr'); const cell = node('td', 'diagnostics-empty', state.loaded ? '검색 조건에 맞는 기록이 없습니다.' : '패널을 열어 서버의 작업 기록을 확인하세요.'); cell.colSpan = 5; row.append(cell); rows.append(row); }

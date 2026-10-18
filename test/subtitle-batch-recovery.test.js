@@ -242,8 +242,11 @@ for (const phase of ['draft', 'review']) test(`a partial ${phase} array containi
   } });
   const result = await f.run();
   assert.equal(result.subtitleRepairStatus, 'failed');
-  assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_PROVIDER_REFUSAL');
+  assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_REFUSAL_TEXT_DETECTED');
+  assert.equal(result.subtitleDiagnostic.refusalSource, 'subtitle-text');
+  assert.equal(result.subtitleDiagnostic.returnedCues, 37);
   assert.equal(f.requests.length, phase === 'draft' ? 1 : 2);
+  assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
 });
 
 for (const phase of ['draft', 'review']) test(`an explicit ${phase} refusal without a subtitle array stops before missing-cue repair`, async t => {
@@ -251,8 +254,50 @@ for (const phase of ['draft', 'review']) test(`an explicit ${phase} refusal with
   const result = await f.run();
   assert.equal(result.subtitleRepairStatus, 'failed');
   assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_PROVIDER_REFUSAL');
+  assert.equal(result.subtitleDiagnostic.refusalSource, 'response-field');
+  assert.equal('returnedCues' in result.subtitleDiagnostic, false, 'a missing subtitle array is not reported as zero returned cues');
   assert.equal(f.requests.length, phase === 'draft' ? 1 : 2);
+  assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
 });
+
+for (const phase of ['draft', 'review']) for (const source of ['response-field', 'subtitle-text']) {
+  test(`a resumed synthetic 1819-cue job preserves its reviewed 240-cue prefix on ${phase} ${source} detection without retry`, async t => {
+    const events = [], privateReason = 'SYNTHETIC-PRIVATE-REFUSAL-REASON';
+    const f = await fixture(t, { count: 1819, respond: item => {
+      assert.equal(item.start, 240, 'the saved prefix is not sent again and no later batch starts');
+      if (item.review !== (phase === 'review')) return;
+      const response = responseFor(item.input.subtitles.slice(0, 37));
+      if (source === 'response-field') response.refusal = privateReason;
+      else response.subtitles[36].text = '죄송하지만 해당 요청을 도와드릴 수 없습니다.';
+      return response;
+    } });
+    const old = await seedPrefix(f, 4, 240);
+    const result = await f.run({ onDiagnostic: event => events.push(event) });
+    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(f.requests.length, phase === 'draft' ? 1 : 2, 'detection cannot trigger supplements, length repair or another request');
+    assert.ok(f.requests.every(item => item.start === 240 && item.count === 80));
+    const diagnostic = result.subtitleDiagnostic;
+    assert.equal(diagnostic.code, source === 'response-field' ? 'SUBTITLE_PROVIDER_REFUSAL' : 'SUBTITLE_REFUSAL_TEXT_DETECTED');
+    assert.equal(diagnostic.refusalSource, source);
+    assert.equal(diagnostic.stage, `translation_${phase}`);
+    assert.equal(diagnostic.totalCues, 1819); assert.equal(diagnostic.completedCues, 240);
+    assert.equal(diagnostic.startCue, 241); assert.equal(diagnostic.endCue, 320);
+    assert.equal(diagnostic.expectedCues, 80); assert.equal(diagnostic.returnedCues, 37);
+    assert.equal(result.subtitleTranslationPartial.length, 240);
+    assert.ok(result.subtitleTranslationPartial.every(cue => cue.text === RETAINED));
+    assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), f.source.slice(0, 240).map(cue => [cue.id, cue.start, cue.end]));
+    assert.equal(result.subtitleTranslationProgress.completedCues, 240);
+    assert.equal(result.subtitleTranslationProgress.translationComplete, false);
+    assert.deepEqual(result.transcript, f.source);
+    const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', `${f.record.id}-ko.json`), 'utf8'));
+    assert.equal(saved.translationVersion, 6); assert.equal(saved.completedCues, 240); assert.equal(saved.reviewPasses, 2);
+    assert.ok(saved.subtitles.every(cue => cue.text === RETAINED));
+    assert.equal(await fs.readFile(old.filename, 'utf8'), old.bytes, 'the legacy reviewed checkpoint is unchanged');
+    assert.equal(events.filter(event => event.event === 'error').length, 1);
+    const technical = JSON.stringify([events, diagnostic]);
+    for (const secret of [privateReason, JAPANESE, KOREAN, RETAINED, f.dataDir, 'contextOtherSubtitles']) assert.equal(technical.includes(secret), false);
+  });
+}
 
 for (const phase of ['draft', 'review']) for (const failure of ['503 service unavailable', '401 authentication failed', 'quota usage limit']) test(`a ${phase} ${failure} stops without repair or retry`, async t => {
   const f = await fixture(t, { respond: item => {

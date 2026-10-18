@@ -47,6 +47,67 @@ test('known validation, provider and storage errors have static safe messages', 
   assert.equal(classifyDiagnosticError({ code: 'PROVIDER_UNAVAILABLE', httpStatus: 503 }).httpStatus, 503);
 });
 
+test('refusal diagnostics retain only known provenance and distinguish detected subtitle text', () => {
+  const sources = ['response-field', 'subtitle-text', 'execution-error'];
+  const codes = ['PROVIDER_REFUSAL', 'SUBTITLE_PROVIDER_REFUSAL', 'SUBTITLE_REFUSAL_TEXT_DETECTED'];
+  for (const code of codes) for (const refusalSource of sources) {
+    const input = { code, refusalSource, message: 'private response', refusal: 'private reason',
+      refusalReason: 'private policy category', prompt: 'private prompt', transcript: 'private dialogue' };
+    const classified = classifyDiagnosticError(input);
+    assert.equal(classified.code, code); assert.equal(classified.refusalSource, refusalSource);
+    assert.equal(JSON.stringify(classified).includes('private'), false);
+    const clean = sanitizeDiagnosticEvent(input);
+    assert.equal(clean.refusalSource, refusalSource);
+    assert.equal(JSON.stringify(clean).includes('private'), false);
+    assert.deepEqual(sanitizeDiagnosticEvent(clean), clean);
+  }
+  const detected = classifyDiagnosticError({ code: 'SUBTITLE_REFUSAL_TEXT_DETECTED', refusalSource: 'subtitle-text' });
+  assert.match(detected.message, /거절로 보이는 문구/);
+  assert.match(detected.message, /실제 거절 여부와 사유는 확인되지/);
+  assert.match(detected.message, /자동 재시도하지 않습니다/);
+  assert.notEqual(detected.message, classifyDiagnosticError({ code: 'SUBTITLE_PROVIDER_REFUSAL' }).message);
+  assert.equal(classifyDiagnosticError('request refused').refusalSource, undefined, 'provenance is not invented for old text-only errors');
+  assert.equal(sanitizeDiagnosticEvent({ error: { code: 'SUBTITLE_PROVIDER_REFUSAL', refusalSource: 'response-field' } }).refusalSource, 'response-field');
+  assert.equal(sanitizeDiagnosticEvent({ message: 'request refused', refusalSource: 'execution-error' }).refusalSource, 'execution-error');
+});
+
+test('refusal provenance drops unrecognized values and cannot replace technical error classification', () => {
+  for (const refusalSource of ['response-field private', 'policy', 'private reason', '', 1, null, [], {}, true]) {
+    assert.equal('refusalSource' in classifyDiagnosticError({ code: 'SUBTITLE_PROVIDER_REFUSAL', refusalSource }), false);
+    assert.equal('refusalSource' in sanitizeDiagnosticEvent({ code: 'SUBTITLE_REFUSAL_TEXT_DETECTED', refusalSource }), false);
+  }
+  assert.equal('refusalSource' in sanitizeDiagnosticEvent({ refusalSource: 'response-field' }), false);
+  for (const [message, code] of [['ECONNREFUSED private', 'NETWORK_UNREACHABLE'], ['401 authentication refused', 'PROVIDER_AUTH'],
+    ['403 request refused', 'PROVIDER_AUTH'], ['429 quota refused', 'PROVIDER_QUOTA'], ['503 ServiceUnavailable request refused', 'PROVIDER_UNAVAILABLE'],
+    ['ETIMEDOUT refused', 'PROVIDER_TIMEOUT'], ['EACCES request refused', 'STORAGE_WRITE_FAILED']]) {
+    const classified = classifyDiagnosticError({ message, refusalSource: 'execution-error' });
+    assert.equal(classified.code, code, message);
+    assert.equal('refusalSource' in classified, false);
+    const clean = sanitizeDiagnosticEvent({ message, refusalSource: 'subtitle-text' });
+    assert.equal(clean.code, code); assert.equal('refusalSource' in clean, false);
+  }
+  assert.equal('refusalSource' in classifyDiagnosticError({ code: 'PROVIDER_AUTH', refusalSource: 'response-field' }), false);
+});
+
+test('safe refusal provenance survives storage, client outbox, fresh process and JSONL export', async t => {
+  const { store, dataDir } = await fixture(t);
+  const event = { event: 'error', level: 'error', stage: 'translation_review', code: 'SUBTITLE_REFUSAL_TEXT_DETECTED',
+    refusalSource: 'subtitle-text', completedCues: 240, totalCues: 1819, startCue: 240, endCue: 319,
+    message: 'private response', refusalReason: 'private reason', transcript: 'private dialogue' };
+  await store.append(event);
+  await store.enqueueReport(event, 'http://127.0.0.1:3001');
+  let exported = ''; for await (const line of store.exportEvents()) exported += line;
+  assert.equal(JSON.parse(exported).refusalSource, 'subtitle-text');
+  assert.equal(exported.includes('private'), false);
+  const code = `const s=require('./lib/diagnostics').createDiagnosticsStore({dataDir:process.argv[1]});(async()=>console.log(JSON.stringify({query:await s.query(),outbox:await s.pendingReports('http://127.0.0.1:3001')})))();`;
+  const output = await run(process.execPath, ['-e', code, dataDir], { cwd: path.resolve(__dirname, '..'), windowsHide: true });
+  const reopened = JSON.parse(output.stdout);
+  assert.equal(reopened.query.events[0].refusalSource, 'subtitle-text');
+  assert.equal(reopened.outbox[0].event.refusalSource, 'subtitle-text');
+  assert.equal(reopened.query.events[0].code, 'SUBTITLE_REFUSAL_TEXT_DETECTED');
+  assert.equal(output.stdout.includes('private'), false);
+});
+
 test('HTTP status survives repeated sanitization, persistence and JSONL export', async t => {
   const { store, dataDir } = await fixture(t);
   await store.append({ event: 'error', level: 'error', ...classifyDiagnosticError('503 ServiceUnavailable private') });

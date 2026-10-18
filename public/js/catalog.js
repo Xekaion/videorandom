@@ -162,9 +162,21 @@
   }
 
   function detailRepairNote(record) {
+    const refusal = subtitleRefusalNote(record);
+    if (refusal) return `${record.subtitleError || '한국어 번역이 중단되었습니다.'}\n${refusal}\n저장된 원문과 검수된 번역은 보관합니다.`;
     return translationNeedsRecovery(record)
       ? `${record.subtitleError || '한국어 번역이 완료되지 않았습니다.'} ‘남은 한국어 자막 번역 계속’으로 저장된 원문과 시간을 사용해 이어서 번역할 수 있습니다.`
       : completedTranslationRepair(record)?.detail || `${healthFor(record).reason} 현재 분석 설정으로 다시 분석하며 기존 결과는 보존합니다.`;
+  }
+
+  function subtitleRefusalNote(record) {
+    const diagnostic = record?.subtitleDiagnostic;
+    if (!diagnostic || !['PROVIDER_REFUSAL', 'SUBTITLE_PROVIDER_REFUSAL', 'SUBTITLE_REFUSAL_TEXT_DETECTED'].includes(diagnostic.code)) return '';
+    const sources = Object.assign(Object.create(null), { 'response-field': '응답의 거절 표시', 'subtitle-text': '자막 속 작업 거절 문구 감지',
+      'execution-error': '도구 실행 오류의 거절 표시' });
+    const source = typeof diagnostic.refusalSource === 'string' && Object.hasOwn(sources, diagnostic.refusalSource) ? diagnostic.refusalSource : undefined;
+    const basis = sources[source];
+    return `판정 근거: ${basis || '미기록 · 이전 버전에서는 구분해 저장하지 않았습니다.'}${basis ? '.' : ''} 구체적인 거절 사유는 기록되지 않았습니다.${!source || source === 'subtitle-text' ? ' 이 기록만으로 실제 서비스가 요청을 거절했는지는 확정할 수 없습니다.' : ''}`;
   }
 
   function translationInProgress(record) {
@@ -1686,7 +1698,8 @@
     $('catalogDetailRepair').disabled = state.starting || isActive(state.job) || !state.config;
     $('catalogSubtitleRepair').disabled = state.starting || isActive(state.job) || !state.config || !record.transcript?.length;
     $('catalogSubtitleRepair').title = record.transcript?.length ? '저장된 원문과 시간으로 한국어 자막만 번역합니다. 음성 인식과 줄거리는 다시 생성하지 않습니다.' : '저장된 원문 대사가 있어야 번역만 복구할 수 있습니다.';
-    const warnings = [...(Array.isArray(record.warnings) ? record.warnings : []), ...(record.error ? [record.error] : []), ...(record.subtitleError ? [record.subtitleError] : [])];
+    const refusal = subtitleRefusalNote(record);
+    const warnings = [...(Array.isArray(record.warnings) ? record.warnings : []), ...(record.error ? [record.error] : []), ...(record.subtitleError ? [record.subtitleError] : []), ...(refusal ? [refusal] : [])];
     $('catalogDetailWarnings').textContent = warnings.join('\n');
     $('catalogDetailWarnings').classList.toggle('hidden', !warnings.length);
     $('catalogEditSummary').value = record.summary || '';
@@ -1794,14 +1807,16 @@
     const counts = `한국어 번역 ${translations.length.toLocaleString()} / ${transcript.length.toLocaleString()}구간 · ${lastTranslated}`;
     const allSourceCuesTranslated = completeTranslation || translated && translations.length === transcript.length
       && record.subtitleTranslationProgress?.translationComplete === true;
+    const refusal = subtitleRefusalNote(record);
     const status = translating ? '이 영상의 한국어 번역이 진행 중입니다. 아직 처리되지 않은 구간은 미번역 상태로 표시합니다.'
       : allSourceCuesTranslated ? partial ? '저장된 원문 대사의 한국어 번역은 모두 끝났습니다. 원어 인식 확인이 남아 부분 자막으로 보관합니다.'
         : '한국어 번역은 원문 자막의 시작·종료 시각을 그대로 사용합니다. SRT / VTT를 영상과 함께 사용할 수 있습니다.'
+        : refusal ? '한국어 번역이 중단되었습니다. 저장된 원문과 검수된 번역은 보관합니다.'
         : record.subtitleError ? '한국어 번역이 중단되었습니다. ‘남은 한국어 자막 번역 계속’으로 저장된 원문과 시간을 사용해 이어서 번역할 수 있습니다.'
           : '한국어 미번역 구간이 남아 있습니다. 번역 복구가 필요합니다. 저장된 원문과 시간으로 한국어 번역만 복구할 수 있습니다.';
     const message = [partial ? `검수된 한국어 부분 자막 ${translations.length.toLocaleString()} / ${transcript.length.toLocaleString()}구간을 표시합니다.` : '',
       counts, status, partial ? '부분 SRT / VTT로 직접 저장할 수 있습니다.' : '',
-      record.subtitleError ? `${partial && allSourceCuesTranslated ? '원어 확인 안내' : translating ? '이전 번역 안내' : '원인'}: ${record.subtitleError}` : ''].filter(Boolean).join('\n');
+      record.subtitleError ? `${partial && allSourceCuesTranslated ? '원어 확인 안내' : translating ? '이전 번역 안내' : '원인'}: ${record.subtitleError}` : '', refusal].filter(Boolean).join('\n');
     $('catalogSubtitleNotice').textContent = message;
     $('catalogSubtitleNotice').classList.remove('hidden');
     $('catalogSubtitleNotice').classList.toggle('catalog-error', !!record.subtitleError);
