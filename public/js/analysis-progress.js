@@ -7,11 +7,31 @@
   'use strict';
 
   const PHASES = ['transcription', 'recovery', 'audit', 'completed'];
+  const COMPUTE_TYPES = ['float32', 'float16', 'bfloat16', 'int8', 'int8_float16', 'int8_float32', 'int8_bfloat16', 'int16'];
   const seconds = value => Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+
+  function normalizeSpeechMetadata(value) {
+    const result = {};
+    if (!value || typeof value !== 'object') return result;
+    if (typeof value.model === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(value.model)) result.model = value.model;
+    if (['fast', 'accurate'].includes(value.profile)) result.profile = value.profile;
+    if (['cpu', 'cuda'].includes(value.device)) result.device = value.device;
+    if (COMPUTE_TYPES.includes(value.computeType)) result.computeType = value.computeType;
+    if ([1, 2].includes(value.workers)) result.workers = value.workers;
+    return result;
+  }
+
+  function formatSpeechMetadata(value) {
+    const actual = normalizeSpeechMetadata(value);
+    return [actual.model || '모델 미확인', actual.profile === 'accurate' ? '정확도 우선' : actual.profile === 'fast' ? '속도 우선' : '품질 설정 미확인',
+      actual.device === 'cuda' ? 'GPU (CUDA)' : actual.device === 'cpu' ? 'CPU' : '장치 미확인',
+      actual.computeType ? `연산 ${actual.computeType}` : '연산 형식 미확인',
+      actual.workers ? actual.workers === 2 ? '2구간 병렬 처리' : '1구간씩 처리' : '병렬 수 미확인'].join(' · ');
+  }
 
   function normalizeProgressDetails(value) {
     if (!value || typeof value !== 'object' || !PHASES.includes(value.phase)) return undefined;
-    const result = { phase: value.phase };
+    const result = { phase: value.phase, ...normalizeSpeechMetadata(value) };
     if (seconds(value.elapsedSeconds)) result.elapsedSeconds = value.elapsedSeconds;
     if (seconds(value.sampleAgeSeconds)) result.sampleAgeSeconds = value.sampleAgeSeconds;
     if (seconds(value.completedSeconds) && seconds(value.totalSeconds) && value.totalSeconds > 0
@@ -46,6 +66,7 @@
     if (!details || details.phase === 'completed') return '';
     const label = details.phase === 'recovery' ? '재검수 음성' : '인식한 음성';
     const parts = [];
+    parts.push(`실제 음성 인식: ${formatSpeechMetadata(details)}`);
     if (details.totalSeconds) parts.push(`${label} ${clock(details.completedSeconds)} / ${clock(details.totalSeconds)}`);
     if (details.phase === 'transcription' || details.phase === 'recovery') {
       const phase = details.phase === 'recovery' ? '재검수' : '음성 인식';
@@ -58,5 +79,5 @@
     return parts.join(' · ');
   }
 
-  return { normalizeProgressDetails, ageProgressDetails, formatProgressDetails };
+  return { normalizeProgressDetails, ageProgressDetails, formatProgressDetails, normalizeSpeechMetadata, formatSpeechMetadata };
 });

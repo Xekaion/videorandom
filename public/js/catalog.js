@@ -6,7 +6,6 @@
   const MAX_BATCH = 1000;
   const SORT_STORAGE_KEY = 'video_catalog_sort';
   const catalogSort = window.videoCatalogSort;
-  const phaseTimingText = job => window.videoAnalysisProgress?.formatProgressDetails(job?.phaseProgress) || '';
   const taskLabel = job => job?.operation === 'translation-only' ? '자막 번역' : job?.source === 'repair' ? '복구' : '분석';
   const verifiedPartialSources = new WeakMap();
   const state = {
@@ -15,10 +14,10 @@
     pendingRequest: null, requestFailure: null, jobTargets: { id: '', keys: new Set() }, detailActivityPath: '',
     refreshing: false, detailId: null, detailPath: '', detailRequest: 0, saving: false, subtitleDownloading: false, subtitleFolderSaving: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
-    autoPick: null, autoTimer: null, autoSettingsTimer: null,
+    autoPick: null, autoTimer: null, autoSettingsTimer: null, settingsRevision: 0, noticeRevision: 0, fastSave: null, fastNoticeRevision: null,
     autoPolling: false, autoBusy: false, autoResuming: false, autoResumeError: '', autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
     resultsReady: false, autoSavedCount: null, autoResultsLoading: false, autoResultsWanted: null,
-    winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: ''
+    winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: '', speechInfo: { jobId: '', fileKey: '', metadata: null }
   };
   const $ = id => document.getElementById(id);
   const pathKey = path => String(path || '').replace(/\//g, '\\').toLowerCase();
@@ -71,6 +70,26 @@
   const recordFor = file => state.records.get(pathKey(file.path));
   const frameUrl = (record, frame) => `/api/analysis/frames/${encodeURIComponent(record.id)}/${encodeURIComponent(frame.filename)}`;
   const isActive = job => job && ['running', 'cancelling', 'queued'].includes(job.status);
+  const speechFileKey = job => String(job?.currentFilePath || job?.currentFile || '');
+  function rememberSpeechInfo(job) {
+    const fileKey = speechFileKey(job);
+    if (state.speechInfo.jobId !== job.id || state.speechInfo.fileKey !== fileKey) state.speechInfo = { jobId: job.id, fileKey, metadata: null };
+    const normalize = window.videoAnalysisProgress?.normalizeSpeechMetadata;
+    if (!normalize) return;
+    let actual = normalize(job.phaseProgress);
+    const result = job.results?.find(record => job.currentFilePath && pathKey(record.path) === pathKey(job.currentFilePath))
+      || (job.total === 1 ? job.results?.[0] : null);
+    if (!isActive(job) && result?.transcriptionQuality) actual = { ...actual, ...normalize(result.transcriptionQuality) };
+    if (Object.keys(actual).length) state.speechInfo.metadata = { ...state.speechInfo.metadata, ...actual };
+  }
+  function phaseTimingText(job) {
+    const known = state.speechInfo;
+    const metadata = known.jobId === job?.id && known.fileKey === speechFileKey(job) ? known.metadata : null;
+    const details = job?.phaseProgress ? { ...job.phaseProgress, ...metadata, ...window.videoAnalysisProgress?.normalizeSpeechMetadata(job.phaseProgress) } : null;
+    const timing = isActive(job) ? window.videoAnalysisProgress?.formatProgressDetails(details) || '' : '';
+    if (timing) return timing;
+    return metadata ? `음성 인식 사용 기록: ${window.videoAnalysisProgress.formatSpeechMetadata(metadata)}` : '';
+  }
   const hasResult = record => record && (record.status !== 'failed' || frames(record).length > 0 || (record.transcriptCount ?? record.transcript?.length ?? 0) > 0);
   const hasSummary = record => !![record?.summary, record?.plot].some(value => typeof value === 'string' && value.trim());
   const transcriptLanguage = value => ['auto', 'ja', 'zh'].includes(value) ? value : 'auto';
@@ -166,6 +185,7 @@
   const jsonOptions = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
   function notice(message = '', error = false) {
+    state.noticeRevision++;
     $('catalogNotice').textContent = message;
     $('catalogNotice').classList.toggle('hidden', !message);
     $('catalogNotice').classList.toggle('catalog-error', error);
@@ -330,18 +350,48 @@
   async function syncAutoPick(extra = {}) {
     if (!state.settingsReady) return;
     clearTimeout(state.autoSettingsTimer);
-    const result = await request('/api/analysis/auto-pick', jsonOptions('PUT', { options: autoOptions(), ...extra }));
-    autoNotice();
-    applyAutoPick(result);
-    return result;
+    const revision = state.settingsRevision;
+    const fastSave = state.fastSave;
+    try {
+      const result = await request('/api/analysis/auto-pick', jsonOptions('PUT', { options: autoOptions(), ...extra }));
+      if (revision === state.settingsRevision) {
+        autoNotice();
+        applyAutoPick(result);
+      }
+      if (fastSave && state.fastSave === fastSave && revision === fastSave.settingsRevision && state.settingsRevision === revision) {
+        if (state.noticeRevision === fastSave.noticeRevision) {
+          notice('속도 우선 설정을 이 PC에 저장했습니다. 이 PC에서 요청하는 다음 분석부터 기존 자막을 먼저 사용하며, 자막이 없으면 기본 small 모델로 음성을 인식합니다. 이미 진행 중인 작업과 다른 PC의 설정은 바뀌지 않습니다.');
+          state.fastNoticeRevision = state.noticeRevision;
+        }
+        state.fastSave = null;
+      }
+      return result;
+    } catch (error) {
+      if (fastSave && state.fastSave === fastSave && revision === fastSave.settingsRevision && state.settingsRevision === revision) {
+        if (state.noticeRevision === fastSave.noticeRevision) {
+          notice(`속도 우선 설정을 이 PC에 저장하지 못했습니다. 다시 선택해 주세요. ${error.message}`, true);
+          state.fastNoticeRevision = state.noticeRevision;
+        }
+        state.fastSave = null;
+      }
+      throw error;
+    }
   }
 
   function scheduleAutoSettings(field) {
+    state.settingsRevision++;
+    state.fastSave = null;
+    if (state.fastNoticeRevision === state.noticeRevision) notice();
+    state.fastNoticeRevision = null;
     state.settingsTouched = true;
     if (field) state.settingsFields.add(field);
-    if (!state.settingsReady) return;
+    if (!state.settingsReady) return state.settingsRevision;
     clearTimeout(state.autoSettingsTimer);
-    state.autoSettingsTimer = setTimeout(() => syncAutoPick().catch(error => autoNotice(`자동 분석 설정 저장 실패 · ${error.message}`, true)), 450);
+    const revision = state.settingsRevision;
+    state.autoSettingsTimer = setTimeout(() => syncAutoPick().catch(error => {
+      if (revision === state.settingsRevision) autoNotice(`자동 분석 설정 저장 실패 · ${error.message}`, true);
+    }), 450);
+    return state.settingsRevision;
   }
 
   async function changeAutoPick(extra) {
@@ -1210,7 +1260,7 @@
     $('catalogJobTitle').textContent = job.operation === 'translation-only' ? `한국어 자막 번역 복구 · ${jobTitle.replace(/^영상 /, '')}` : job.source === 'auto-pick' ? `뽑은 영상 자동 ${jobTitle.replace(/^영상 /, '')}` : job.source === 'repair' ? `복구 · ${jobTitle}` : jobTitle;
     $('catalogJobProgress').value = overall;
     const timing = Number.isFinite(job.elapsedMs) ? ` · 경과 ${time(job.elapsedMs / 1000)}${active && Number.isFinite(job.stageElapsedMs) ? ` · 현재 단계 ${time(job.stageElapsedMs / 1000)}` : ''}` : '';
-    const phaseTiming = active ? phaseTimingText(job) : '';
+    const phaseTiming = phaseTimingText(job);
     $('catalogJobText').textContent = `${completed}/${total}개 처리${job.currentFile ? ` · ${job.currentFile}` : ''}${active && job.stage ? ` · ${job.stage}` : ''}${timing}${phaseTiming ? ` · ${phaseTiming}` : ''}${job.error ? ` · ${job.error}` : ''}`;
     $('catalogCancel').classList.toggle('hidden', !active);
     $('catalogCancel').disabled = job.status === 'cancelling';
@@ -1233,6 +1283,7 @@
     if (paths) state.jobTargets = { id: job.id, keys: new Set(paths.map(pathKey)) };
     else if (state.jobTargets.id !== job.id) state.jobTargets = { id: job.id, keys: new Set() };
     state.job = job;
+    rememberSpeechInfo(job);
     mergeRecords(job.results);
     displayJob(job);
     render();
@@ -1585,7 +1636,9 @@
       && progress.completedCues >= 0 && progress.completedCues <= progress.totalCues;
     const translationStatus = hasProgress ? `한국어 번역 ${progress.completedCues.toLocaleString()} / ${progress.totalCues.toLocaleString()}구간${progress.complete === true ? ' 완료' : progress.translationComplete === true ? ' · 번역 검수 완료' : ' · 진행 기록 보관됨'}${progress.sourceComplete === false ? ' · 원어 인식 확인 필요' : ''}` : '';
     if (!quality || typeof quality !== 'object') {
-      notice.textContent = [record.transcript?.length ? '전체 음성 처리 확인 기록이 없습니다. 누락이 있으면 정확도 우선으로 복구 / 다시 분석하세요.' : '', translationStatus].filter(Boolean).join('\n');
+      const existingSubtitle = /^(?:sidecar|embedded):/.test(record.transcriptSource || '');
+      notice.textContent = [existingSubtitle ? '기존 자막을 사용했습니다. 이 결과에는 새 음성 인식 모델·장치 기록이 없습니다.'
+        : record.transcript?.length ? '전체 음성 처리 확인 기록이 없습니다. 누락이 있으면 정확도 우선으로 복구 / 다시 분석하세요.' : '', translationStatus].filter(Boolean).join('\n');
       notice.classList.toggle('hidden', !notice.textContent);
       notice.classList.remove('catalog-error');
       return;
@@ -1594,8 +1647,8 @@
     const unresolved = Array.isArray(audit.unresolved) ? audit.unresolved : [];
     const processed = Number.isFinite(quality.processedUntil) ? time(quality.processedUntil) : '확인 중';
     const duration = Number.isFinite(quality.duration) ? time(quality.duration) : time(record.duration);
-    const lines = [`음성 인식: ${quality.model || '모델 미상'} · ${quality.profile === 'accurate' ? '정확도 우선' : '빠름'} · 처리 ${processed} / ${duration}`];
-    if (quality.workers === 2) lines.push('GPU에서 음성 두 구간을 병렬 처리했습니다.');
+    const actualSpeech = window.videoAnalysisProgress?.formatSpeechMetadata(quality) || '모델·장치 미확인';
+    const lines = [`실제 음성 인식: ${actualSpeech} · 처리 ${processed} / ${duration}`];
     if (quality.parallelMemoryFallback) lines.push('GPU 메모리가 부족해 남은 음성 구간은 하나씩 처리했습니다.');
     if (quality.profile === 'accurate' && quality.recognitionRevision !== 3) lines.push('이전 인식 방식으로 저장한 결과입니다. 긴 영상의 전체 재검수를 적용하려면 정확도 우선으로 복구 / 다시 분석하세요.');
     if (quality.processingComplete === true) lines.push('전체 음성 파일 처리는 끝났습니다. 아래 내용은 별도의 누락·신뢰도 검수 결과입니다.');
@@ -1729,8 +1782,10 @@
       $('catalogTranscribe').checked = false;
       state.settingsFields.add('catalogTranscribe');
       settingsChanged();
-      scheduleAutoSettings('catalogSubtitleQuality');
-      notice('속도 우선 설정을 저장했습니다. 다음 분석부터 기존 자막을 먼저 사용하며, 자막이 없으면 small 모델로 음성을 인식합니다.');
+      const revision = scheduleAutoSettings('catalogSubtitleQuality');
+      notice('속도 우선 설정을 선택했습니다. 이 PC의 다음 분석 설정을 저장하고 있습니다…');
+      state.fastNoticeRevision = state.noticeRevision;
+      state.fastSave = { settingsRevision: revision, noticeRevision: state.noticeRevision };
     });
     $('catalogAutoEnabled').addEventListener('change', event => changeAutoPick({ enabled: event.target.checked }));
     $('catalogAutoResume').addEventListener('click', () => changeAutoPick({ resume: true }));

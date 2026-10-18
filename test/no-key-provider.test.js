@@ -285,11 +285,11 @@ test('speech ETA uses observed phase work and never claims remaining whole-analy
     const progress = [];
     await instance.transcribeLocalAudio(audioPath, { dataDir, onProgress: (...args) => progress.push(args) });
     assert.equal(progress[1][2].remainingSeconds, undefined, 'a single completed window is too little timing evidence');
-    assert.deepEqual(progress[2][2], { phase: 'transcription', elapsedSeconds: 20, completedSeconds: 40, totalSeconds: 100, remainingSeconds: 30 });
+    assert.deepEqual(progress[2][2], { phase: 'transcription', profile: 'accurate', elapsedSeconds: 20, completedSeconds: 40, totalSeconds: 100, remainingSeconds: 30 });
     assert.equal(progress[3][2].remainingSeconds, 60, 'a heartbeat without completed work increases the conservative phase estimate');
-    assert.deepEqual(progress[4][2], { phase: 'audit', elapsedSeconds: 0 });
-    assert.deepEqual(progress[5][2], { phase: 'recovery', elapsedSeconds: 0 });
-    assert.deepEqual(progress[6][2], { phase: 'recovery', elapsedSeconds: 10 });
+    assert.deepEqual(progress[4][2], { phase: 'audit', profile: 'accurate', elapsedSeconds: 0 });
+    assert.deepEqual(progress[5][2], { phase: 'recovery', profile: 'accurate', elapsedSeconds: 0 });
+    assert.deepEqual(progress[6][2], { phase: 'recovery', profile: 'accurate', elapsedSeconds: 10 });
     assert.ok(progress.every(([, , details]) => !('text' in details) && !('overallRemainingSeconds' in details)));
 });
 
@@ -314,7 +314,7 @@ test('independent recovery work counters support a separate ETA without reusing 
     const progress = [];
     await instance.transcribeLocalAudio(audioPath, { dataDir, onProgress: (...args) => progress.push(args) });
     assert.deepEqual(progress.at(-1).slice(0, 1), ['대사 누락 재확인']);
-    assert.deepEqual(progress.at(-1)[2], { phase: 'recovery', elapsedSeconds: 20, completedSeconds: 40, totalSeconds: 100, remainingSeconds: 30 });
+    assert.deepEqual(progress.at(-1)[2], { phase: 'recovery', profile: 'accurate', elapsedSeconds: 20, completedSeconds: 40, totalSeconds: 100, remainingSeconds: 30 });
     assert.equal(mocked.calls[0].args[mocked.calls[0].args.indexOf('--workers') + 1], '1');
 });
 
@@ -336,6 +336,114 @@ test('analyzeExtracted forwards speech phase timing to the caller without transc
     assert.equal(timing?.phase, 'transcription');
     assert.equal(timing?.totalSeconds, 90);
     assert.equal(JSON.stringify(timing).includes('합성 원문'), false);
+});
+
+test('actual worker runtime remains on every phase and updates the observed fallback worker count', async t => {
+    const { dataDir } = await fixture(t);
+    const audioPath = path.join(dataDir, 'owned-runtime.flac');
+    await fs.promises.writeFile(audioPath, 'synthetic audio bytes');
+    const mocked = mockSpawn(call => call.child.stdout.write([
+        { type: 'info', profile: 'accurate', model: 'large-v3', device: 'cuda', computeType: 'int8_float16', workers: 2, duration: 100 },
+        { type: 'progress', phase: 'transcription', completedSeconds: 20, totalSeconds: 100, percent: 16 },
+        { type: 'progress', phase: 'recovery', phaseCompletedSeconds: 0, phaseTotalSeconds: 20, percent: 84, workers: 1 },
+        { type: 'progress', phase: 'audit', percent: 98 }, { type: 'complete', segments: 0 }
+    ].map(event => JSON.stringify(event)).join('\n') + '\n'));
+    const events = [];
+    await provider(mocked.spawnImpl).transcribeLocalAudio(audioPath, { dataDir, onProgress: (...event) => events.push(event) });
+    for (const [, , details] of events) {
+        assert.equal(details.model, 'large-v3'); assert.equal(details.profile, 'accurate');
+        assert.equal(details.device, 'cuda'); assert.equal(details.computeType, 'int8_float16');
+    }
+    assert.deepEqual(events.map(([, , details]) => details.workers), [2, 2, 1, 1]);
+});
+
+test('unconfirmed devices, model paths and arbitrary runtime metadata never enter progress', async t => {
+    const { dataDir } = await fixture(t);
+    const audioPath = path.join(dataDir, 'owned-safe-runtime.flac');
+    await fs.promises.writeFile(audioPath, 'synthetic audio bytes');
+    const mocked = mockSpawn(call => call.child.stdout.write([
+        { type: 'info', profile: 'fast', model: 'C:\\private\\models\\small', device: 'auto', computeType: 'untrusted', workers: 99, duration: 100,
+            text: 'never expose dialogue', connectionCode: 'never expose pairing' },
+        { type: 'progress', phase: 'transcription', completedSeconds: 20, totalSeconds: 100, percent: 16 },
+        { type: 'complete', segments: 0 }
+    ].map(event => JSON.stringify(event)).join('\n') + '\n'));
+    const events = [];
+    await provider(mocked.spawnImpl).transcribeLocalAudio(audioPath, { dataDir, onProgress: (...event) => events.push(event) });
+    for (const [, , details] of events) {
+        assert.equal(details.profile, 'fast');
+        for (const key of ['model', 'device', 'computeType', 'workers', 'text', 'connectionCode']) assert.equal(details[key], undefined);
+    }
+});
+
+test('streaming source uses one append-only array and coalesces a slow periodic writer before exact final checkpoints', async t => {
+    const original = [{ id: 'old', start: 1, end: 2, text: '이전 합성 원문' }];
+    const { dataDir, record } = await fixture(t, { transcript: original, duration: 1000 });
+    const audioPath = path.join(dataDir, 'owned-coalescing.mp3');
+    await fs.promises.writeFile(audioPath, 'synthetic audio bytes');
+    let release, blocked = false, clock = 0;
+    const gate = new Promise(resolve => { release = resolve; });
+    const writes = [], arrays = new Set();
+    const audited = [{ id: 'audited', start: 1.25, end: 4.75, text: '최종 검수된 합성 원문' }];
+    const mocked = mockSpawn(async call => {
+        if (!call.args.includes('--audio')) return writeResponse(call, summary());
+        call.child.stdout.write(JSON.stringify({ type: 'info', profile: 'fast', language: 'ko', duration: 1000 }) + '\n');
+        for (let index = 0; index < 200; index++) {
+            clock += 2100;
+            call.child.stdout.write(JSON.stringify({ type: 'segment', id: index, start: index * 3, end: index * 3 + 2, text: '합성 안내' }) + '\n');
+            arrays.add(record.transcript);
+        }
+        call.child.stdout.write(JSON.stringify({ type: 'transcript', segments: audited }) + '\n');
+        call.child.stdout.write(JSON.stringify({ type: 'complete', segments: 1 }) + '\n');
+    });
+    const instance = createNoKeyProvider({ spawnImpl: mocked.spawnImpl, environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' },
+        platform: 'win32', now: () => clock, checkpointIO: { ...fs.promises, async writeFile(filename, content, encoding) {
+            if (filename.includes('-source.json.')) {
+                const value = JSON.parse(content); writes.push(value.transcript.length);
+                if (!blocked) { blocked = true; await gate; }
+            }
+            return fs.promises.writeFile(filename, content, encoding);
+        } } });
+    let finished = false;
+    const resultPromise = instance.analyzeExtracted(record, { dataDir, audioPath, transcribeAudio: true }).then(value => { finished = true; return value; });
+    for (let attempts = 0; !blocked && attempts < 100; attempts++) await new Promise(resolve => setTimeout(resolve, 2));
+    assert.equal(blocked, true);
+    assert.equal(finished, false, 'final source barriers wait for slow writes');
+    assert.equal(arrays.size, 1, 'streamed cues share one provider-owned append-only array');
+    release();
+    const result = await resultPromise;
+    assert.deepEqual(original, [{ id: 'old', start: 1, end: 2, text: '이전 합성 원문' }]);
+    assert.deepEqual(result.transcript, audited);
+    assert.deepEqual(writes.slice(0, 2), [1, 200]);
+    assert.equal(writes.some(count => count > 1 && count < 200), false, 'stale intermediate periodic snapshots are superseded');
+    const before = JSON.parse(await fs.promises.readFile(path.join(dataDir, 'checkpoints', record.id + '-source-before.json'), 'utf8'));
+    assert.deepEqual(before.transcript, original);
+    const final = JSON.parse(await fs.promises.readFile(path.join(dataDir, 'checkpoints', record.id + '-source.json'), 'utf8'));
+    assert.deepEqual(final.transcript, audited);
+});
+
+test('periodic checkpoint failure keeps its warning and a later final source still flushes', async t => {
+    const { dataDir, record } = await fixture(t, { transcript: [], transcriptSource: 'none' });
+    const audioPath = path.join(dataDir, 'owned-checkpoint-failure.mp3');
+    await fs.promises.writeFile(audioPath, 'synthetic audio bytes');
+    let failed = false;
+    const mocked = mockSpawn(async call => {
+        if (call.args.includes('--audio')) call.child.stdout.write([
+            { type: 'info', profile: 'fast', language: 'ko', duration: 90 },
+            { type: 'segment', id: 1, start: 1, end: 3, text: '보존할 합성 원문' }, { type: 'complete', segments: 1 }
+        ].map(event => JSON.stringify(event)).join('\n') + '\n');
+        else await writeResponse(call, summary());
+    });
+    const instance = createNoKeyProvider({ spawnImpl: mocked.spawnImpl,
+        environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' }, platform: 'win32',
+        checkpointIO: { ...fs.promises, async writeFile(filename, ...args) {
+            if (!failed && filename.includes('-source.json.')) { failed = true; throw new Error('owned periodic disk failure'); }
+            return fs.promises.writeFile(filename, ...args);
+        } } });
+    const result = await instance.analyzeExtracted(record, { dataDir, audioPath });
+    assert.ok(result.warnings.some(warning => warning.includes('대사 체크포인트를 저장하지 못했습니다. owned periodic disk failure')));
+    const saved = JSON.parse(await fs.promises.readFile(path.join(dataDir, 'checkpoints', record.id + '-source.json'), 'utf8'));
+    assert.deepEqual(saved.transcript, result.transcript);
+    assert.equal(saved.transcript[0].text, '보존할 합성 원문');
 });
 
 test('stopping streaming speech retains recognized segments and unread subtitle fallback', async t => {
@@ -1028,6 +1136,42 @@ async function translationGuardFixture(t, { count = 1, text = () => longJapanese
     return { ...f, source, requests, mocked, instance,
         run: settings => instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'accurate', ...settings }) };
 }
+
+test('multi-batch translation retains identical checkpoint bytes while hashing its immutable source a bounded number of times', async t => {
+    const f = await translationGuardFixture(t, { count: 161 });
+    const sourceBytes = JSON.stringify(f.source.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]));
+    const originalCreateHash = crypto.createHash;
+    let sourceHashes = 0;
+    const written = [];
+    crypto.createHash = function (...args) {
+        const hash = originalCreateHash.apply(this, args), update = hash.update;
+        hash.update = function (value, ...rest) {
+            if (value === sourceBytes) sourceHashes++;
+            return update.call(this, value, ...rest);
+        };
+        return hash;
+    };
+    try {
+        const instance = createNoKeyProvider({ spawnImpl: f.mocked.spawnImpl,
+            environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' }, platform: 'win32',
+            checkpointIO: { ...fs.promises, async writeFile(filename, contents, ...args) {
+                if (/-ko\.json\.|-translation-ko-v4\.json\./.test(filename)) written.push(contents);
+                return fs.promises.writeFile(filename, contents, ...args);
+            } } });
+        const result = await instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'fast' });
+        assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+        assert.deepEqual(f.requests.map(item => item.start), [0, 80, 160]);
+        assert.ok(sourceHashes <= 6, `source hashing stays bounded despite five progress checkpoints: ${sourceHashes}`);
+        assert.equal(written.length, 10);
+        for (let index = 0; index < written.length; index += 2) {
+            assert.equal(written[index], written[index + 1], 'record and monotonic content index retain exactly the same JSON bytes');
+            const saved = JSON.parse(written[index]);
+            assert.equal(saved.sourceFingerprint, originalCreateHash('sha256').update(sourceBytes).digest('hex'));
+            assert.equal(saved.translationVersion, 4);
+        }
+        assert.deepEqual(JSON.parse(written.at(-1)).subtitles.map(cue => [cue.id, cue.start, cue.end]), f.source.map(cue => [cue.id, cue.start, cue.end]));
+    } finally { crypto.createHash = originalCreateHash; }
+});
 
 test('a short accurate draft reaches source review and only its corrected final translation is committed', async t => {
     const f = await translationGuardFixture(t, { respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,

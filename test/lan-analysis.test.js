@@ -92,7 +92,8 @@ test('LAN phase workload survives polling with age and strips untrusted diagnost
   const f = await fixture(t, async (pkg, current) => {
     context = current;
     current.onProgress('transcription', 45, { phase: 'transcription', completedSeconds: 180, totalSeconds: 600,
-      elapsedSeconds: 90, remainingSeconds: 210, sampleAgeSeconds: 121, path: 'C:/private', transcript: 'private speech' });
+      elapsedSeconds: 90, remainingSeconds: 210, sampleAgeSeconds: 121, model: 'large-v3', profile: 'accurate',
+      device: 'cuda', computeType: 'float16', workers: 2, path: 'C:/private', transcript: 'private speech' });
     await gate;
     return { ...pkg.record, status: 'completed' };
   });
@@ -104,7 +105,13 @@ test('LAN phase workload survives polling with age and strips untrusted diagnost
     assert.equal(running.phaseProgress.completedSeconds, 180);
     assert(running.phaseProgress.sampleAgeSeconds >= 121);
     assert.equal('remainingSeconds' in running.phaseProgress, false);
+    for (const [key, expected] of Object.entries({ model: 'large-v3', profile: 'accurate', device: 'cuda', computeType: 'float16', workers: 2 })) assert.equal(running.phaseProgress[key], expected);
     assert.equal(JSON.stringify(running).includes('private speech'), false);
+    context.onProgress('recovery', 70, { phase: 'recovery', model: 'C:/private/model', profile: 'auto', device: 'auto', computeType: 'unknown', workers: 7 });
+    const invalid = await (await f.request('/v1/jobs/' + created.id)).json();
+    assert.equal(JSON.stringify(invalid.phaseProgress).includes('private'), false);
+    assert.equal('device' in invalid.phaseProgress, false);
+    assert.equal('workers' in invalid.phaseProgress, false);
     context.onProgress('summary', 88);
     assert.equal('phaseProgress' in await (await f.request('/v1/jobs/' + created.id)).json(), false);
     release();

@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -20,8 +21,35 @@ DLL_DIRECTORY_HANDLES = []
 DLL_DIRECTORY_PATHS = set()
 DLL_LIBRARY_HANDLES = []
 DLL_LIBRARY_PATHS = set()
-GPU_PARALLEL_MIN_FREE_MIB = 6144
+GPU_PARALLEL_MIN_FREE_MIB = 4096
 GPU_PARALLEL_RESERVE_MIB = 2048
+
+
+def nvidia_smi_executable(environment=None, platform=None):
+    """Locate an installed utility without relying only on the app's PATH."""
+    executable = shutil.which('nvidia-smi')
+    if executable and Path(executable).is_absolute():
+        return executable
+    if (platform or sys.platform) != 'win32':
+        return None
+    settings = environment if environment is not None else os.environ
+
+    def setting(name):
+        return next((value for key, value in settings.items() if key.upper() == name), '')
+
+    candidates = []
+    for name in ('SYSTEMROOT', 'WINDIR'):
+        root = Path(setting(name))
+        if root.is_absolute():
+            candidates.append(root / 'System32' / 'nvidia-smi.exe')
+    for name in ('PROGRAMW6432', 'PROGRAMFILES'):
+        root = Path(setting(name))
+        if root.is_absolute():
+            candidates.append(root / 'NVIDIA Corporation' / 'NVSMI' / 'nvidia-smi.exe')
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def gpu_memory_available():
@@ -29,7 +57,10 @@ def gpu_memory_available():
     if os.environ.get('CUDA_VISIBLE_DEVICES', '0') != '0':
         return None
     try:
-        result = subprocess.run(['nvidia-smi', '--id=0', '--query-gpu=memory.free,memory.total',
+        executable = nvidia_smi_executable()
+        if not executable:
+            return None
+        result = subprocess.run([executable, '--id=0', '--query-gpu=memory.free,memory.total',
                                  '--format=csv,noheader,nounits'], capture_output=True, text=True,
                                 timeout=5, check=True,
                                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -129,10 +160,13 @@ def decode_windows(model, audio, windows, options, sample_rate, state, emitter, 
                 for remaining in range(cursor, len(windows)):
                     yield remaining, windows[remaining], decode(windows[remaining])
                 return
-            yield index, windows[index], segments
             if cursor < len(windows):
+                # Refill the completed GPU slot before handing this result to
+                # CPU cue processing and checkpoint output. Pending decodes
+                # remain bounded at two; the caller owns one finished result.
                 pending.append((cursor, executor.submit(decode, windows[cursor])))
                 cursor += 1
+            yield index, windows[index], segments
 
 
 def emit(payload):
@@ -699,15 +733,16 @@ def choose_language(model, audio, duration, language, sample_rate, speech=None):
 
 def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3', language='auto',
                      device='cpu', compute_type='int8', sample_rate=SAMPLE_RATE,
-                     speech_detector=None, emitter=emit, workers=1):
+                     speech_detector=None, emitter=emit, workers=1, parallel_memory_fallback=False):
     duration = len(audio) / sample_rate
     if not finite(duration) or duration <= 0:
         raise ValueError('음성 파일이 비어 있거나 길이가 올바르지 않습니다.')
     warnings, cues, processed = [], [], 0.0
-    state = {'workers': requested_workers(workers, device), 'oomFallback': False}
+    state = {'workers': requested_workers(workers, device), 'oomFallback': bool(parallel_memory_fallback)}
     speech, audit_available = [], False
     if profile == 'accurate':
-        emitter({'type': 'progress', 'phase': 'audit', 'completedSeconds': 0.0, 'totalSeconds': duration, 'percent': 0.0})
+        emitter({'type': 'progress', 'phase': 'audit', 'completedSeconds': 0.0, 'totalSeconds': duration, 'percent': 0.0,
+                 'workers': state['workers']})
         try:
             if speech_detector is None:
                 raise RuntimeError('음성 누락 검사 도구가 준비되지 않았습니다.')
@@ -748,7 +783,7 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
         # A consumed empty generator also means the silent tail was examined.
         processed = core_end
         emitter({'type': 'progress', 'phase': 'transcription', 'completedSeconds': processed,
-                 'totalSeconds': duration, 'percent': 80.0 * processed / duration})
+                 'totalSeconds': duration, 'percent': 80.0 * processed / duration, 'workers': state['workers']})
     cues = reconcile_window_boundaries(cues)
     unresolved, rechecked, budget = [], 0.0, 0.0
     raw_gaps = []
@@ -756,7 +791,8 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
     boundary_diagnostics = {}
     removed_non_speech = []
     if profile == 'accurate':
-        emitter({'type': 'progress', 'phase': 'audit', 'completedSeconds': duration, 'totalSeconds': duration, 'percent': 82.0})
+        emitter({'type': 'progress', 'phase': 'audit', 'completedSeconds': duration, 'totalSeconds': duration, 'percent': 82.0,
+                 'workers': state['workers']})
         if audit_available:
             cues, removed = prune_non_speech_artifacts(cues, audio, speech, sample_rate)
             removed_non_speech.extend(removed)
@@ -788,7 +824,7 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
             rechecked += end - start
             emitter({'type': 'progress', 'phase': 'recovery', 'completedSeconds': duration,
                      'totalSeconds': duration, 'percent': 84.0 + 14.0 * rechecked / max(1.0, budget),
-                     'phaseCompletedSeconds': rechecked, 'phaseTotalSeconds': budget})
+                     'phaseCompletedSeconds': rechecked, 'phaseTotalSeconds': budget, 'workers': state['workers']})
         # Reconcile context observations before confirming split native cues.
         # Empty rechecks stay empty; no words or times are synthesized.
         cues, _ = merge_recovery(cues, reconcile_window_boundaries(recovery_cues))
@@ -848,7 +884,8 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3',
                'wordTimestamps': profile == 'accurate' and all(bool(cue.get('words')) for cue in cues),
                'audit': audit, 'warnings': warnings}
     emitter({'type': 'transcript', 'segments': cues})
-    emitter({'type': 'progress', 'phase': 'completed', 'completedSeconds': processed, 'totalSeconds': duration, 'percent': 100.0})
+    emitter({'type': 'progress', 'phase': 'completed', 'completedSeconds': processed, 'totalSeconds': duration, 'percent': 100.0,
+             'workers': state['workers']})
     emitter({'type': 'complete', 'segments': len(cues), 'quality': quality})
     return cues, quality
 
@@ -980,6 +1017,7 @@ def load_whisper_model(model_name, cache, *, device='cpu', compute_type='int8', 
 
     def construct(selected_device, selected_compute):
         count = requested_workers(workers, selected_device, capacity() if selected_device == 'cuda' else None)
+        memory_fallback = False
         options = {**common, 'device': selected_device, 'compute_type': selected_compute}
         try:
             try:
@@ -996,6 +1034,7 @@ def load_whisper_model(model_name, cache, *, device='cpu', compute_type='int8', 
                 raise
             gc.collect()
             count = 1
+            memory_fallback = True
             emitter({'type': 'warning', 'message': 'GPU 병렬 모델 준비 중 메모리가 부족해 같은 모델을 직렬로 준비합니다.'})
             model = factory(model_name, **options, num_workers=1)
         if selected_device == 'cuda':
@@ -1013,6 +1052,7 @@ def load_whisper_model(model_name, cache, *, device='cpu', compute_type='int8', 
                 model = None
                 gc.collect()
                 count = 1
+                memory_fallback = True
                 emitter({'type': 'warning', 'message': 'GPU 병렬 준비 중 메모리가 부족해 같은 모델을 직렬로 다시 준비합니다.'})
                 model = factory(model_name, **options, num_workers=1)
                 try:
@@ -1034,6 +1074,7 @@ def load_whisper_model(model_name, cache, *, device='cpu', compute_type='int8', 
                     count = 1
         try:
             model._videorandom_workers = count
+            model._videorandom_parallel_memory_fallback = memory_fallback
         except (AttributeError, TypeError):
             pass
         return model
@@ -1095,7 +1136,8 @@ def main():
 
     transcribe_audio(model, audio, profile=args.profile, model_name=model_name, language=args.language,
                      device=device, compute_type=compute_type, speech_detector=speech_detector,
-                     workers=getattr(model, '_videorandom_workers', 1))
+                     workers=getattr(model, '_videorandom_workers', 1),
+                     parallel_memory_fallback=getattr(model, '_videorandom_parallel_memory_fallback', False))
 
 
 if __name__ == '__main__':

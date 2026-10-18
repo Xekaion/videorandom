@@ -1212,6 +1212,59 @@ test('speed settings selected during config loading survive older durable accura
   assert.equal(submitted.transcribeAudio, false);
 });
 
+test('speed settings report saving until the actual PC queue request succeeds and expose a failed save', async () => {
+  for (const failed of [false, true]) {
+    const ui = await boot({ savedSettings: { mode: 'codex', subtitleQuality: 'accurate' } });
+    const original = ui.sandbox.fetch;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    ui.sandbox.fetch = async (url, options = {}) => {
+      if (url === '/api/analysis/auto-pick' && options.method === 'PUT') {
+        const response = await original(url, options);
+        await gate;
+        return failed ? { ok: false, status: 503, json: async () => ({ error: '합성 설정 저장 오류' }) } : response;
+      }
+      return original(url, options);
+    };
+    await ui.elements.get('catalogUseFastSettings').dispatch('click');
+    const pending = ui.runTimers(450); await flush();
+    assert.match(ui.elements.get('catalogNotice').textContent, /저장하고 있습니다/);
+    assert.doesNotMatch(ui.elements.get('catalogNotice').textContent, /저장했습니다/);
+    release(); await pending;
+    assert.match(ui.elements.get('catalogNotice').textContent, failed ? /저장하지 못했습니다.*합성 설정 저장 오류/ : /이 PC에 저장했습니다/);
+    assert.equal(ui.elements.get('catalogNotice').classList.contains('catalog-error'), failed);
+  }
+});
+
+test('a late fast-setting acknowledgement or failure never overwrites a newer accurate choice or its notice', async () => {
+  for (const failed of [false, true]) {
+  const ui = await boot({ savedSettings: { mode: 'codex', subtitleQuality: 'accurate' } });
+  const original = ui.sandbox.fetch;
+  let release, writes = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  ui.sandbox.fetch = async (url, options = {}) => {
+    const response = await original(url, options);
+    if (url === '/api/analysis/auto-pick' && options.method === 'PUT' && ++writes === 1) {
+      await gate;
+      if (failed) return { ok: false, status: 503, json: async () => ({ error: '합성 이전 설정 저장 실패' }) };
+    }
+    return response;
+  };
+  await ui.elements.get('catalogUseFastSettings').dispatch('click');
+  const pending = ui.runTimers(450); await flush();
+  ui.elements.get('catalogSubtitleQuality').value = 'accurate';
+  await ui.elements.get('catalogSubtitleQuality').dispatch('change');
+  await ui.runTimers(450);
+  const newerNotice = ui.elements.get('catalogNotice').textContent;
+  release(); await pending;
+  assert.equal(ui.elements.get('catalogSubtitleQuality').value, 'accurate');
+  assert.equal(ui.elements.get('catalogNotice').textContent, newerNotice);
+  assert.doesNotMatch(newerNotice, /속도 우선 설정을 이 PC에 저장했습니다/);
+  assert.doesNotMatch(ui.elements.get('catalogAutoNotice').textContent, /이전 설정 저장 실패/);
+  assert.equal(ui.getQueue().options.subtitleQuality, 'accurate');
+  }
+});
+
 test('a local queue never replaces the next AI Korean subtitle default or an explicit translation preference', async () => {
   for (const mode of ['codex', 'remote']) {
     for (const preference of [undefined, 'ko', 'original']) {
@@ -1737,6 +1790,53 @@ test('job progress labels source counters and estimates as the current phase onl
   const text = ui.elements.get('catalogJobText').textContent;
   assert(text.includes('인식한 음성 03:00 / 10:00'));
   assert(text.includes('음성 인식 예상 잔여 약 4분 · 이후 단계 별도'));
+});
+
+test('runtime settings remain actual through summary and reset for another file or job instead of using the selector', async () => {
+  const file = picked('첫 합성 영상.mp4');
+  const running = { id: 'actual-runtime', source: 'auto-pick', status: 'running', total: 2, completed: 0, currentFile: file.name, currentFilePath: file.path,
+    stage: '음성 인식', results: [], phaseProgress: { phase: 'transcription', completedSeconds: 30, totalSeconds: 600,
+      model: 'large-v3', profile: 'accurate', device: 'cuda', computeType: 'float16', workers: 2 } };
+  let next = running;
+  const queue = { ...baseQueue(), configured: true, activeAutoPath: file.path, activeJob: running };
+  const ui = await boot({ initialActiveJob: running, initialQueue: queue, savedSettings: { mode: 'codex', subtitleQuality: 'fast' }, jobResponse: () => next });
+  assert.match(ui.elements.get('catalogJobText').textContent, /large-v3.*정확도 우선.*GPU \(CUDA\).*float16.*2구간 병렬/);
+  next = { ...running, stage: '줄거리 요약', phaseProgress: undefined };
+  await ui.runTimers(1500);
+  assert.match(ui.elements.get('catalogJobText').textContent, /음성 인식 사용 기록: large-v3.*정확도 우선.*GPU/);
+  next = { ...running, completed: 1, currentFile: '두 번째 합성.mp4', currentFilePath: 'D:\\영상\\두 번째 합성.mp4',
+    phaseProgress: { phase: 'transcription', completedSeconds: 10, totalSeconds: 60 } };
+  await ui.runTimers(1500);
+  assert.match(ui.elements.get('catalogJobText').textContent, /모델 미확인.*품질 설정 미확인.*장치 미확인/);
+  assert.doesNotMatch(ui.elements.get('catalogJobText').textContent, /large-v3|CUDA|float16/);
+  ui.setQueue({ ...queue, activeAutoPath: 'D:\\영상\\다른 합성.mp4', activeJob: { ...next, id: 'new-runtime-job', currentFilePath: 'D:\\영상\\다른 합성.mp4' } });
+  await ui.runTimers(3000);
+  assert.match(ui.elements.get('catalogJobText').textContent, /모델 미확인.*장치 미확인/);
+  assert.doesNotMatch(ui.elements.get('catalogJobText').textContent, /large-v3|CUDA|float16/);
+});
+
+test('completed subtitle details show recorded CPU or GPU and never infer hardware from the current quality choice', async () => {
+  for (const device of ['cpu', 'cuda', undefined]) {
+    const record = { ...timedRecord(), transcriptionQuality: { version: 1, source: 'audio', profile: 'fast', model: 'small', device,
+      computeType: device === 'cuda' ? 'float16' : device === 'cpu' ? 'int8' : undefined, workers: device ? 1 : undefined,
+      complete: true, duration: 60, processedUntil: 60, audit: { complete: false, unresolved: [] } } };
+    const ui = await boot({ records: [record], savedSettings: { mode: 'codex', subtitleQuality: 'accurate' } });
+    await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+    const text = ui.elements.get('catalogSubtitleQualityNotice').textContent;
+    assert.match(text, /실제 음성 인식: small.*속도 우선/);
+    assert.match(text, device === 'cuda' ? /GPU \(CUDA\).*float16.*1구간씩/ : device === 'cpu' ? /CPU.*int8.*1구간씩/ : /장치 미확인.*연산 형식 미확인.*병렬 수 미확인/);
+    assert.doesNotMatch(text, /large-v3/);
+  }
+});
+
+test('quality help identifies the requesting PC scope and existing subtitles do not claim a new ASR device', async () => {
+  const html = fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8');
+  assert.match(html, /이 PC에서 요청하는 다음 분석과 대기 영상에 적용/);
+  assert.match(html, /원격 영상의 품질은 영상을 보낸 PC에서 선택/);
+  const record = { ...timedRecord(), transcriptSource: 'sidecar:synthetic.srt' };
+  const ui = await boot({ records: [record] });
+  await ui.elements.get('catalogRows').childNodes[0].childNodes[1].childNodes[0].dispatch('click');
+  assert.match(ui.elements.get('catalogSubtitleQualityNotice').textContent, /기존 자막을 사용했습니다.*새 음성 인식 모델·장치 기록이 없습니다/);
 });
 
 test('Korean-only repair bypasses speech readiness and cannot submit whole-video analysis or duplicate clicks', async () => {

@@ -72,7 +72,7 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(ASR.uncovered_intervals([(0, 10)], [(0, 9.6)], 10, minimum=0.75), [])
 
     def test_parallel_decoder_bounds_pending_work_and_commits_in_source_order(self):
-        lock, second_started = threading.Lock(), threading.Event()
+        lock, second_started, third_started, release_following = threading.Lock(), threading.Event(), threading.Event(), threading.Event()
         started, active, peak = [], [0], [0]
         class ParallelModel:
             def transcribe(self, audio, **options):
@@ -88,6 +88,12 @@ class TranscriptionTests(unittest.TestCase):
                                 raise RuntimeError('second window was not concurrent')
                         elif start == 10:
                             second_started.set()
+                            if not release_following.wait(2):
+                                raise RuntimeError('owned CPU consumer did not release the following window')
+                        elif start == 20:
+                            third_started.set()
+                            if not release_following.wait(2):
+                                raise RuntimeError('owned CPU consumer did not release the prefetched window')
                         yield segment(1, 2, str(start))
                     finally:
                         with lock:
@@ -95,12 +101,25 @@ class TranscriptionTests(unittest.TestCase):
                 return generate(), None
         windows = [(start, start + 10, start, start + 10) for start in (0, 10, 20, 30)]
         state = {'workers': 2, 'oomFallback': False}
-        output = ASR.decode_windows(ParallelModel(), PositionedAudio(40), windows, {}, 10, state, lambda event: None)
-        first = next(output)
-        self.assertEqual(first[0], 0)
-        # Pausing commits cannot enqueue the rest of a long video's transcript.
-        self.assertEqual(sorted(started), [0, 10])
-        remaining = list(output)
+        submitted = []
+        class RecordingExecutor(ASR.ThreadPoolExecutor):
+            def submit(self, function, window):
+                submitted.append(window[0])
+                return super().submit(function, window)
+        with patch.object(ASR, 'ThreadPoolExecutor', RecordingExecutor):
+            output = ASR.decode_windows(ParallelModel(), PositionedAudio(40), windows, {}, 10, state, lambda event: None)
+            try:
+                first = next(output)
+                self.assertEqual(first[0], 0)
+                # Simulate CPU cue conversion/output paused at the yield. Its freed
+                # GPU slot must already run window 3, but window 4 stays unsubmitted.
+                self.assertTrue(third_started.wait(2), 'the successor was not submitted before yielding to CPU postprocessing')
+                self.assertEqual(sorted(started), [0, 10, 20])
+                self.assertEqual(submitted, [0, 10, 20], 'only two future windows may be submitted beyond the consumed result')
+                self.assertEqual(active[0], 2)
+            finally:
+                release_following.set()
+            remaining = list(output)
         self.assertEqual([row[0] for row in [first] + remaining], [0, 1, 2, 3])
         self.assertEqual(peak[0], 2)
         self.assertEqual(active[0], 0)
@@ -200,7 +219,7 @@ class TranscriptionTests(unittest.TestCase):
         self.assertTrue(results[1][1]['audit']['complete'])
         self.assertEqual(sorted(results[0][2], key=lambda item: (item[0], item[1])),
                          sorted(results[1][2], key=lambda item: (item[0], item[1])))
-        for _, _, calls, events in results:
+        for _, quality, calls, events in results:
             self.assertTrue(all(options['beam_size'] == 5 and options['word_timestamps']
                                 and options['temperature'] == (0.0, 0.2, 0.4)
                                 and options['vad_filter'] is False and 'chunk_length' not in options
@@ -208,6 +227,43 @@ class TranscriptionTests(unittest.TestCase):
             recovery = [event for event in events if event.get('phase') == 'recovery']
             self.assertTrue(recovery)
             self.assertEqual(recovery[-1]['phaseCompletedSeconds'], recovery[-1]['phaseTotalSeconds'])
+            self.assertTrue(all(event['workers'] == quality['workers'] for event in events if event['type'] == 'progress'))
+
+    def test_runtime_oom_worker_transition_is_reported_by_normal_progress_in_both_phases(self):
+        dialogue = [(start, start + 2, str(start)) for start in range(5, 270, 15)]
+        class RuntimeModel:
+            def __init__(self, fail_phase=None):
+                self.fail_phase, self.failed, self.lock = fail_phase, False, threading.Lock()
+            def transcribe(self, audio, **options):
+                start, end = audio.start_sample / 10, (audio.start_sample + len(audio)) / 10
+                recovery = options.get('no_speech_threshold') == 0.8
+                phase = 'recovery' if recovery else 'transcription'
+                with self.lock:
+                    if phase == self.fail_phase and not self.failed:
+                        self.failed = True
+                        raise RuntimeError('CUDA out of memory')
+                return iter([segment(left - start, right - start, text,
+                    probability=0.95 if recovery or left % 30 == 5 else 0.2)
+                    for left, right, text in dialogue if start <= left and right <= end]), None
+        def execute(model):
+            events = []
+            cues, quality = ASR.transcribe_audio(model, PositionedAudio(270), sample_rate=10,
+                language='ja', device='cuda', workers=2,
+                speech_detector=lambda audio, rate: [(start, end) for start, end, _ in dialogue], emitter=events.append)
+            return cues, quality, events
+        original, original_quality, _ = execute(RuntimeModel())
+        for phase in ('transcription', 'recovery'):
+            with self.subTest(phase=phase):
+                cues, quality, events = execute(RuntimeModel(phase))
+                self.assertEqual(cues, original)
+                self.assertEqual(quality['audit'], original_quality['audit'])
+                self.assertEqual(next(event['workers'] for event in events if event['type'] == 'info'), 2)
+                normal = [event for event in events if event['type'] == 'progress' and event['phase'] == phase and not event.get('heartbeat')]
+                self.assertTrue(normal)
+                self.assertEqual(normal[-1]['workers'], 1, 'the actual serial fallback must reach UI metadata without needing a parallel heartbeat')
+                self.assertEqual(quality['workers'], 1)
+                self.assertTrue(quality['parallelMemoryFallback'])
+                self.assertEqual([event for event in events if event.get('phase') == 'completed'][-1]['workers'], 1)
 
     def test_cpu_stays_serial_even_if_two_workers_are_requested(self):
         self.assertEqual(ASR.requested_workers('2', 'cpu', (20000, 24000)), 1)
@@ -431,9 +487,12 @@ class TranscriptionTests(unittest.TestCase):
 
     def test_gpu_auto_workers_require_memory_before_and_after_loading(self):
         cases = [([(7000, 8192), (3000, 8192)], 2, 2),
+                 ([(4096, 8192), (2048, 8192)], 2, 2),
+                 ([(4096, 8192), (2047, 8192)], 2, 1),
                  ([(7000, 8192), (1000, 8192)], 2, 1),
-                 ([(7000, 8192), None], 2, 1),
-                 ([(5000, 8192)], 1, 1), ([None], 1, 1), ([(7000, 8000)], 1, 1)]
+                 ([(4096, 8192), None], 2, 1),
+                 ([(4095, 8192)], 1, 1), ([(5000, 8192), (3000, 8192)], 2, 2),
+                 ([None], 1, 1), ([(7000, 8000)], 1, 1), ([(4096, 8191)], 1, 1)]
         for samples, native_workers, active_workers in cases:
             memory, calls = iter(samples), []
             def factory(name, **options):
@@ -446,6 +505,7 @@ class TranscriptionTests(unittest.TestCase):
             self.assertEqual(calls[0][0], 'large-v3')
             self.assertEqual(calls[0][1]['num_workers'], native_workers)
             self.assertEqual(model._videorandom_workers, active_workers)
+            self.assertFalse(model._videorandom_parallel_memory_fallback)
 
     def test_parallel_gpu_loader_oom_retries_same_model_serially_before_cpu(self):
         for stage in ('constructor', 'warmup'):
@@ -461,12 +521,29 @@ class TranscriptionTests(unittest.TestCase):
                     raise RuntimeError('CUDA out of memory')
             model, device, _ = ASR.load_whisper_model('large-v3', 'owned-cache', device='auto', factory=factory,
                 cuda_count=lambda: 1, probe=probe, dll_registrar=lambda: 0,
-                memory_probe=lambda: (7000, 8192), emitter=warnings.append)
+                memory_probe=lambda: (4096, 8192), emitter=warnings.append)
             self.assertEqual(calls, [('large-v3', 'cuda', 2), ('large-v3', 'cuda', 1)])
             self.assertEqual(device, 'cuda')
             self.assertEqual(model._videorandom_workers, 1)
+            self.assertTrue(model._videorandom_parallel_memory_fallback)
             self.assertEqual(len(warnings), 1)
             self.assertEqual(len(unloaded), 1 if stage == 'warmup' else 0)
+
+    def test_preparation_oom_remains_recorded_with_the_actual_serial_worker_count(self):
+        def factory(name, **options):
+            self.assertEqual(name, 'large-v3')
+            if options['num_workers'] == 2:
+                raise RuntimeError('CUDA out of memory')
+            return Model([[]])
+        model, device, compute = ASR.load_whisper_model('large-v3', 'owned-cache', device='auto', factory=factory,
+            cuda_count=lambda: 1, probe=lambda model: None, dll_registrar=lambda: 0,
+            memory_probe=lambda: (4096, 8192), emitter=lambda event: None)
+        _, quality, _ = self.run_audio(model, seconds=120, workers=model._videorandom_workers, device=device,
+            compute_type=compute, parallel_memory_fallback=model._videorandom_parallel_memory_fallback)
+        self.assertEqual(quality['workers'], 1)
+        self.assertTrue(quality['parallelMemoryFallback'])
+        self.assertEqual(quality['model'], 'large-v3')
+        self.assertEqual(quality['profile'], 'accurate')
 
     def test_custom_factory_without_workers_argument_retains_serial_execution(self):
         def factory(name, device, compute_type, cpu_threads, download_root):
@@ -1180,6 +1257,80 @@ class TranscriptionTests(unittest.TestCase):
     def test_fast_vad_processing_cannot_claim_every_source_sample_was_decoded(self):
         _, quality, _ = self.run_audio(Model([[]]), profile='fast')
         self.assertFalse(quality['processingComplete'])
+
+
+class GpuMemoryProbeTests(unittest.TestCase):
+    def test_existing_absolute_path_utility_remains_the_first_choice(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = pathlib.Path(temporary) / 'nvidia-smi.exe'
+            executable.write_bytes(b'owned marker only; never executed')
+            with patch.object(ASR.shutil, 'which', return_value=str(executable)):
+                self.assertEqual(ASR.nvidia_smi_executable(environment={}, platform='win32'), str(executable))
+
+    def test_missing_path_finds_the_installed_windows_system32_utility(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            executable = root / 'System32' / 'nvidia-smi.exe'
+            executable.parent.mkdir()
+            executable.write_bytes(b'owned marker only; never executed')
+            with patch.object(ASR.shutil, 'which', return_value=None), patch.object(ASR.subprocess, 'run') as run:
+                self.assertEqual(ASR.nvidia_smi_executable(environment={'systemroot': str(root)}, platform='win32'), str(executable))
+                self.assertEqual(ASR.nvidia_smi_executable(environment={'WINDIR': str(root)}, platform='win32'), str(executable))
+                run.assert_not_called()
+
+    def test_missing_path_can_find_legacy_nv_smi_but_never_searches_relative_roots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            executable = root / 'NVIDIA Corporation' / 'NVSMI' / 'nvidia-smi.exe'
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b'owned marker only; never executed')
+            for setting in ('ProgramW6432', 'ProgramFiles'):
+                with self.subTest(setting=setting), patch.object(ASR.shutil, 'which', return_value=None):
+                    self.assertEqual(ASR.nvidia_smi_executable(environment={setting: str(root)}, platform='win32'), str(executable))
+            with patch.object(ASR.shutil, 'which', return_value='relative/nvidia-smi.exe'), patch.object(ASR.Path, 'is_file') as is_file:
+                self.assertIsNone(ASR.nvidia_smi_executable(environment={'SystemRoot': 'relative-windows', 'ProgramFiles': 'relative-programs'}, platform='win32'))
+                is_file.assert_not_called()
+
+    def test_non_windows_missing_utility_does_not_search_windows_paths(self):
+        with patch.object(ASR.shutil, 'which', return_value=None), patch.object(ASR.Path, 'is_file') as is_file:
+            self.assertIsNone(ASR.nvidia_smi_executable(environment={'SYSTEMROOT': '/owned-neutral'}, platform='linux'))
+            is_file.assert_not_called()
+
+    def test_absolute_fallback_capacity_probe_is_hidden_and_keeps_existing_bounds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = str(pathlib.Path(temporary) / 'nvidia-smi.exe')
+            with patch.dict(ASR.os.environ, {'CUDA_VISIBLE_DEVICES': '0'}), \
+                    patch.object(ASR, 'nvidia_smi_executable', return_value=executable), \
+                    patch.object(ASR.subprocess, 'run', return_value=types.SimpleNamespace(stdout='7000, 8192\n')) as run:
+                self.assertEqual(ASR.gpu_memory_available(), (7000, 8192))
+                args, options = run.call_args
+                self.assertEqual(args[0], [executable, '--id=0', '--query-gpu=memory.free,memory.total', '--format=csv,noheader,nounits'])
+                self.assertEqual(options['timeout'], 5)
+                self.assertTrue(options['check'])
+                self.assertEqual(options['creationflags'], getattr(ASR.subprocess, 'CREATE_NO_WINDOW', 0))
+
+    def test_device_mapping_unknown_capacity_and_probe_failures_remain_serial(self):
+        for visible in ('', '1', '0,1', 'GPU-owned-neutral'):
+            with self.subTest(visible=visible), patch.dict(ASR.os.environ, {'CUDA_VISIBLE_DEVICES': visible}), \
+                    patch.object(ASR, 'nvidia_smi_executable') as locate, patch.object(ASR.subprocess, 'run') as run:
+                self.assertIsNone(ASR.gpu_memory_available())
+                locate.assert_not_called(); run.assert_not_called()
+        for failure in (FileNotFoundError('owned missing utility'), ASR.subprocess.TimeoutExpired('owned-probe', 5), ASR.subprocess.CalledProcessError(1, 'owned-probe')):
+            with self.subTest(failure=type(failure).__name__), patch.dict(ASR.os.environ, {'CUDA_VISIBLE_DEVICES': '0'}), \
+                    patch.object(ASR, 'nvidia_smi_executable', return_value='owned-absolute-utility'), \
+                    patch.object(ASR.subprocess, 'run', side_effect=failure):
+                self.assertEqual(ASR.requested_workers('auto', 'cuda', ASR.gpu_memory_available()), 1)
+
+    def test_malformed_or_multiple_gpu_output_never_enables_parallel_auto(self):
+        for output in ('', 'bad output', '9000, 8192', '-1, 8192', '7000, 8192\n7000, 8192', 'nan, 8192'):
+            with self.subTest(output=output), patch.dict(ASR.os.environ, {'CUDA_VISIBLE_DEVICES': '0'}), \
+                    patch.object(ASR, 'nvidia_smi_executable', return_value='owned-absolute-utility'), \
+                    patch.object(ASR.subprocess, 'run', return_value=types.SimpleNamespace(stdout=output)):
+                self.assertIsNone(ASR.gpu_memory_available())
+        with patch.dict(ASR.os.environ, {'CUDA_VISIBLE_DEVICES': '0'}), \
+                patch.object(ASR, 'nvidia_smi_executable', return_value=None), patch.object(ASR.subprocess, 'run') as run:
+            self.assertIsNone(ASR.gpu_memory_available())
+            run.assert_not_called()
 
 
 if __name__ == '__main__':

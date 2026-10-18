@@ -62,7 +62,8 @@ test('active jobs expose sanitized phase workload and clear it on the following 
   const f = await fixture(t, async (file, options, current) => {
     context = current;
     current.onProgress('transcription', 45, { phase: 'transcription', completedSeconds: 180, totalSeconds: 600,
-      elapsedSeconds: 90, remainingSeconds: 210, sampleAgeSeconds: 121, path: 'C:/private', connectionCode: 'private-code' });
+      elapsedSeconds: 90, remainingSeconds: 210, sampleAgeSeconds: 121, model: 'large-v3', profile: 'accurate',
+      device: 'cuda', computeType: 'int8_float16', workers: 2, path: 'C:/private', connectionCode: 'private-code' });
     await gate;
     return { ...file, status: 'completed', duration: 600, frames: [], transcript: [], warnings: [], labels: [] };
   });
@@ -73,9 +74,19 @@ test('active jobs expose sanitized phase workload and clear it on the following 
     const running = await (await f.request('/jobs/' + job.id)).json();
     assert.equal(running.phaseProgress.completedSeconds, 180);
     assert.equal(running.phaseProgress.totalSeconds, 600);
+    assert.equal(running.phaseProgress.model, 'large-v3');
+    assert.equal(running.phaseProgress.profile, 'accurate');
+    assert.equal(running.phaseProgress.device, 'cuda');
+    assert.equal(running.phaseProgress.computeType, 'int8_float16');
+    assert.equal(running.phaseProgress.workers, 2);
     assert.equal('remainingSeconds' in running.phaseProgress, false, 'remote sample age cannot be reset by local polling');
     assert.equal(JSON.stringify(running).includes('private-code'), false);
     assert.equal('_phaseProgressAt' in running, false);
+    context.onProgress('transcription', 46, { phase: 'transcription', completedSeconds: 190, totalSeconds: 600,
+      model: 'C:/private-model', profile: 'unverified', device: 'remote', computeType: 'shell-command', workers: 99 });
+    const invalid = await (await f.request('/jobs/' + job.id)).json();
+    for (const key of ['model', 'profile', 'device', 'computeType', 'workers']) assert.equal(key in invalid.phaseProgress, false, key);
+    assert.equal(JSON.stringify(invalid).includes('private-model'), false);
     context.onProgress('summary', 88);
     const summarizing = await (await f.request('/jobs/' + job.id)).json();
     assert.equal('phaseProgress' in summarizing, false);

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeProgressDetails, ageProgressDetails, formatProgressDetails } = require('../public/js/analysis-progress');
+const { normalizeProgressDetails, ageProgressDetails, formatProgressDetails, normalizeSpeechMetadata, formatSpeechMetadata } = require('../public/js/analysis-progress');
 
 test('progress metadata allows only phase clocks and finite audio counters', () => {
   const normalized = normalizeProgressDetails({ phase: 'transcription', completedSeconds: 180, totalSeconds: 600,
@@ -34,4 +34,21 @@ test('recovery is shown as its own audio workload and never as overall completio
   assert.match(text, /재검수 예상 잔여 약 1분 · 이후 단계 별도/);
   assert.equal(formatProgressDetails({ phase: 'completed', completedSeconds: 60, totalSeconds: 60 }), '');
   assert.equal(formatProgressDetails(undefined), '');
+});
+
+test('actual runtime metadata survives progress normalization and aging without accepting paths or invented hardware', () => {
+  const actual = { model: 'large-v3', profile: 'accurate', device: 'cuda', computeType: 'float16', workers: 2 };
+  const progress = normalizeProgressDetails({ phase: 'transcription', ...actual, completedSeconds: 60, totalSeconds: 600,
+    connectionCode: 'never-forward', transcript: 'never-forward', environment: { key: 'never-forward' } });
+  assert.deepEqual(normalizeSpeechMetadata(progress), actual);
+  assert.deepEqual(normalizeSpeechMetadata(ageProgressDetails(progress, 100)), actual);
+  const text = formatProgressDetails(progress);
+  assert.match(text, /large-v3.*정확도 우선.*GPU \(CUDA\).*float16.*2구간 병렬/);
+  assert.equal(JSON.stringify(progress).includes('never-forward'), false);
+  for (const value of [{ model: 'C:\\private\\large-v3', profile: 'automatic', device: 'auto', computeType: 'unknown', workers: 8 },
+    { model: '../large-v3', device: 'GPU', computeType: 'float16;run', workers: '2' }, { model: '.', workers: 0 }, { model: 'a'.repeat(101) }]) {
+    assert.deepEqual(normalizeSpeechMetadata(value), {});
+  }
+  assert.match(formatSpeechMetadata({}), /모델 미확인.*품질 설정 미확인.*장치 미확인.*연산 형식 미확인.*병렬 수 미확인/);
+  assert.match(formatSpeechMetadata({ model: 'small', profile: 'fast', device: 'cpu', computeType: 'int8', workers: 1 }), /small.*속도 우선.*CPU.*int8.*1구간씩/);
 });
