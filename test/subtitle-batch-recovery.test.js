@@ -82,7 +82,7 @@ async function assertCompleted(f, result) {
   assert.deepEqual(result.transcript, f.source);
   assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), f.source.map(cue => [cue.id, cue.start, cue.end]));
   const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', `${f.record.id}-ko.json`), 'utf8'));
-  assert.equal(saved.translationVersion, 5);
+  assert.equal(saved.translationVersion, 6);
   assert.equal(saved.reviewPasses, 2);
   assert.equal(saved.completedCues, f.source.length);
   assert.equal(saved.sourceFingerprint, fingerprint(f.source));
@@ -286,7 +286,7 @@ test('the operation-wide supplementary budget is 64 calls and a ninth deficient 
   assert.equal(f.requests.length, 81);
   assert.equal(result.subtitleTranslationPartial.length, 640);
   const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', `${f.record.id}-ko.json`), 'utf8'));
-  assert.equal(saved.completedCues, 640); assert.equal(saved.reviewPasses, 2); assert.equal(saved.translationVersion, 5);
+  assert.equal(saved.completedCues, 640); assert.equal(saved.reviewPasses, 2); assert.equal(saved.translationVersion, 6);
   assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), f.source.slice(0, 640).map(cue => [cue.id, cue.start, cue.end]));
 });
 

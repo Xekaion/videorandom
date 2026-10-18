@@ -371,9 +371,9 @@ test('an 1819-cue service repair resumes 160 reviewed v4 cues, fills one short r
   assert.deepEqual(saved.transcript, source);
   assert.deepEqual(saved.subtitleTranslation, record.subtitleTranslation);
   assert.deepEqual(saved.analysisProvenance, record.analysisProvenance);
-  const v5 = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', record.id + '-ko.json'), 'utf8'));
-  assert.equal(v5.translationVersion, 5);
-  assert.equal(v5.reviewPasses, 2);
-  assert.equal(v5.completedCues, total);
-  assert.equal(v5.complete, true);
+  const v6 = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', record.id + '-ko.json'), 'utf8'));
+  assert.equal(v6.translationVersion, 6);
+  assert.equal(v6.reviewPasses, 2);
+  assert.equal(v6.completedCues, total);
+  assert.equal(v6.complete, true);
 });

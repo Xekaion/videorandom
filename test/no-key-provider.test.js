@@ -1284,7 +1284,7 @@ test('multi-batch translation retains identical checkpoint bytes while hashing i
         const instance = createNoKeyProvider({ spawnImpl: f.mocked.spawnImpl,
             environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' }, platform: 'win32',
             checkpointIO: { ...fs.promises, async writeFile(filename, contents, ...args) {
-                if (/-ko\.json\.|-translation-ko-v5\.json\./.test(filename)) written.push(contents);
+                if (/-ko\.json\.|-translation-ko-v6\.json\./.test(filename)) written.push(contents);
                 return fs.promises.writeFile(filename, contents, ...args);
             } } });
         const result = await instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'fast' });
@@ -1296,7 +1296,7 @@ test('multi-batch translation retains identical checkpoint bytes while hashing i
             assert.equal(written[index], written[index + 1], 'record and monotonic content index retain exactly the same JSON bytes');
             const saved = JSON.parse(written[index]);
             assert.equal(saved.sourceFingerprint, originalCreateHash('sha256').update(sourceBytes).digest('hex'));
-            assert.equal(saved.translationVersion, 5);
+            assert.equal(saved.translationVersion, 6);
         }
         assert.deepEqual(JSON.parse(written.at(-1)).subtitles.map(cue => [cue.id, cue.start, cue.end]), f.source.map(cue => [cue.id, cue.start, cue.end]));
     } finally { crypto.createHash = originalCreateHash; }
@@ -1311,7 +1311,7 @@ test('a short accurate draft reaches source review and only its corrected final 
     assert.equal(result.subtitleTranslation[0].text.replace(/\n/g, ' '), faithfulKorean);
     assert.equal(result.subtitleRepairStatus, 'completed');
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 5); assert.equal(saved.subtitles[0].text.includes('네.'), false);
+    assert.equal(saved.translationVersion, 6); assert.equal(saved.subtitles[0].text.includes('네.'), false);
 });
 
 test('fast translation still rejects a short result without starting an additional review', async t => {
@@ -1475,14 +1475,14 @@ async function seedVersionThreePrefix(f, change = () => {}, prefixLength = 80) {
     await fs.promises.writeFile(path.join(directory, index + '-translation-ko-v3.json'), JSON.stringify(payload));
 }
 
-test('an exact fully reviewed 160-cue version-three prefix migrates to version five without retranslating the prefix', async t => {
+test('an exact fully reviewed 160-cue version-three prefix migrates to version six without retranslating the prefix', async t => {
     const f = await translationGuardFixture(t, { count: 161 });
     await seedVersionThreePrefix(f, saved => { saved.terms = [{ source: ' 太郎 ', translation: '타로'.normalize('NFD') + ' ' }]; }, 160);
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.deepEqual(f.requests.map(item => item.start), [160, 160]);
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 5); assert.equal(saved.subtitles.length, 161);
+    assert.equal(saved.translationVersion, 6); assert.equal(saved.subtitles.length, 161);
     assert.deepEqual(saved.terms, [{ source: '太郎', translation: '타로' }]);
 });
 

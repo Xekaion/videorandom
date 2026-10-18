@@ -199,10 +199,16 @@ def merge_intervals(intervals, duration, padding=0.0):
 
 def uncovered_intervals(speech, covered, duration, minimum=0.0):
     coverage = merge_intervals(covered, duration)
-    result = []
+    result, coverage_index = [], 0
     for start, end in merge_intervals(speech, duration):
+        # Both unions are ordered and nonoverlapping. Reuse the left edge of
+        # the search without dropping an interval that spans several speech
+        # ranges; every gap still uses the original, exact comparisons.
+        while coverage_index < len(coverage) and coverage[coverage_index][1] <= start:
+            coverage_index += 1
         cursor = start
-        for left, right in coverage:
+        for index in range(coverage_index, len(coverage)):
+            left, right = coverage[index]
             if right <= cursor:
                 continue
             if left >= end:
@@ -387,9 +393,14 @@ def very_quiet_stationary_noise(audio, start, end, sample_rate):
 def prune_non_speech_artifacts(cues, audio, speech, sample_rate):
     kept, removed = [], []
     for cue in cues:
+        # Only low-confidence cues can be removed. Do not repeatedly search
+        # the full speech union for dialogue that will be kept in any case.
+        if not low_confidence(cue):
+            kept.append(cue)
+            continue
         intersects_speech = any(max(cue['start'] - 0.08, left) < min(cue['end'] + 0.08, right)
                                 for left, right in speech)
-        if (low_confidence(cue) and not intersects_speech
+        if (not intersects_speech
                 and very_quiet_stationary_noise(audio, cue['start'], cue['end'], sample_rate)):
             removed.append({'start': cue['start'], 'end': cue['end'], 'reason': 'very_quiet_non_speech'})
         else:
@@ -465,7 +476,7 @@ def cues_from_segment(segment, offset, duration, ownership=None, word_timestamps
 
 def reconcile_window_boundaries(cues):
     """Deduplicate matching observations from adjacent decoding windows only."""
-    kept = []
+    kept, by_window = [], {}
     def text_key(text):
         return ''.join(text.split())
     def same_observation(left, right, boundary):
@@ -476,7 +487,9 @@ def reconcile_window_boundaries(cues):
     for original in cues:
         cue = {**original}
         window, boundary = cue.get('_window', 0), cue.get('_boundary', 0)
-        previous = [item for item in kept if item.get('_window') == window - 1]
+        # Preserve insertion order even for out-of-order window input, while
+        # searching only the observations from the preceding window.
+        previous = by_window.get(window - 1, ())
         words = cue.get('words')
         if words:
             filtered = []
@@ -495,6 +508,9 @@ def reconcile_window_boundaries(cues):
                  for old in previous):
             continue
         kept.append(cue)
+        # A missing window was historically distinct from explicit window 0
+        # when matching previous observations; retain that distinction.
+        by_window.setdefault(cue.get('_window'), []).append(cue)
     return sorted([{key: value for key, value in cue.items() if not key.startswith('_')}
                    for cue in kept], key=lambda cue: (cue['start'], cue['end']))
 
