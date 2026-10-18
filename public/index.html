@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.9.6">
+  <link rel="stylesheet" href="css/style.css?v=1.9.7">
 </head>
 <body>
 
@@ -40,7 +40,7 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link header-analysis-link" href="#videoCatalog">분석 현황 · 대기열</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.6</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.7</span>
         <button id="appUpdateToggle" class="header-link app-update-toggle" type="button" aria-expanded="false" aria-controls="appUpdatePanel">업데이트</button>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
@@ -509,7 +509,7 @@
         </div>
       </details>
 
-      <div class="catalog-library-heading" id="catalogLibrary"><h3>영상 목록</h3><p>영상을 선택하고 대기열에 추가하면 현재 작업 다음에 이어서 분석합니다.</p></div>
+      <div class="catalog-library" id="catalogLibrary">
       <div class="catalog-toolbar">
         <div class="catalog-search-wrap">
           <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
@@ -537,8 +537,8 @@
         <span class="catalog-counts" id="catalogCounts">스캔한 영상이 없습니다.</span>
         <div class="catalog-actions">
           <button id="catalogClearSelection" class="btn btn-secondary" type="button" disabled>선택 해제</button>
-          <button id="catalogQueueAdd" class="btn btn-primary" type="button" disabled>＋ 선택 영상 대기 추가</button>
-          <button id="catalogAnalyze" class="btn btn-secondary" type="button" disabled><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> 선택 영상 지금 분석</button>
+          <button id="catalogAnalyze" class="btn btn-primary" type="button" disabled><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> 선택 영상 분석</button>
+          <button id="catalogQueueAdd" class="btn btn-secondary" type="button" disabled>＋ 선택 영상 대기 추가</button>
           <button id="catalogExport" class="btn catalog-export-btn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> 이미지 엑셀 저장</button>
         </div>
       </div>
@@ -563,6 +563,7 @@
       </div>
       <div class="catalog-pagination"><span id="catalogPageInfo"></span><div><button id="catalogPrevPage" class="btn btn-secondary" type="button" disabled>이전</button><button id="catalogNextPage" class="btn btn-secondary" type="button" disabled>다음</button></div></div>
       <p class="catalog-footnote">선택한 분석 결과를 엑셀로 저장합니다. 선택이 없으면 현재 검색 결과의 분석 완료 항목을 저장합니다. 상세 화면에서 모든 이미지와 시간별 대사를 볼 수 있습니다.</p>
+      </div>
     </section>
     
     <!-- Footer -->
@@ -614,9 +615,9 @@
   <script src="js/app.js?v=1.6.0" defer></script>
   <script src="js/history.js?v=1.6.0" defer></script>
   <script src="js/catalog-sort.js?v=1.6.0" defer></script>
-  <script src="js/analysis-progress.js?v=1.9.6" defer></script>
-  <script src="js/catalog.js?v=1.9.6" defer></script>
-  <script src="js/diagnostics.js?v=1.9.6" defer></script>
-  <script src="js/app-update.js?v=1.9.6" defer></script>
+  <script src="js/analysis-progress.js?v=1.9.7" defer></script>
+  <script src="js/catalog.js?v=1.9.7" defer></script>
+  <script src="js/diagnostics.js?v=1.9.7" defer></script>
+  <script src="js/app-update.js?v=1.9.7" defer></script>
 </body>
 </html>

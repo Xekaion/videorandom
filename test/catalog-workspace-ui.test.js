@@ -62,7 +62,7 @@ test('workspace is above settings, library actions are distinct and DOM IDs stay
   assert.ok(html.indexOf('id="catalogWorkspaceTitle"') < html.indexOf('id="catalogSettings"'));
   assert.ok(html.indexOf('id="catalogSettings"') < html.indexOf('id="catalogLibrary"'));
   assert.match(html, /id="catalogQueueAdd"[^>]*>＋ 선택 영상 대기 추가/);
-  assert.match(html, /id="catalogAnalyze"[\s\S]{0,200}선택 영상 지금 분석/);
+  assert.match(html, /id="catalogAnalyze"[^>]*class="btn btn-primary"[\s\S]{0,200}선택 영상 분석/);
   assert.doesNotMatch(html, /<details[^>]+id="catalogSettings"[^>]*\sopen(?:\s|>)/);
   assert.match(html, /다른 PC가 서버에 보낸 전체 대기열은 포함하지 않습니다/);
 });
@@ -292,26 +292,4 @@ test('queued file rows show an actual waiting position without claiming analysis
   assert.equal(activity.active, false);
   assert.equal(activity.label, '대기 · 일시 중지됨');
   assert.match(activity.detail, /대기 순서 3번/);
-});
-
-test('filenames expose a compact status chip beside duration while retaining detailed right-hand status controls', () => {
-  const ui = boot();
-  const files = ['미분석 합성.mp4', '대기 합성.mp4', '진행 합성.mp4', '완료 합성.mp4', '복구 합성.mp4'].map(name => file(name));
-  const records = files.slice(3).map((item, index) => ({ ...item, id: `synthetic-record-${index}`, duration: 120,
-    status: index ? 'partial' : 'completed', summary: '합성 저장 결과', frames: [] }));
-  ui.state.scanned = files;
-  records.forEach(record => ui.state.records.set(record.path.replace(/\//g, '\\').toLowerCase(), record));
-  ui.state.queue = snapshot([files[1]]);
-  ui.state.job = { id: 'synthetic-live-job', status: 'running', total: 1, currentFile: files[2].name, currentFilePath: files[2].path, percent: 35 };
-  ui.render();
-  const rows = new Map(ui.elements.get('catalogRows').childNodes.map(row => [row.childNodes[1].childNodes[0].textContent, row]));
-  const expected = ['미분석', '분석 대기', '진행 중', '정리 완료', '복구 필요'];
-  files.forEach((item, index) => {
-    const row = rows.get(item.name), metadata = row.childNodes[1].childNodes[2];
-    const chip = metadata.childNodes.find(node => node.className?.split(' ').includes('catalog-file-state'));
-    assert.ok(chip, `${item.name} has a visible filename-side status`);
-    assert.equal(chip.textContent, expected[index]);
-    assert.equal(row.childNodes[6].childNodes[0].className.startsWith('catalog-status '), true);
-    if (index >= 3) assert.equal(metadata.childNodes[0].textContent, '00:02:00');
-  });
 });

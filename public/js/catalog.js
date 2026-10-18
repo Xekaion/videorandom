@@ -901,18 +901,7 @@
       const path = make('span', 'catalog-file-path', file.path);
       path.title = file.path;
       nameCell.append(name, path);
-      const metadata = make('div', 'catalog-file-metadata');
-      if (record?.duration != null) metadata.append(make('span', 'catalog-file-duration', time(record.duration)));
-      const fileState = activity?.active ? '진행 중' : activity?.tone === 'queued' ? '분석 대기'
-        : activity && ['failed', 'partial'].includes(activity.tone) ? '복구 필요'
-        : !record ? '미분석' : healthFor(record).code === 'ready' ? '정리 완료'
-        : healthFor(record).code === 'extraction-only' ? '추출 완료' : '복구 필요';
-      const stateTone = activity?.active ? 'active' : activity?.tone === 'queued' ? 'queued'
-        : fileState === '복구 필요' ? 'attention' : record ? 'ready' : 'pending';
-      const stateChip = make('span', `catalog-file-state catalog-file-state-${stateTone}`, fileState);
-      stateChip.title = activity?.detail || healthFor(record).reason;
-      metadata.append(stateChip);
-      nameCell.append(metadata);
+      if (record?.duration != null) nameCell.append(make('span', 'catalog-file-duration', time(record.duration)));
       const actions = make('div', 'catalog-file-actions');
       const play = make('button', 'btn-mini play catalog-play-button', '▶ 재생');
       play.type = 'button';
