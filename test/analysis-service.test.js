@@ -23,9 +23,11 @@ async function fixture(t, analyze) {
   app.use('/api/analysis', service.router);
   const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   t.after(async () => {
-    service.stop();
+    await service.stop();
     await new Promise(resolve => server.close(resolve));
     // This directory is freshly allocated by this test, never a user directory.
+    assert.equal(path.dirname(dataDir), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(dataDir).startsWith('videorandom-service-'));
     await fs.rm(dataDir, { recursive: true, force: true });
   });
   const base = `http://127.0.0.1:${server.address().port}/api/analysis`;
@@ -111,6 +113,7 @@ test('scanned videos analyze, persist, edit and export without exposing credenti
   assert.deepEqual((await edited.json()).labels, ['가족']);
   const restored = createAnalysisService({ dataDir: f.dataDir, engine: f.engine, exporter: f.exporter });
   await restored.ready;
+  await restored.stop();
   const persisted = JSON.parse(await fs.readFile(path.join(f.dataDir, 'results', record.id + '.json'), 'utf8'));
   assert.equal(persisted.plot, '확인한 줄거리');
   assert.equal(JSON.stringify(persisted).includes('test-key-not-used'), false);

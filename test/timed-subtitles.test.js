@@ -155,9 +155,9 @@ test('long translations are chunked at cue boundaries and preserve the global cu
   assert.equal(result.subtitleTranslation.at(-1).text, '일상 대화 164');
 });
 
-test('malformed translation indexes, empty text and missing cues preserve original without retry', async t => {
-  for (const subtitles of [[{ index: 0, text: '안녕하세요.' }], [{ index: 1, text: '뒤바뀜' }, { index: 0, text: '대사' }],
-    [{ index: 0, text: '중복' }, { index: 0, text: '대사' }], [{ index: 0, text: '' }, { index: 1, text: '대사' }]]) {
+test('malformed translations preserve the original and missing-cue repair stops when its own response is invalid', async t => {
+  for (const [subtitles, expectedCalls] of [[[{ index: 0, text: '안녕하세요.' }], 2],
+    [[{ index: 0, text: '중복' }, { index: 0, text: '대사' }], 1], [[{ index: 0, text: '' }, { index: 1, text: '대사' }], 1]]) {
     const { dataDir, record } = await fixture(t);
     const mocked = mockedProvider(call => call.schema.properties.subtitles ? { subtitles } : summary());
     const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
@@ -166,8 +166,19 @@ test('malformed translation indexes, empty text and missing cues preserve origin
     assert.deepEqual(result.transcript, source());
     assert.equal(result.subtitleTranslation, undefined);
     assert.match(result.subtitleError, /대사|번호/);
-    assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, 1);
+    assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, expectedCalls);
   }
+});
+
+test('full analysis orders a complete reversed translation by source index without regenerating it', async t => {
+  const { dataDir, record } = await fixture(t);
+  const mocked = mockedProvider(call => call.schema.properties.subtitles
+    ? { subtitles: [{ index: 1, text: '역은 어디인가요?' }, { index: 0, text: '안녕하세요.' }] } : summary());
+  const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
+  assert.equal(result.status, 'completed', result.subtitleError);
+  assert.deepEqual(result.transcript, source());
+  assert.deepEqual(result.subtitleTranslation, source().map((cue, index) => ({ ...cue, text: index ? '역은 어디인가요?' : '안녕하세요.' })));
+  assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, 1);
 });
 
 test('translation quota failure retains summary and original timed subtitles without retry', async t => {

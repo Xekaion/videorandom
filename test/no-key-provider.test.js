@@ -1137,28 +1137,30 @@ async function translationGuardFixture(t, { count = 1, text = () => longJapanese
         run: settings => instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'accurate', ...settings }) };
 }
 
-for (const phase of ['draft', 'review']) test(`a ${phase} count mismatch records the exact batch and already committed prefix without content`, async t => {
+for (const phase of ['draft', 'review']) test(`an unrecoverable ${phase} count mismatch records the exact failed repair and committed prefix without content`, async t => {
     const events = [];
     const f = await translationGuardFixture(t, { count: 241, respond: item => {
         if (item.start === 160 && item.review === (phase === 'review')) return {
             subtitles: item.input.subtitles.slice(0, 37).map(cue => ({ index: cue.index, text: faithfulKorean })), terms: []
         };
+        if (item.start === 197 && item.review === (phase === 'review')) return { subtitles: [], terms: [] };
         return null;
     } });
     const result = await f.run({ onDiagnostic: event => { events.push(event); event.privateInjection = 'must not enter the saved diagnostic'; } });
     assert.equal(result.subtitleError, '한국어 자막 번역의 대사 수가 원문과 일치하지 않습니다.');
     assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.equal(f.requests.length, phase === 'draft' ? 5 : 6, 'no automatic retry or corrective batch starts');
+    assert.equal(f.requests.length, phase === 'draft' ? 6 : 7, 'one missing-cue request fails without recursion');
     assert.equal(result.subtitleTranslationPartial.length, 160);
     const diagnostic = result.subtitleDiagnostic;
     assert.deepEqual({ stage: diagnostic.stage, event: diagnostic.event, code: diagnostic.code,
         totalCues: diagnostic.totalCues, completedCues: diagnostic.completedCues, startCue: diagnostic.startCue,
         endCue: diagnostic.endCue, expectedCues: diagnostic.expectedCues, returnedCues: diagnostic.returnedCues }, {
         stage: `translation_${phase}`, event: 'error', code: 'SUBTITLE_CUE_COUNT_MISMATCH',
-        totalCues: 241, completedCues: 160, startCue: 161, endCue: 240, expectedCues: 80, returnedCues: 37
+        totalCues: 241, completedCues: 160, startCue: 198, endCue: 217, expectedCues: 20, returnedCues: 0
     });
     assert.equal(diagnostic.privateInjection, undefined);
     assert.equal(events.filter(event => event.event === 'error').length, 1);
+    assert.ok(events.some(event => event.level === 'warning' && event.expectedCues === 80 && event.returnedCues === 37));
     assert.deepEqual(events.filter(event => event.event === 'committed').map(event => [event.stage, event.completedCues]),
         [['translation_review', 80], ['translation_review', 160]]);
     assert.equal(events.some(event => event.stage === 'translation_draft' && event.event === 'committed'), false, 'an unreviewed draft is never recorded as saved');
@@ -1282,7 +1284,7 @@ test('multi-batch translation retains identical checkpoint bytes while hashing i
         const instance = createNoKeyProvider({ spawnImpl: f.mocked.spawnImpl,
             environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' }, platform: 'win32',
             checkpointIO: { ...fs.promises, async writeFile(filename, contents, ...args) {
-                if (/-ko\.json\.|-translation-ko-v4\.json\./.test(filename)) written.push(contents);
+                if (/-ko\.json\.|-translation-ko-v5\.json\./.test(filename)) written.push(contents);
                 return fs.promises.writeFile(filename, contents, ...args);
             } } });
         const result = await instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'fast' });
@@ -1294,7 +1296,7 @@ test('multi-batch translation retains identical checkpoint bytes while hashing i
             assert.equal(written[index], written[index + 1], 'record and monotonic content index retain exactly the same JSON bytes');
             const saved = JSON.parse(written[index]);
             assert.equal(saved.sourceFingerprint, originalCreateHash('sha256').update(sourceBytes).digest('hex'));
-            assert.equal(saved.translationVersion, 4);
+            assert.equal(saved.translationVersion, 5);
         }
         assert.deepEqual(JSON.parse(written.at(-1)).subtitles.map(cue => [cue.id, cue.start, cue.end]), f.source.map(cue => [cue.id, cue.start, cue.end]));
     } finally { crypto.createHash = originalCreateHash; }
@@ -1309,7 +1311,7 @@ test('a short accurate draft reaches source review and only its corrected final 
     assert.equal(result.subtitleTranslation[0].text.replace(/\n/g, ' '), faithfulKorean);
     assert.equal(result.subtitleRepairStatus, 'completed');
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 4); assert.equal(saved.subtitles[0].text.includes('네.'), false);
+    assert.equal(saved.translationVersion, 5); assert.equal(saved.subtitles[0].text.includes('네.'), false);
 });
 
 test('fast translation still rejects a short result without starting an additional review', async t => {
@@ -1473,14 +1475,14 @@ async function seedVersionThreePrefix(f, change = () => {}, prefixLength = 80) {
     await fs.promises.writeFile(path.join(directory, index + '-translation-ko-v3.json'), JSON.stringify(payload));
 }
 
-test('an exact fully reviewed 160-cue version-three prefix migrates to version four without retranslating the prefix', async t => {
+test('an exact fully reviewed 160-cue version-three prefix migrates to version five without retranslating the prefix', async t => {
     const f = await translationGuardFixture(t, { count: 161 });
     await seedVersionThreePrefix(f, saved => { saved.terms = [{ source: ' 太郎 ', translation: '타로'.normalize('NFD') + ' ' }]; }, 160);
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.deepEqual(f.requests.map(item => item.start), [160, 160]);
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 4); assert.equal(saved.subtitles.length, 161);
+    assert.equal(saved.translationVersion, 5); assert.equal(saved.subtitles.length, 161);
     assert.deepEqual(saved.terms, [{ source: '太郎', translation: '타로' }]);
 });
 

@@ -3,8 +3,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
 const express = require('express');
 const { createAnalysisService } = require('../lib/analysis-service');
+const { createNoKeyProvider } = require('../lib/no-key-provider');
+const { saveKoreanSubtitle } = require('../lib/subtitle-sidecar');
+const { subtitleText } = require('../lib/subtitle-utils');
 const { httpJsonFixture } = require('./http-json-fixture');
 const APP_VERSION = require('../package.json').version;
 
@@ -48,7 +54,7 @@ async function fixture(t, { seed = {}, knownSource = true } = {}) {
   await fs.writeFile(path.join(dataDir, 'frames', seedId, 'frame-01.jpg'), 'owned-frame-bytes');
   const clients = [], calls = [], sidecars = [], forbidden = [];
   const noPrerequisite = name => async () => { forbidden.push(name); throw new Error('Translation-only must not call ' + name); };
-  async function mount({ translate = async record => translated(record), translatorAvailable = true } = {}) {
+  async function mount({ translate = async record => translated(record), translatorAvailable = true, subtitleWriter } = {}) {
     const engine = { getToolsStatus: noPrerequisite('getToolsStatus'), getProviderStatus: noPrerequisite('getProviderStatus'),
       analyzeVideo: noPrerequisite('analyzeVideo') };
     if (translatorAvailable) engine.translateSubtitles = async (record, options, context) => {
@@ -59,8 +65,9 @@ async function fixture(t, { seed = {}, knownSource = true } = {}) {
       connectionStore: { getConnection: async () => ({ remoteUrl: '', connectionCode: '', remembered: false }),
         saveConnection: async value => ({ ...value, remembered: true }) },
       lan: { status: () => ({ running: false }), stop: async () => {} },
-      subtitleWriter: async record => {
+      subtitleWriter: async (record, options) => {
         sidecars.push(structuredClone(record));
+        if (subtitleWriter) return subtitleWriter(record, options);
         return { status: 'saved', path: path.join(directory, 'owned synthetic train.ko.srt'), partial: false,
           generated: true, sha256: '1'.repeat(64) };
       } });
@@ -86,8 +93,8 @@ async function fixture(t, { seed = {}, knownSource = true } = {}) {
     journal: async () => JSON.parse(await fs.readFile(path.join(dataDir, 'jobs.json'), 'utf8')) };
 }
 
-async function finished(client, id) {
-  for (let attempt = 0; attempt < 300; attempt++) {
+async function finished(client, id, { attempts = 300 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     const { data } = await client.request('/jobs/' + id);
     if (['completed', 'failed', 'cancelled'].includes(data.status)) return data;
     await delay(10);
@@ -255,4 +262,118 @@ test('successful translation of a previously failed analysis becomes partial and
   assert.deepEqual(record.subtitleTranslation.map(cue => [cue.start, cue.end]), cues.map(cue => [cue.start, cue.end]));
   assert.equal(await fs.readFile(path.join(f.dataDir, 'results', seedId + '.json'), 'utf8'), f.originalBytes);
   assert.deepEqual(f.forbidden, []);
+});
+
+test('an 1819-cue service repair resumes 160 reviewed v4 cues, fills one short response, and writes the complete timed SRT', { timeout: 30000 }, async t => {
+  const total = 1819, duration = total * 2 + 2;
+  const source = Array.from({ length: total }, (_, index) => ({ id: `owned-train-cue-${index}`,
+    start: index * 2 + 0.125, end: index * 2 + 1.375,
+    text: '合成の列車が到着します。安全のためにホームの内側で待ち、案内と出発時間を確認してください。' }));
+  const korean = (kind, index) => `${kind} ${index}: 합성 열차의 안전한 출발 시간을 확인하세요.`;
+  const prefix = source.slice(0, 160).map((cue, index) => ({ ...cue, text: korean('기존 검수', index) }));
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(source.map(cue => [cue.id, cue.start, cue.end, cue.text]))).digest('hex');
+  const progress = { version: 1, sourceFingerprint: fingerprint, language: 'ko', totalCues: total, completedCues: 160,
+    complete: false, sourceComplete: true, sourceProcessed: true, sourceAuditComplete: true, translationComplete: false };
+  const quality = { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', device: 'cuda', workers: 1,
+    recognitionRevision: 3, complete: true, processingComplete: true, duration, processedUntil: duration,
+    audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false }, warnings: [] };
+  const f = await fixture(t, { seed: { duration, transcript: source, transcriptionQuality: quality,
+    subtitleTranslationPartial: prefix, subtitleTranslationProgress: progress,
+    subtitleError: '한국어 자막 번역의 대사 수가 원문과 일치하지 않습니다.' } });
+  const v4Index = crypto.createHash('sha256').update(`videorandom-subtitles\0${4}\0ko\0accurate\0${fingerprint}`).digest('hex');
+  const v4Path = path.join(f.dataDir, 'checkpoints', v4Index + '-translation-ko-v4.json');
+  const v4Bytes = JSON.stringify({ ...progress, translationVersion: 4, targetLanguage: 'ko', subtitleQuality: 'accurate', reviewPasses: 2,
+    subtitles: prefix.map((cue, index) => ({ index, ...cue })), terms: [] });
+  await fs.mkdir(path.dirname(v4Path), { recursive: true });
+  await fs.writeFile(v4Path, v4Bytes);
+
+  const requests = [];
+  const spawnImpl = (binary, args) => {
+    assert.equal(binary, 'owned-synthetic-codex');
+    assert.equal(args[0], 'exec', 'only synthetic subtitle draft/review requests are allowed');
+    assert.equal(args.includes('--audio'), false, 'translation repair cannot start speech recognition');
+    const child = new EventEmitter(), chunks = [];
+    child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough(); child.killed = false;
+    child.kill = () => { if (!child.killed) { child.killed = true; queueMicrotask(() => child.emit('close', null)); } };
+    child.stdin.on('data', chunk => chunks.push(chunk));
+    child.stdin.on('finish', () => queueMicrotask(async () => {
+      try {
+        const input = JSON.parse(Buffer.concat(chunks).toString('utf8').split('자료 JSON:\n').at(-1));
+        const schema = JSON.parse(await fs.readFile(args[args.indexOf('--output-schema') + 1], 'utf8'));
+        assert.ok(Array.isArray(input.subtitles), 'summary requests are forbidden');
+        assert.equal(schema.properties.summary, undefined);
+        const indices = input.subtitles.map(cue => cue.index), review = Boolean(input.draftSubtitles);
+        assert.ok(indices.every(index => index >= 160), 'the v4 reviewed prefix must never be requested again');
+        assert.equal(schema.properties.subtitles.minItems, indices.length);
+        assert.equal(schema.properties.subtitles.maxItems, indices.length);
+        assert.deepEqual(schema.properties.subtitles.items.properties.index.enum, indices);
+        const shortened = review && indices[0] === 160 && indices.length === 80;
+        const returned = shortened ? indices.slice(0, 37) : indices;
+        requests.push({ indices, review, shortened });
+        const response = { subtitles: returned.map(index => ({ index,
+          text: korean(review ? shortened ? '처음 검수 보존' : '최종 검수' : '검수 전 초안', index) })), terms: [] };
+        await fs.writeFile(args[args.indexOf('--output-last-message') + 1], JSON.stringify(response));
+        if (!child.killed) child.emit('close', 0);
+      } catch (error) { child.emit('error', error); }
+    }));
+    return child;
+  };
+  const provider = createNoKeyProvider({ spawnImpl, platform: 'win32', environment: { VIDEORANDOM_CODEX: 'owned-synthetic-codex',
+    VIDEORANDOM_PYTHON: 'forbidden-synthetic-python' } });
+  const client = await f.mount({ subtitleWriter: saveKoreanSubtitle, translate: (record, options, context) => provider.translateKoreanOnly(record, {
+    dataDir: context.dataDir, signal: context.signal, onProgress: context.onProgress, onDiagnostic: context.onDiagnostic,
+    subtitleQuality: options.subtitleQuality, forceTranslation: options.forceTranslation
+  }) });
+  const started = await client.request(`/results/${seedId}/subtitles/repair`, { options: { mode: 'codex', subtitleQuality: 'accurate' } });
+  assert.equal(started.status, 202);
+  const job = await finished(client, started.data.id, { attempts: 1500 });
+  assert.equal(job.status, 'completed', job.error);
+  assert.equal(job.results.length, 1);
+  const record = job.results[0];
+  assert.equal(record.subtitleRepairStatus, 'completed', record.subtitleError);
+  assert.equal(record.subtitleError, null);
+  assert.equal(record.subtitleDiagnostic, undefined);
+  assert.equal(record.subtitleTranslationProgress.completedCues, total);
+  assert.equal(record.subtitleTranslationProgress.totalCues, total);
+  assert.equal(record.subtitleTranslationProgress.complete, true);
+  assert.equal(record.subtitleTranslationProgress.translationComplete, true);
+  assert.equal(record.subtitleTranslation.length, total);
+  assert.deepEqual(record.subtitleTranslation.slice(0, 160), prefix);
+  assert.deepEqual(record.subtitleTranslation.slice(160, 197).map(cue => cue.text),
+    Array.from({ length: 37 }, (_, offset) => korean('처음 검수 보존', offset + 160)));
+  assert.deepEqual(record.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), source.map(cue => [cue.id, cue.start, cue.end]));
+  assert.equal(requests.length, 45, '21 full draft/review pairs plus exactly three missing-review groups');
+  assert.deepEqual(requests.slice(0, 5).map(request => [request.review, request.indices[0], request.indices.length]),
+    [[false, 160, 80], [true, 160, 80], [true, 197, 20], [true, 217, 20], [true, 237, 3]]);
+  assert.equal(requests.slice(2).some(request => request.indices.some(index => index >= 160 && index < 197)), false,
+    'already validated review items must not be regenerated');
+  for (const key of preserved) assert.deepEqual(record[key], f.original[key], key);
+  assert.deepEqual(record.analysisProvenance.analysis, f.original.analysisProvenance.analysis);
+  assert.equal(record.analysisProvenance.translation.clientVersion, APP_VERSION);
+  assert.equal(record.analysisProvenance.translation.serverVersion, undefined);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.forbidden, []);
+  assert.equal(f.sidecars.length, 1);
+  assert.equal(record.subtitleAutoSave.status, 'saved');
+  assert.equal(record.subtitleAutoSave.partial, undefined);
+  assert.equal(record.subtitleAutoSave.generated, true);
+  const expectedSrt = subtitleText(record, { format: 'srt', language: 'ko' });
+  const savedSrt = await fs.readFile(record.subtitleAutoSave.path, 'utf8');
+  assert.equal(path.dirname(record.subtitleAutoSave.path), path.dirname(f.video));
+  assert.equal(savedSrt, expectedSrt);
+  assert.equal((savedSrt.match(/ --> /g) || []).length, total);
+  assert.match(savedSrt, new RegExp(`\\n${total}\\n`));
+  assert.equal(savedSrt.includes(source[0].text), false);
+  assert.equal(savedSrt.includes('검수 전 초안'), false);
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'results', seedId + '.json'), 'utf8'), f.originalBytes);
+  assert.equal(await fs.readFile(v4Path, 'utf8'), v4Bytes, 'migration must not overwrite the original reviewed v4 checkpoint');
+  const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'results', record.id + '.json'), 'utf8'));
+  assert.deepEqual(saved.transcript, source);
+  assert.deepEqual(saved.subtitleTranslation, record.subtitleTranslation);
+  assert.deepEqual(saved.analysisProvenance, record.analysisProvenance);
+  const v5 = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', record.id + '-ko.json'), 'utf8'));
+  assert.equal(v5.translationVersion, 5);
+  assert.equal(v5.reviewPasses, 2);
+  assert.equal(v5.completedCues, total);
+  assert.equal(v5.complete, true);
 });
