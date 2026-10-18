@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.9.1">
+  <link rel="stylesheet" href="css/style.css?v=1.9.2">
 </head>
 <body>
 
@@ -40,7 +40,7 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link" href="#videoCatalog">영상 분석</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.1</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.2</span>
         <button id="appUpdateToggle" class="header-link app-update-toggle" type="button" aria-expanded="false" aria-controls="appUpdatePanel">업데이트</button>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
@@ -458,6 +458,29 @@
         </div>
       </details>
 
+      <details class="catalog-settings diagnostics-panel" id="diagnosticsPanel">
+        <summary>연결 PC · 작업 로그 <span id="diagnosticsSummary">서버에 보관한 진행·오류 기록</span></summary>
+        <div class="diagnostics-body">
+          <p class="diagnostics-intro">이 분석 서버에 연결한 PC와 영상별 진행·오류를 확인합니다. 새 버전에서 남긴 기술 기록은 프로그램을 다시 열어도 유지됩니다. 원문 대사·이미지·연결 코드는 포함하지 않습니다.</p>
+          <p class="diagnostics-intro">다른 PC의 전송·파일 저장 오류는 해당 PC도 새 버전이어야 보고되며, 연결이 끊긴 동안의 기록은 다시 연결되면 도착합니다. 예전 버전에서 기록하지 않은 과거 오류는 복원할 수 없습니다.</p>
+          <div class="diagnostics-toolbar">
+            <label class="diagnostics-search" for="diagnosticsSearch"><span>파일명 · PC · 작업 ID · 오류 검색</span><input id="diagnosticsSearch" type="search" maxlength="200" placeholder="파일명, PC 이름, 작업 ID, 오류 코드" autocomplete="off"></label>
+            <label for="diagnosticsLevel"><span>기록 종류</span><select id="diagnosticsLevel"><option value="all">전체</option><option value="error">오류</option><option value="warning">주의 / 일부 완료</option><option value="info">진행 / 정보</option></select></label>
+            <button id="diagnosticsRefresh" class="btn btn-secondary" type="button">로그 새로고침</button>
+            <a id="diagnosticsExport" class="btn btn-secondary" href="/api/analysis/diagnostics/export" download="videorandom-diagnostics.jsonl">전체 JSONL 내보내기</a>
+          </div>
+          <p id="diagnosticsStatus" class="diagnostics-status" role="status" aria-live="polite">패널을 열면 기록을 불러옵니다. 열린 화면에서만 5초마다 갱신합니다.</p>
+          <p id="diagnosticsError" class="diagnostics-error hidden" role="alert"></p>
+          <div class="diagnostics-clients-heading"><h3>최근 연결한 PC</h3><span>PC별 최근 보관 기록 시각</span></div>
+          <div id="diagnosticsClients" class="diagnostics-clients"></div>
+          <div class="diagnostics-table-scroll">
+            <table class="diagnostics-table"><caption class="catalog-sr-only">분석 서버와 연결 PC의 영상별 진행 및 오류 기록</caption><thead><tr><th scope="col">기록 시각</th><th scope="col">PC / 발생 위치</th><th scope="col">영상 / 작업</th><th scope="col">단계 / 진척</th><th scope="col">이벤트 / 오류</th></tr></thead><tbody id="diagnosticsRows"></tbody></table>
+          </div>
+          <div class="diagnostics-pagination"><span id="diagnosticsCount">표시된 기록 없음</span><button id="diagnosticsMore" class="btn btn-secondary hidden" type="button">이전 기록 더 보기</button></div>
+          <p class="diagnostics-footnote">전체 JSONL은 현재 검색·필터와 관계없이 서버에 보관한 모든 기술 기록을 내보냅니다. 분석 결과나 영상 파일을 변경하지 않습니다.</p>
+        </div>
+      </details>
+
       <div class="catalog-toolbar">
         <div class="catalog-search-wrap">
           <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
@@ -566,8 +589,9 @@
   <script src="js/app.js?v=1.6.0" defer></script>
   <script src="js/history.js?v=1.6.0" defer></script>
   <script src="js/catalog-sort.js?v=1.6.0" defer></script>
-  <script src="js/analysis-progress.js?v=1.9.1" defer></script>
-  <script src="js/catalog.js?v=1.9.1" defer></script>
-  <script src="js/app-update.js?v=1.9.1" defer></script>
+  <script src="js/analysis-progress.js?v=1.9.2" defer></script>
+  <script src="js/catalog.js?v=1.9.2" defer></script>
+  <script src="js/diagnostics.js?v=1.9.2" defer></script>
+  <script src="js/app-update.js?v=1.9.2" defer></script>
 </body>
 </html>

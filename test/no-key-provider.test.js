@@ -1137,6 +1137,133 @@ async function translationGuardFixture(t, { count = 1, text = () => longJapanese
         run: settings => instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'accurate', ...settings }) };
 }
 
+for (const phase of ['draft', 'review']) test(`a ${phase} count mismatch records the exact batch and already committed prefix without content`, async t => {
+    const events = [];
+    const f = await translationGuardFixture(t, { count: 241, respond: item => {
+        if (item.start === 160 && item.review === (phase === 'review')) return {
+            subtitles: item.input.subtitles.slice(0, 37).map(cue => ({ index: cue.index, text: faithfulKorean })), terms: []
+        };
+        return null;
+    } });
+    const result = await f.run({ onDiagnostic: event => { events.push(event); event.privateInjection = 'must not enter the saved diagnostic'; } });
+    assert.equal(result.subtitleError, '한국어 자막 번역의 대사 수가 원문과 일치하지 않습니다.');
+    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(f.requests.length, phase === 'draft' ? 5 : 6, 'no automatic retry or corrective batch starts');
+    assert.equal(result.subtitleTranslationPartial.length, 160);
+    const diagnostic = result.subtitleDiagnostic;
+    assert.deepEqual({ stage: diagnostic.stage, event: diagnostic.event, code: diagnostic.code,
+        totalCues: diagnostic.totalCues, completedCues: diagnostic.completedCues, startCue: diagnostic.startCue,
+        endCue: diagnostic.endCue, expectedCues: diagnostic.expectedCues, returnedCues: diagnostic.returnedCues }, {
+        stage: `translation_${phase}`, event: 'error', code: 'SUBTITLE_CUE_COUNT_MISMATCH',
+        totalCues: 241, completedCues: 160, startCue: 161, endCue: 240, expectedCues: 80, returnedCues: 37
+    });
+    assert.equal(diagnostic.privateInjection, undefined);
+    assert.equal(events.filter(event => event.event === 'error').length, 1);
+    assert.deepEqual(events.filter(event => event.event === 'committed').map(event => [event.stage, event.completedCues]),
+        [['translation_review', 80], ['translation_review', 160]]);
+    assert.equal(events.some(event => event.stage === 'translation_draft' && event.event === 'committed'), false, 'an unreviewed draft is never recorded as saved');
+    const technical = JSON.stringify([diagnostic, events]);
+    for (const secret of [longJapanese, faithfulKorean, f.record.path, f.record.name, 'draftSubtitles', 'properNames', 'stack']) {
+        assert.equal(technical.includes(secret), false, secret);
+    }
+});
+
+for (const subtitles of [[], null]) test(`count diagnostics distinguish ${subtitles ? 'an actual empty array' : 'an absent array'} without guessing returned cues`, async t => {
+    const f = await translationGuardFixture(t, { count: 80, respond: () => ({ subtitles, terms: [] }) });
+    const result = await f.run();
+    assert.equal(f.requests.length, 1);
+    assert.equal(result.subtitleDiagnostic.expectedCues, 80);
+    assert.equal(result.subtitleDiagnostic.startCue, 1);
+    assert.equal(result.subtitleDiagnostic.endCue, 80);
+    assert.equal(result.subtitleDiagnostic.completedCues, 0);
+    if (subtitles) assert.equal(result.subtitleDiagnostic.returnedCues, 0);
+    else assert.equal('returnedCues' in result.subtitleDiagnostic, false);
+});
+
+for (const kind of ['throw', 'reject']) test(`a diagnostic callback ${kind} cannot fail or retry successful translation`, async t => {
+    const f = await translationGuardFixture(t, { count: 81 });
+    const result = await f.run({ onDiagnostic: kind === 'throw' ? () => { throw new Error('owned diagnostic observer failure'); }
+        : async () => { throw new Error('owned async diagnostic observer failure'); } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.equal(result.subtitleDiagnostic, undefined);
+    assert.equal(result.subtitleTranslation.length, 81);
+    assert.equal(f.requests.length, 4);
+});
+
+for (const [failure, code] of [['safety refusal', 'PROVIDER_REFUSAL'], ['401 authentication failed', 'PROVIDER_AUTH'],
+    ['quota usage limit', 'PROVIDER_QUOTA'], ['503 service unavailable', 'PROVIDER_UNAVAILABLE'], ['execution timeout', 'PROVIDER_TIMEOUT']]) {
+    test(`a diagnostic preserves ${failure} as a provider failure without content or retries`, async t => {
+        const events = [], secret = 'owned-private-dialogue-and-connection-token';
+        const f = await translationGuardFixture(t, { count: 80, respond: item => {
+            if (item.review) throw Object.assign(new Error(`${failure} ${secret} C:\\private\\video.mp4`), { exitCode: 1 });
+            return null;
+        } });
+        const result = await f.run({ onDiagnostic: event => events.push(event) });
+        assert.equal(result.subtitleRepairStatus, 'failed');
+        assert.equal(f.requests.length, 2);
+        assert.equal(result.subtitleDiagnostic.stage, 'translation_review');
+        assert.equal(result.subtitleDiagnostic.code, code);
+        assert.equal(result.subtitleDiagnostic.completedCues, 0);
+        assert.equal('returnedCues' in result.subtitleDiagnostic, false);
+        assert.equal(JSON.stringify([events, result.subtitleDiagnostic]).includes(secret), false);
+        assert.equal(JSON.stringify([events, result.subtitleDiagnostic]).includes('C:\\private'), false);
+    });
+}
+
+test('full analysis forwards and retains a translation diagnostic before returning its partial result', async t => {
+    const { dataDir, record } = await fixture(t, { transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
+        transcript: [{ id: 0, start: 1, end: 3, text: longJapanese }], transcriptionQuality: fullQuality(90) });
+    const events = [];
+    const mocked = mockSpawn(async call => {
+        const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
+        await writeResponse(call, schema.properties.subtitles ? { subtitles: [], terms: [] } : summary());
+    });
+    const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko', subtitleQuality: 'accurate',
+        onDiagnostic: event => { events.push(event); throw new Error('owned observer failure'); } });
+    assert.equal(result.status, 'partial');
+    assert.equal(result.subtitleError, '한국어 자막 번역의 대사 수가 원문과 일치하지 않습니다.');
+    assert.equal(result.subtitleDiagnostic.stage, 'translation_draft');
+    assert.equal(result.subtitleDiagnostic.expectedCues, 1);
+    assert.equal(result.subtitleDiagnostic.returnedCues, 0);
+    assert.equal(events.filter(event => event.event === 'error').length, 1);
+    assert.equal(mocked.calls.filter(call => call.args[0] === 'exec').length, 2);
+    assert.equal(mocked.calls.some(call => call.args.includes('--audio')), false);
+});
+
+test('successful translation repair clears only its stale diagnostic and preserves prior failure in the event stream', async t => {
+    let failing = true;
+    const events = [];
+    const f = await translationGuardFixture(t, { respond: () => failing ? { subtitles: [], terms: [] } : null });
+    const first = await f.run({ onDiagnostic: event => events.push(event) });
+    assert.equal(first.subtitleDiagnostic.code, 'SUBTITLE_CUE_COUNT_MISMATCH');
+    failing = false;
+    const repaired = await f.run({ onDiagnostic: event => events.push(event) });
+    assert.equal(repaired.subtitleRepairStatus, 'completed');
+    assert.equal(repaired.subtitleDiagnostic, undefined);
+    assert.equal(events.filter(event => event.event === 'error').length, 1);
+});
+
+test('speech failures expose only canonical technical diagnostics even when the observer rejects', async t => {
+    const { dataDir } = await fixture(t);
+    const audioPath = path.join(dataDir, 'owned-diagnostic-speech.flac');
+    await fs.promises.writeFile(audioPath, 'synthetic audio bytes');
+    const secret = 'owned-private-speech-and-token', events = [];
+    const mocked = mockSpawn(() => { throw Object.assign(new Error('503 service unavailable ' + secret), { exitCode: 1 }); });
+    await assert.rejects(provider(mocked.spawnImpl).transcribeLocalAudio(audioPath, { dataDir, onDiagnostic: async event => {
+        events.push(event); throw new Error('owned observer rejection');
+    } }), error => {
+        assert.equal(error.diagnostic.stage, 'transcription');
+        assert.equal(error.diagnostic.code, 'PROVIDER_UNAVAILABLE');
+        assert.equal(error.diagnostic.completedCues, 0);
+        return true;
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(mocked.calls.length, 1);
+    assert.equal(JSON.stringify(events).includes(secret), false);
+    assert.equal(JSON.stringify(events).includes(audioPath), false);
+});
+
 test('multi-batch translation retains identical checkpoint bytes while hashing its immutable source a bounded number of times', async t => {
     const f = await translationGuardFixture(t, { count: 161 });
     const sourceBytes = JSON.stringify(f.source.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]));

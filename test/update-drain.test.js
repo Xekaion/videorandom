@@ -8,6 +8,8 @@ const express = require('express');
 const { createLanAnalysis, sendRemoteAnalysis } = require('../lib/lan-analysis');
 const { createAnalysisService } = require('../lib/analysis-service');
 const { createHistoryService } = require('../lib/history-service');
+const { createDiagnosticsStore } = require('../lib/diagnostics');
+const ownedDirectories = new Set();
 
 // These tests use only invented text, a JPEG signature and inert file bytes.
 // No speech recognizer, model, real media decoder or external service runs.
@@ -24,13 +26,19 @@ async function until(read, predicate = Boolean) {
 }
 async function directory(t) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-update-drain-'));
-  t.after(async () => {
+  ownedDirectories.add(dataDir);
+  return dataDir;
+}
+// Remove fixture directories only after every test's gates and owned services
+// have closed. An earlier per-test hook ran before those producers stopped.
+test.after(async () => {
+  for (const dataDir of ownedDirectories) {
+    await createDiagnosticsStore({ dataDir }).flush();
     assert.equal(path.dirname(dataDir), os.tmpdir());
     assert.ok(path.basename(dataDir).startsWith('videorandom-update-drain-'));
     await fs.rm(dataDir, { recursive: true, force: true });
-  });
-  return dataDir;
-}
+  }
+});
 const connectionStore = () => ({ getHostCode: async () => CODE });
 function metadata(translationOnly = false) {
   return { name: 'owned-neutral.mp4', ext: 'MP4', sizeMB: 1, duration: 60,

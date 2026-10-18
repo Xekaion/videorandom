@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 const crypto = require('node:crypto');
+const { httpFixtureResponse } = require('./http-json-fixture');
 const { createLanAnalysis, sendRemoteAnalysis, checkRemoteServer, privateAddress, validateRemoteUrl, resolveRemoteUrl, validateMetadata } = require('../lib/lan-analysis');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
@@ -35,7 +36,7 @@ async function fixture(t, processPackage = async ({ record }) => ({ ...record, s
   const base = `http://127.0.0.1:${status.port}`;
   const headers = { Authorization: 'Bearer ' + status.connectionCode };
   t.after(async () => { await service.stop(); await fs.rm(dataDir, { recursive: true, force: true }); });
-  const request = (endpoint, options = {}) => fetch(base + endpoint, { ...options, headers: { ...headers, ...options.headers } });
+  const request = (endpoint, options = {}) => httpFixtureResponse(base + endpoint, { ...options, headers: { ...headers, ...options.headers } });
   const submit = (info = metadata(), files) => request('/v1/jobs', { method: 'POST', ...multipart(info, files) });
   return { dataDir, service, status, base, headers, request, submit };
 }
@@ -72,9 +73,9 @@ test('relay starts only explicitly and requires private client plus bearer authe
   const f = await fixture(t);
   assert.ok(f.status.connectionCode.length >= 24);
   const status = await (await f.request('/v1/status')).json();
-  assert.deepEqual(status, { ready: true, protocol: 1, appVersion: require('../package.json').version, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3', 'subtitle-translation-only-v1', 'managed-update-v1'] });
+  assert.deepEqual(status, { ready: true, protocol: 1, appVersion: require('../package.json').version, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3', 'subtitle-translation-only-v1', 'managed-update-v1', 'diagnostics-v1'] });
   assert.equal(JSON.stringify(status).includes(f.status.connectionCode), false);
-  assert.equal((await fetch(f.base + '/v1/status')).status, 401);
+  assert.equal((await httpFixtureResponse(f.base + '/v1/status')).status, 401);
   assert.equal((await f.request('/v1/status', { headers: { Authorization: 'Bearer ' + 'x'.repeat(32) } })).status, 401);
   assert.equal((await f.request('/v1/status?code=' + f.status.connectionCode)).status, 400);
   const same = await f.service.start({ port: 0 });
