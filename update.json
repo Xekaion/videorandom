@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "updateProtocol": 1,
-  "version": "1.9.12",
+  "version": "1.9.13",
   "asset": {
-    "url": "https://raw.githubusercontent.com/Xekaion/videorandom/v1.9.12/videorandom.exe",
-    "sha256": "ab8151211afac825dc80692b89a369444c70ffc208250591c06272b1f3aae219",
-    "sizeBytes": 99480938
+    "url": "https://raw.githubusercontent.com/Xekaion/videorandom/v1.9.13/videorandom.exe",
+    "sha256": "c31463bad62ff4cdb6169244f992f8c4495cb7dfaef53556758a03a971262909",
+    "sizeBytes": 99482970
   }
 }

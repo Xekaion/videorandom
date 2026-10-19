@@ -98,6 +98,9 @@ test('summary list API is opt-in and full detail, default full list and export p
   for (const record of f.records) {
     const metadata = compact.find(result => result.id === record.id);
     const derived = { subtitleTranslatedCount: metadata.subtitleTranslatedCount,
+      subtitleTranslationAttempted: metadata.subtitleTranslationAttempted,
+      subtitleTranslationComplete: metadata.subtitleTranslationComplete,
+      subtitlePendingCount: metadata.subtitlePendingCount,
       subtitleTranslationSourceFingerprint: metadata.subtitleTranslationSourceFingerprint };
     assert.match(derived.subtitleTranslationSourceFingerprint, /^[a-f0-9]{64}$/);
     assert.deepEqual(full.find(result => result.id === record.id), { ...record, ...derived, health: recordHealth(record) });

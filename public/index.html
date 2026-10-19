@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.9.12">
+  <link rel="stylesheet" href="css/style.css?v=1.9.13">
 </head>
 <body>
 
@@ -40,7 +40,7 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link header-analysis-link" href="#videoCatalog">분석 현황 · 대기열</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.12</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.13</span>
         <button id="appUpdateToggle" class="header-link app-update-toggle" type="button" aria-expanded="false" aria-controls="appUpdatePanel">업데이트</button>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
@@ -520,6 +520,7 @@
         <select id="catalogStatusFilter" aria-label="분석 상태 필터">
           <option value="all">모든 영상</option>
           <option value="analyzed">분석 결과 있음</option>
+          <option value="subtitle-incomplete">한국어 자막 미완료</option>
           <option value="pending">미분석</option>
           <option value="failed">분석 실패</option>
         </select>
@@ -538,6 +539,7 @@
       <div class="catalog-action-row">
         <span class="catalog-counts" id="catalogCounts">스캔한 영상이 없습니다.</span>
         <div class="catalog-actions">
+          <button id="catalogSubtitleIncomplete" class="btn catalog-subtitle-filter" type="button" aria-pressed="false" title="저장된 영상 중 한국어 자막이 미완료인 영상들을 모두 표시합니다.">자막 미완료 0개</button>
           <button id="catalogClearSelection" class="btn btn-secondary" type="button" disabled>선택 해제</button>
           <button id="catalogAnalyze" class="btn btn-primary" type="button" disabled><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> 선택 영상 분석</button>
           <button id="catalogQueueAdd" class="btn btn-secondary" type="button" disabled>＋ 선택 영상 대기 추가</button>
@@ -558,13 +560,13 @@
           <caption class="catalog-sr-only">영상 파일별 요약, 라벨, 대사, 대표 이미지 목록</caption>
           <thead><tr>
             <th class="catalog-select-cell" id="catalogColumnSelect" scope="col"><input id="catalogSelectAll" type="checkbox" aria-label="현재 검색 결과 전체 선택"></th>
-            <th scope="col" id="catalogColumnFile">영상 파일</th><th scope="col" id="catalogColumnSummary">줄거리 / 요약</th><th scope="col" id="catalogColumnLabels">라벨</th><th scope="col" id="catalogColumnDialogue">대사 요약</th><th scope="col" id="catalogColumnFrames">대표 이미지</th><th scope="col" id="catalogColumnStatus">상태</th>
+            <th scope="col" id="catalogColumnFile">영상 파일</th><th scope="col" id="catalogColumnSummary">줄거리 / 요약</th><th scope="col" id="catalogColumnLabels">라벨</th><th scope="col" id="catalogColumnDialogue">한국어 자막 / 대사 요약</th><th scope="col" id="catalogColumnFrames">대표 이미지</th><th scope="col" id="catalogColumnStatus">상태</th>
           </tr></thead>
           <tbody id="catalogRows"></tbody>
         </table>
       </div>
       <div class="catalog-pagination"><span id="catalogPageInfo"></span><div><button id="catalogPrevPage" class="btn btn-secondary" type="button" disabled>이전</button><button id="catalogNextPage" class="btn btn-secondary" type="button" disabled>다음</button></div></div>
-      <p class="catalog-footnote">선택한 분석 결과를 엑셀로 저장합니다. 선택이 없으면 현재 검색 결과의 분석 완료 항목을 저장합니다. 상세 화면에서 모든 이미지와 시간별 대사를 볼 수 있습니다.</p>
+      <p class="catalog-footnote">자막 수는 저장된 원문 대사 중 검증된 한국어 번역 구간 수입니다. 미완료 영상은 ‘자막 미완료’에서 모아 보고 각 영상의 번역 복구 버튼으로 이어서 처리하세요. 원어 인식 확인과 자막 파일 저장 문제는 별도로 표시합니다.</p>
       </div>
     </section>
     
@@ -617,9 +619,9 @@
   <script src="js/app.js?v=1.6.0" defer></script>
   <script src="js/history.js?v=1.6.0" defer></script>
   <script src="js/catalog-sort.js?v=1.6.0" defer></script>
-  <script src="js/analysis-progress.js?v=1.9.12" defer></script>
-  <script src="js/catalog.js?v=1.9.12" defer></script>
-  <script src="js/diagnostics.js?v=1.9.12" defer></script>
-  <script src="js/app-update.js?v=1.9.12" defer></script>
+  <script src="js/analysis-progress.js?v=1.9.13" defer></script>
+  <script src="js/catalog.js?v=1.9.13" defer></script>
+  <script src="js/diagnostics.js?v=1.9.13" defer></script>
+  <script src="js/app-update.js?v=1.9.13" defer></script>
 </body>
 </html>

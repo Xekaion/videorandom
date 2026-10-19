@@ -1509,6 +1509,24 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-status-partial { background: rgba(245,158,11,.1); color: #fcd34d; }
 .catalog-status-failed { background: rgba(244,63,94,.1); color: #fda4af; }
 .catalog-status-active { background: rgba(6,182,212,.14); color: #67e8f9; }
+.catalog-subtitle-counts { display: grid; gap: 6px; padding: 10px; margin-bottom: 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; background: rgba(255,255,255,.025); min-width: 0; }
+.catalog-subtitle-incomplete { border-color: rgba(245,158,11,.55); background: rgba(245,158,11,.08); }
+.catalog-subtitle-complete { border-color: rgba(16,185,129,.25); }
+.catalog-subtitle-count-label { font-size: 10px; line-height: 1.5; color: #abb5c6; }
+.catalog-subtitle-incomplete .catalog-subtitle-count-label, .catalog-subtitle-incomplete .catalog-subtitle-count-value { color: #fcd34d; }
+.catalog-subtitle-count-value { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.5; color: #e7edf7; overflow-wrap: anywhere; }
+.catalog-subtitle-count-note { font-size: 10px; line-height: 1.6; color: #b6bfce; }
+.catalog-subtitle-save-error { font-size: 10px; line-height: 1.6; color: #fda4af; }
+.catalog-subtitle-progress { display: block; width: 100%; height: 6px; border: 0; border-radius: 4px; overflow: hidden; appearance: none; accent-color: #f59e0b; }
+.catalog-subtitle-progress::-webkit-progress-bar { background: #363440; }
+.catalog-subtitle-progress::-webkit-progress-value { background: #f59e0b; }
+.catalog-subtitle-progress::-moz-progress-bar { background: #f59e0b; }
+.catalog-subtitle-complete .catalog-subtitle-progress { accent-color: #10b981; }
+.catalog-subtitle-complete .catalog-subtitle-progress::-webkit-progress-value { background: #10b981; }
+.catalog-subtitle-complete .catalog-subtitle-progress::-moz-progress-bar { background: #10b981; }
+.catalog-subtitle-repair { display: block; text-align: left; padding: 7px 8px; border: 1px solid rgba(245,158,11,.45); background: rgba(245,158,11,.1); border-radius: 6px; color: #fcd34d; font-weight: 600; font-size: 11px; line-height: 1.6; margin-top: 2px; width: 100%; word-break: keep-all; overflow-wrap: normal; }
+.catalog-subtitle-filter { color: #fcd34d; border: 1px solid rgba(245,158,11,.4); background: rgba(245,158,11,.08); }
+.catalog-subtitle-filter[aria-pressed="true"] { background: rgba(245,158,11,.2); border-color: #f59e0b; }
 .catalog-table tbody tr.catalog-row-active { background: rgba(6,182,212,.045); }
 .catalog-row-stage, .catalog-row-previous { display: block; font-size: 10px; line-height: 1.7; margin-top: 7px; overflow-wrap: anywhere; }
 .catalog-row-stage { color: #a5e6ef; }
