@@ -5,7 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { createNoKeyProvider } = require('../lib/no-key-provider');
+const { createNoKeyProvider, TRANSLATION_PROMPT_VERSION } = require('../lib/no-key-provider');
 
 const workspace = path.resolve(__dirname, '..', '.test-data', 'subtitle-batch-recovery-tests');
 const JAPANESE = '合成の列車が到着します。安全のためにホームの内側で待ち、案内と出発時間を確認してください。';
@@ -13,6 +13,23 @@ const KOREAN = '합성 열차가 도착합니다. 안전을 위해 승강장 안
 const RETAINED = '보관된 합성 열차 안내입니다. 승강장 안쪽에서 기다리세요.';
 const fingerprint = source => crypto.createHash('sha256').update(JSON.stringify(source.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex');
 const responseFor = (entries, changes = {}) => ({ subtitles: entries.map(cue => ({ index: cue.index, text: KOREAN })), terms: [], ...changes });
+
+function assertRequestSchema(item) {
+  const indexes = item.input.subtitles.map(cue => cue.index);
+  if (item.review) {
+    const { approvedIndexes, corrections } = item.schema.properties;
+    assert.equal(approvedIndexes.minItems, 0); assert.equal(approvedIndexes.maxItems, item.count);
+    assert.equal(corrections.minItems, 0); assert.equal(corrections.maxItems, item.count);
+    assert.deepEqual(approvedIndexes.items.enum, indexes);
+    assert.deepEqual(corrections.items.properties.index.enum, indexes);
+    assert.deepEqual(item.schema.required, ['approvedIndexes', 'corrections', 'terms']);
+    assert.deepEqual(item.input.draftSubtitles.map(cue => cue.index), indexes);
+  } else {
+    const subtitles = item.schema.properties.subtitles;
+    assert.equal(subtitles.minItems, item.count); assert.equal(subtitles.maxItems, item.count);
+    assert.deepEqual(subtitles.items.properties.index.enum, indexes);
+  }
+}
 
 function mockSpawn(handler) {
   const calls = [];
@@ -82,7 +99,7 @@ async function assertCompleted(f, result) {
   assert.deepEqual(result.transcript, f.source);
   assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), f.source.map(cue => [cue.id, cue.start, cue.end]));
   const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', `${f.record.id}-ko.json`), 'utf8'));
-  assert.equal(saved.translationVersion, 6);
+  assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION);
   assert.equal(saved.reviewPasses, 2);
   assert.equal(saved.completedCues, f.source.length);
   assert.equal(saved.sourceFingerprint, fingerprint(f.source));
@@ -90,16 +107,11 @@ async function assertCompleted(f, result) {
   return saved;
 }
 
-test('each draft and review schema fixes its exact cue count and index set while valid reversed rows normalize into source order', async t => {
+test('each draft and review schema bounds its cue count and exact index set while valid reversed rows normalize into source order', async t => {
   const f = await fixture(t, { count: 81, respond: item => responseFor([...item.input.subtitles].reverse()) });
   const result = await f.run(); await assertCompleted(f, result);
   assert.equal(f.requests.length, 4);
-  for (const item of f.requests) {
-    const subtitles = item.schema.properties.subtitles;
-    assert.equal(subtitles.minItems, item.count); assert.equal(subtitles.maxItems, item.count);
-    assert.deepEqual([...subtitles.items.properties.index.enum].sort((a, b) => a - b), item.input.subtitles.map(cue => cue.index).sort((a, b) => a - b));
-    if (item.review) assert.deepEqual(item.input.draftSubtitles.map(cue => cue.index), item.input.subtitles.map(cue => cue.index));
-  }
+  for (const item of f.requests) assertRequestSchema(item);
 });
 
 for (const phase of ['draft', 'review']) test(`a 241-cue ${phase} batch returning 37 of 80 recovers only its missing 43 cues and preserves the first 160`, async t => {
@@ -215,10 +227,7 @@ for (const phase of ['draft', 'review']) test(`a ${phase} supplement receives th
   assert.deepEqual(supplement.input.subtitles.map(cue => cue.index), Array.from({ length: 20 }, (_, index) => index + 60));
   assert.deepEqual(supplement.input.contextOtherSubtitles.map(cue => cue.index), Array.from({ length: 60 }, (_, index) => index));
   assert.deepEqual(supplement.input.properNames, [term]);
-  assert.equal(supplement.schema.properties.subtitles.minItems, 20);
-  assert.equal(supplement.schema.properties.subtitles.maxItems, 20);
-  assert.deepEqual(supplement.schema.properties.subtitles.items.properties.index.enum, supplement.input.subtitles.map(cue => cue.index));
-  if (supplement.review) assert.deepEqual(supplement.input.draftSubtitles.map(cue => cue.index), supplement.input.subtitles.map(cue => cue.index));
+  assertRequestSchema(supplement);
 });
 
 const invalid = {
@@ -298,7 +307,7 @@ for (const phase of ['draft', 'review']) for (const source of ['response-field',
     assert.equal(result.subtitleTranslationProgress.translationComplete, false);
     assert.deepEqual(result.transcript, f.source);
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', `${f.record.id}-ko.json`), 'utf8'));
-    assert.equal(saved.translationVersion, 6); assert.equal(saved.completedCues, 240); assert.equal(saved.reviewPasses, 2);
+    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(saved.completedCues, 240); assert.equal(saved.reviewPasses, 2);
     assert.ok(saved.subtitles.every(cue => cue.text === RETAINED));
     assert.equal(await fs.readFile(old.filename, 'utf8'), old.bytes, 'the legacy reviewed checkpoint is unchanged');
     assert.equal(events.filter(event => event.event === 'error').length, 1);
@@ -339,7 +348,7 @@ test('the operation-wide supplementary budget is 64 calls and a ninth deficient 
   assert.equal(f.requests.length, 81);
   assert.equal(result.subtitleTranslationPartial.length, 640);
   const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', `${f.record.id}-ko.json`), 'utf8'));
-  assert.equal(saved.completedCues, 640); assert.equal(saved.reviewPasses, 2); assert.equal(saved.translationVersion, 6);
+  assert.equal(saved.completedCues, 640); assert.equal(saved.reviewPasses, 2); assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION);
   assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), f.source.slice(0, 640).map(cue => [cue.id, cue.start, cue.end]));
 });
 

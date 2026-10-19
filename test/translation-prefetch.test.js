@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const { EventEmitter, getEventListeners } = require('events');
 const { PassThrough } = require('stream');
-const { createNoKeyProvider } = require('../lib/no-key-provider');
+const { createNoKeyProvider, TRANSLATION_PROMPT_VERSION } = require('../lib/no-key-provider');
 
 const originalText = '合成の列車が到着します。安全のためにホームの内側で待ち、案内と出発時間を確認してください。';
 const translatedText = '합성 열차가 도착합니다. 안전을 위해 승강장 안쪽에서 기다리고 안내와 출발 시간을 확인하세요.';
@@ -91,7 +91,7 @@ test('accurate long translation overlaps one next draft after warmup while every
     assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), original.map(cue => [cue.id, cue.start, cue.end]));
     assert.deepEqual([...new Set(f.commits)].filter(Boolean), [80, 160, 240, 320, 400, 480]);
     const checkpoint = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(checkpoint.translationVersion, 6); assert.equal(checkpoint.terms.length, 6);
+    assert.equal(checkpoint.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(checkpoint.terms.length, 6);
     await f.assertDrained();
 });
 
@@ -152,13 +152,13 @@ test('an exact reviewed version-five checkpoint migrates without any new generat
     saved.translationVersion = 5;
     await fs.promises.writeFile(filename, JSON.stringify(saved), 'utf8');
     for (const name of await fs.promises.readdir(directory)) {
-        if (/^[a-f0-9]{64}-translation-ko-v6\.json$/.test(name)) await fs.promises.rm(path.join(directory, name));
+        if (/^[a-f0-9]{64}-translation-ko-v7\.json$/.test(name)) await fs.promises.rm(path.join(directory, name));
     }
     f.calls.length = 0;
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.equal(f.calls.length, 0, 'same exact reviewed v5 source/timing/ID contract needs no new draft or review');
-    assert.equal(JSON.parse(await fs.promises.readFile(filename, 'utf8')).translationVersion, 6);
+    assert.equal(JSON.parse(await fs.promises.readFile(filename, 'utf8')).translationVersion, TRANSLATION_PROMPT_VERSION);
     await f.assertDrained();
 });
 

@@ -96,7 +96,7 @@
   const hasResult = record => record && (record.status !== 'failed' || frames(record).length > 0 || (record.transcriptCount ?? record.transcript?.length ?? 0) > 0);
   const hasSummary = record => !![record?.summary, record?.plot].some(value => typeof value === 'string' && value.trim());
   const transcriptLanguage = value => ['auto', 'ja', 'zh'].includes(value) ? value : 'auto';
-  const subtitleQuality = value => value === 'accurate' ? 'accurate' : 'fast';
+  const subtitleQuality = value => ['accurate', 'turbo'].includes(value) ? value : 'fast';
   const healthFor = record => {
     if (record?.health?.code) return record.health;
     if (!record) return { code: 'pending', reason: '아직 분석하지 않았습니다.' };
@@ -1050,7 +1050,7 @@
     };
     $('catalogModeNote').textContent = notes[mode] || notes.local;
     $('catalogFrameCount').disabled = false;
-    const qualityLabel = subtitleQuality($('catalogSubtitleQuality').value) === 'accurate' ? '정확도 우선' : '속도 우선';
+    const qualityLabel = { accurate: '정확도 우선', fast: '속도 우선', turbo: '초고속 · 추가 검수 생략' }[subtitleQuality($('catalogSubtitleQuality').value)];
     $('catalogSettingsSummary').textContent = `${{ local: '로컬 추출', codex: '이 PC에서 자동 요약', remote: '분석 서버로 전송' }[mode] || '로컬 추출'}${mode === 'local' ? '' : ` · ${qualityLabel}`} · 영상 길이에 맞춰 자동 ${$('catalogFrameCount').value || 10}장`;
     $('catalogRemoteCheck').disabled = state.remoteChecking || state.connectionForgetting || !$('catalogRemoteUrl').value.trim() || !currentConnectionCode();
     renderConnection();
@@ -1202,6 +1202,11 @@
       // the check was in flight stays untouched and is not resumed automatically.
       applyConnection(result.connection);
       if (state.connectionRevision === revision) {
+        if (subtitleQuality($('catalogSubtitleQuality').value) === 'turbo' && !result.capabilities?.includes('turbo-subtitles-v1')) {
+          $('catalogRemoteStatus').textContent = '연결 정보는 저장했습니다. 초고속 모드를 사용하려면 분석 서버 PC도 1.9.11 이상으로 업데이트하고 새 버전을 실행해 주세요.';
+          $('catalogRemoteStatus').classList.add('catalog-error');
+          return;
+        }
         if (subtitleQuality($('catalogSubtitleQuality').value) === 'accurate' && !result.capabilities?.includes('subtitle-quality-v3')) {
           $('catalogRemoteStatus').textContent = '연결 정보는 저장했습니다. 긴 영상 재검수 개선을 사용하려면 분석 서버 PC도 1.6.6 이상으로 업데이트하고 새 버전을 실행해 주세요.';
           $('catalogRemoteStatus').classList.add('catalog-error');
@@ -1265,7 +1270,7 @@
         if (!state.settingsFields.has('catalogTranscribe')) $('catalogTranscribe').checked = persistedOptions.transcribeAudio === true;
         if (!state.settingsFields.has('catalogTranscriptLanguage')) $('catalogTranscriptLanguage').value = transcriptLanguage(persistedOptions.transcriptLanguage);
         if (persistedOptions.mode !== 'local' && !state.settingsFields.has('catalogTranslateSubtitles') && ['original', 'ko'].includes(persistedOptions.subtitleLanguage)) $('catalogTranslateSubtitles').checked = persistedOptions.subtitleLanguage === 'ko';
-        if (persistedOptions.mode !== 'local' && !state.settingsFields.has('catalogSubtitleQuality') && ['accurate', 'fast'].includes(persistedOptions.subtitleQuality)) $('catalogSubtitleQuality').value = persistedOptions.subtitleQuality;
+        if (persistedOptions.mode !== 'local' && !state.settingsFields.has('catalogSubtitleQuality') && ['accurate', 'fast', 'turbo'].includes(persistedOptions.subtitleQuality)) $('catalogSubtitleQuality').value = persistedOptions.subtitleQuality;
         state.hasModePreference = true;
       } else if (!state.hasModePreference && !state.settingsFields.has('catalogMode')) {
         $('catalogMode').value = codexReady() && config.defaultMode === 'codex' ? 'codex' : 'local';
@@ -1906,8 +1911,10 @@
     if (quality.parallelMemoryFallback) lines.push('GPU 메모리가 부족해 남은 음성 구간은 하나씩 처리했습니다.');
     if (quality.profile === 'accurate' && quality.recognitionRevision !== 3) lines.push('이전 인식 방식으로 저장한 결과입니다. 긴 영상의 전체 재검수를 적용하려면 정확도 우선으로 복구 / 다시 분석하세요.');
     if (quality.processingComplete === true) lines.push('전체 음성 파일 처리는 끝났습니다. 아래 내용은 별도의 누락·신뢰도 검수 결과입니다.');
-    const unauditedFast = quality.profile === 'fast' && quality.complete === true && audit.complete !== true && !unresolved.length;
-    lines.push(unauditedFast ? '빠르게 모드는 발화 누락 검사를 생략합니다. 자막을 더 정확히 만들려면 정확도 우선으로 다시 분석하세요.' : quality.complete === true && audit.complete === true && !unresolved.length
+    const unauditedFast = ['fast', 'turbo'].includes(quality.profile) && quality.complete === true && audit.complete !== true && !unresolved.length;
+    lines.push(unauditedFast ? quality.profile === 'turbo'
+      ? '초고속 모드는 가벼운 모델·묶음 인식·번역 1회를 사용하며 누락 재검사·단어 정렬·번역 추가 검수를 생략합니다. 정확도 우선보다 정확도가 낮아질 수 있습니다.'
+      : '빠르게 모드는 발화 누락 검사를 생략합니다. 자막을 더 정확히 만들려면 정확도 우선으로 다시 분석하세요.' : quality.complete === true && audit.complete === true && !unresolved.length
       ? '전체 음성 처리와 발화 누락 점검을 마쳤습니다. 인식과 번역의 정확성은 원문과 대조해 확인할 수 있습니다.'
       : '확인이 필요한 구간이 남아 있습니다. 이 결과를 전체 대사가 완성된 자막으로 간주하지 마세요.');
     if (unresolved.length) lines.push('확인 필요: ' + unresolved.slice(0, 8).map(range => `${time(range.start)}–${time(range.end)}`).join(', '));

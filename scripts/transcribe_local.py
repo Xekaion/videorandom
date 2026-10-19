@@ -170,6 +170,120 @@ def decode_windows(model, audio, windows, options, sample_rate, state, emitter, 
             yield index, windows[index], segments
 
 
+def batched_pipeline_class():
+    """Resolve the optional batch API without silently running the old decoder."""
+    try:
+        from faster_whisper import BatchedInferencePipeline
+    except ImportError as error:
+        raise RuntimeError('초고속 음성 인식에는 BatchedInferencePipeline을 지원하는 faster-whisper 1.2.1이 필요합니다. '
+                           '분석 서버의 음성 인식 환경을 다시 준비해 주세요.') from error
+    return BatchedInferencePipeline
+
+
+def turbo_clip_timestamps(sample_count, sample_rate):
+    """Describe every input sample with adjacent clips of at most 30 seconds.
+
+    faster-whisper 1.2.1 takes explicit clips in seconds and converts their
+    edges with int(seconds * sample_rate). A clip longer than 30 seconds is
+    truncated by its encoder. These are decoding bounds, not subtitle times.
+    """
+    maximum = max(1, int(30 * sample_rate))
+
+    def seconds(sample):
+        # A floating point round trip must not move an edge back one sample.
+        return math.nextafter(sample / sample_rate, math.inf) if sample else 0.0
+
+    return [{'start': seconds(start), 'end': seconds(min(sample_count, start + maximum))}
+            for start in range(0, sample_count, maximum)]
+
+
+def decode_turbo_windows(pipeline, audio, windows, options, sample_rate, state, emitter):
+    """Use one serial pipeline; batching is internal and bounded to four clips.
+
+    Commit a complete window atomically. If CUDA runs out of memory, retain
+    all earlier windows and retry only this window once with batch size one.
+    Other failures and a failed low-memory retry are surfaced immediately.
+    """
+    for index, window in enumerate(windows):
+        start, end, _, _ = window
+        chunk = audio[round(start * sample_rate):round(end * sample_rate)]
+        clips = turbo_clip_timestamps(len(chunk), sample_rate)
+
+        def decode():
+            segments, _ = pipeline.transcribe(chunk, **options, clip_timestamps=clips,
+                                              batch_size=state['batchSize'])
+            return list(segments)
+
+        try:
+            segments = decode()
+        except Exception as error:
+            if state['batchSize'] <= 1 or not gpu_out_of_memory(error):
+                raise
+            error.__traceback__ = None
+            state.update(batchSize=1, oomFallback=True)
+            # The batch generator resets this at normal completion. A failed
+            # generator must not leave cross-window alignment state behind.
+            pipeline.last_speech_timestamp = 0.0
+            gc.collect()
+            emitter({'type': 'warning', 'message': '초고속 GPU 일괄 처리의 메모리가 부족해 현재 구간만 한 번 다시 처리하고 '
+                     '남은 구간은 배치 1로 처리합니다. 완료된 구간과 모델은 유지합니다.'})
+            segments = decode()
+        yield index, window, segments
+
+
+def transcribe_turbo_audio(model, audio, *, model_name='turbo', language='auto', device='cpu',
+                           compute_type='int8', sample_rate=SAMPLE_RATE, emitter=None,
+                           pipeline_factory=None):
+    """Explicit speed/quality tradeoff; never advertise an independent audit."""
+    emitter = emitter or emit
+    duration = len(audio) / sample_rate
+    if not finite(duration) or duration <= 0:
+        raise ValueError('음성 파일이 비어 있거나 길이가 올바르지 않습니다.')
+    pipeline = (pipeline_factory or batched_pipeline_class())(model)
+    state = {'workers': 1, 'batchSize': 4 if device == 'cuda' else 1, 'oomFallback': False}
+    warning = ('초고속 모드는 빠른 모델과 단일 탐색을 사용하며 독립적인 음성 누락 재검수와 단어별 시간 정렬을 생략합니다. '
+               '모든 입력 음성을 처리하지만 정확 모드보다 인식 오류나 누락이 늘 수 있습니다.')
+    warnings, cues, processed = [warning], [], 0.0
+    emitter({'type': 'warning', 'message': warning})
+    selected_language, probability = choose_language(model, audio, duration, language, sample_rate)
+    emitter({'type': 'info', 'language': selected_language, 'languageProbability': probability,
+             'duration': duration, 'model': model_name, 'profile': 'turbo', 'device': device,
+             'computeType': compute_type, 'workers': 1, 'batchSize': state['batchSize']})
+    options = dict(beam_size=1, best_of=1, temperature=0.0, word_timestamps=False,
+                   without_timestamps=False, task='transcribe', condition_on_previous_text=False,
+                   language=selected_language, vad_filter=False)
+    cores = plan_core_windows(duration, [])
+    windows = [(max(0.0, start - 2.0), min(duration, end + 2.0), start, end) for start, end in cores]
+    for window, (start, _, core_start, core_end), segments in decode_turbo_windows(
+            pipeline, audio, windows, options, sample_rate, state, emitter):
+        for segment in segments:
+            for cue in cues_from_segment(segment, start, duration, (core_start, core_end),
+                                         word_timestamps_expected=False):
+                cues.append({**cue, '_window': window, '_boundary': core_start})
+                emitter({'type': 'segment', **cue})
+        # Only a fully consumed generator, including an empty silent tail,
+        # advances coverage. Neither clip edges nor percentages create cues.
+        processed = core_end
+        emitter({'type': 'progress', 'phase': 'transcription', 'completedSeconds': processed,
+                 'totalSeconds': duration, 'percent': 100.0 * processed / duration,
+                 'workers': 1, 'batchSize': state['batchSize']})
+    cues = reconcile_window_boundaries(cues)
+    quality = {'profile': 'turbo', 'model': model_name, 'device': device, 'computeType': compute_type,
+               'workers': 1, 'batchSize': state['batchSize'], 'parallelMemoryFallback': state['oomFallback'],
+               'recognitionRevision': RECOGNITION_REVISION, 'processingComplete': processed == duration,
+               'durationSeconds': duration, 'processedSeconds': processed, 'wordTimestamps': False,
+               'audit': {'complete': False, 'speechSeconds': 0.0, 'uncoveredSpeechSeconds': 0.0,
+                         'unresolvedSpeechSeconds': 0.0, 'boundaryUncertaintySeconds': 0.0, 'boundaryRanges': [],
+                         'recheckedSeconds': 0.0, 'recoveryBudgetSeconds': 0.0, 'unresolved': [],
+                         'unresolvedCount': 0, 'unresolvedByReason': {}, 'unresolvedTruncated': False},
+               'warnings': warnings}
+    emitter({'type': 'transcript', 'segments': cues})
+    emitter({'type': 'progress', 'phase': 'completed', 'completedSeconds': processed,
+             'totalSeconds': duration, 'percent': 100.0, 'workers': 1, 'batchSize': state['batchSize']})
+    emitter({'type': 'complete', 'segments': len(cues), 'quality': quality})
+    return cues, quality
+
+
 def emit(payload):
     print(json.dumps(payload, ensure_ascii=False, allow_nan=False), flush=True)
 
@@ -851,9 +965,15 @@ def choose_language(model, audio, duration, language, sample_rate, speech=None):
     return winner, sum(votes[winner]) / len(votes[winner])
 
 
-def transcribe_audio(model, audio, *, profile='accurate', model_name='large-v3', language='auto',
+def transcribe_audio(model, audio, *, profile='accurate', model_name=None, language='auto',
                      device='cpu', compute_type='int8', sample_rate=SAMPLE_RATE,
-                     speech_detector=None, emitter=emit, workers=1, parallel_memory_fallback=False):
+                     speech_detector=None, emitter=emit, workers=1, parallel_memory_fallback=False,
+                     turbo_pipeline_factory=None):
+    if profile == 'turbo':
+        return transcribe_turbo_audio(model, audio, model_name=model_name or 'turbo', language=language,
+            device=device, compute_type=compute_type, sample_rate=sample_rate, emitter=emitter,
+            pipeline_factory=turbo_pipeline_factory)
+    model_name = model_name or 'large-v3'
     duration = len(audio) / sample_rate
     if not finite(duration) or duration <= 0:
         raise ValueError('음성 파일이 비어 있거나 길이가 올바르지 않습니다.')
@@ -1015,7 +1135,7 @@ def parser_for_cli():
     parser = argparse.ArgumentParser()
     parser.add_argument('--audio', required=True)
     parser.add_argument('--cache', required=True)
-    parser.add_argument('--profile', default='fast', choices=('accurate', 'fast'))
+    parser.add_argument('--profile', default='fast', choices=('accurate', 'fast', 'turbo'))
     parser.add_argument('--model', default=None)
     parser.add_argument('--device', default='cpu', choices=('cpu', 'cuda', 'auto'))
     parser.add_argument('--compute-type', default='int8')
@@ -1243,10 +1363,12 @@ def main():
     from faster_whisper.audio import decode_audio
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-    model_name = args.model or ('large-v3' if args.profile == 'accurate' else 'small')
+    model_name = args.model or ('turbo' if args.profile == 'turbo' else 'large-v3' if args.profile == 'accurate' else 'small')
+    # Resolve before loading a model so a missing batch API fails actionably.
+    turbo_factory = batched_pipeline_class() if args.profile == 'turbo' else None
     emit({'type': 'loading', 'model': model_name, 'profile': args.profile, 'device': args.device, 'computeType': args.compute_type})
     model, device, compute_type = load_whisper_model(model_name, args.cache, device=args.device,
-        compute_type=args.compute_type, cpu_threads=args.cpu_threads, workers=args.workers)
+        compute_type=args.compute_type, cpu_threads=args.cpu_threads, workers='1' if args.profile == 'turbo' else args.workers)
     audio = decode_audio(os.path.abspath(args.audio), sampling_rate=SAMPLE_RATE)
 
     def speech_detector(waveform, rate):
@@ -1258,7 +1380,8 @@ def main():
     transcribe_audio(model, audio, profile=args.profile, model_name=model_name, language=args.language,
                      device=device, compute_type=compute_type, speech_detector=speech_detector,
                      workers=getattr(model, '_videorandom_workers', 1),
-                     parallel_memory_fallback=getattr(model, '_videorandom_parallel_memory_fallback', False))
+                     parallel_memory_fallback=getattr(model, '_videorandom_parallel_memory_fallback', False),
+                     turbo_pipeline_factory=turbo_factory)
 
 
 if __name__ == '__main__':

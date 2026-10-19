@@ -33,19 +33,20 @@
     const result = {};
     if (!value || typeof value !== 'object') return result;
     if (typeof value.model === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(value.model)) result.model = value.model;
-    if (['fast', 'accurate'].includes(value.profile)) result.profile = value.profile;
+    if (['fast', 'accurate', 'turbo'].includes(value.profile)) result.profile = value.profile;
     if (['cpu', 'cuda'].includes(value.device)) result.device = value.device;
     if (COMPUTE_TYPES.includes(value.computeType)) result.computeType = value.computeType;
     if ([1, 2].includes(value.workers)) result.workers = value.workers;
+    if ([1, 4].includes(value.batchSize)) result.batchSize = value.batchSize;
     return result;
   }
 
   function formatSpeechMetadata(value) {
     const actual = normalizeSpeechMetadata(value);
-    return [actual.model || '모델 미확인', actual.profile === 'accurate' ? '정확도 우선' : actual.profile === 'fast' ? '속도 우선' : '품질 설정 미확인',
+    return [actual.model || '모델 미확인', actual.profile === 'accurate' ? '정확도 우선' : actual.profile === 'fast' ? '속도 우선' : actual.profile === 'turbo' ? '초고속 · 추가 검수 생략' : '품질 설정 미확인',
       actual.device === 'cuda' ? 'GPU (CUDA)' : actual.device === 'cpu' ? 'CPU' : '장치 미확인',
       actual.computeType ? `연산 ${actual.computeType}` : '연산 형식 미확인',
-      actual.workers ? actual.workers === 2 ? '2구간 병렬 처리' : '1구간씩 처리' : '병렬 수 미확인'].join(' · ');
+      actual.batchSize ? `${actual.batchSize}구간 묶음 인식` : actual.workers ? actual.workers === 2 ? '2구간 병렬 처리' : '1구간씩 처리' : '병렬 수 미확인'].join(' · ');
   }
 
   function normalizeProgressDetails(value) {

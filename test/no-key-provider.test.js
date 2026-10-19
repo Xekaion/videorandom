@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
-const { createNoKeyProvider, isVerifiedFullTranscription } = require('../lib/no-key-provider');
+const { createNoKeyProvider, isVerifiedFullTranscription, TRANSLATION_PROMPT_VERSION } = require('../lib/no-key-provider');
 const crypto = require('crypto');
 
 function mockSpawn(handler, { statusHandler } = {}) {
@@ -556,7 +556,7 @@ test('accurate Korean requests replace sparse sidecars using full lossless audio
                 { type: 'transcript', segments: [audited] }, { type: 'complete', segments: 1, quality: fullQuality() }].map(event => JSON.stringify(event)).join('\n') + '\n');
         } else {
             const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+            await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
         }
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record,
@@ -582,7 +582,7 @@ test('complete accurate audio is reused but explicit small overrides cannot qual
     const { dataDir, record } = await fixture(t, { transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: fullQuality() });
     const mocked = mockSpawn(async call => {
         const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-        await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+        await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
     assert.equal(result.status, 'completed', result.error || result.subtitleError);
@@ -601,7 +601,7 @@ test('accurate repair retranscribes an older recognition revision and preserves 
         ].map(event => JSON.stringify(event)).join('\n') + '\n');
         else {
             const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+            await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
         }
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
@@ -620,7 +620,7 @@ test('an unresolved audio span still exposes reviewed Korean for recognized cues
                 quality: fullQuality(90, { complete: false, audit: { complete: false, unresolved: [{ start: 50, end: 55, reason: 'uncovered speech' }] } }) }].map(JSON.stringify).join('\n') + '\n');
         else {
             const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+            await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
         }
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
@@ -647,7 +647,7 @@ test('a Korean language hint never labels Japanese dialogue as already translate
         const { dataDir, record } = await fixture(t, { transcriptLanguage: 'ko', transcript: [{ start: 1, end: 3, text }] });
         const mocked = mockSpawn(async call => {
             const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+            await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
         });
         const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko', subtitleQuality: 'fast' });
         assert.equal(result.subtitleLanguage, 'ko', result.subtitleError);
@@ -664,7 +664,7 @@ test('failed audio preparation translates only preserved valid dialogue and neve
         const mocked = mockSpawn(async call => {
             if (call.binary === 'mock-ffmpeg') throw Object.assign(new Error('audio decoder failed'), { exitCode: 1 });
             const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+            await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
         });
         const result = await provider(mocked.spawnImpl).analyzeExtracted(record,
             { dataDir, ffmpegPath: 'mock-ffmpeg', subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
@@ -705,7 +705,7 @@ test('rejected input cues are preserved privately and can never become a complet
         transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: fullQuality() });
     const mocked = mockSpawn(async call => {
         const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-        await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+        await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
     assert.equal(result.status, 'partial');
@@ -724,7 +724,7 @@ test('accurate translation reviews the original against the draft and never reus
     const calls = [];
     const mocked = mockSpawn(async call => {
         const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-        if (!schema.properties.subtitles) { calls.push('summary'); await writeResponse(call, summary()); return; }
+        if (!(schema.properties.subtitles || schema.properties.approvedIndexes)) { calls.push('summary'); await writeResponse(call, summary()); return; }
         const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
         if (input.draftSubtitles) {
             calls.push('review');
@@ -762,7 +762,7 @@ test('review refusal, 503 or wrong indexes stop without committing the current d
         const order = [];
         const mocked = mockSpawn(async call => {
             const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-            if (!schema.properties.subtitles) { order.push('summary'); await writeResponse(call, summary()); return; }
+            if (!(schema.properties.subtitles || schema.properties.approvedIndexes)) { order.push('summary'); await writeResponse(call, summary()); return; }
             const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
             const start = input.subtitles[0].index;
             const review = Boolean(input.draftSubtitles);
@@ -802,7 +802,7 @@ test('real fast-profile quality JSONL completes Korean subtitles without claimin
             ].map(event => JSON.stringify(event)).join('\n') + '\n');
         } else {
             const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-            await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+            await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
         }
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record,
@@ -833,7 +833,7 @@ test('a failed new ASR prefix cannot replace an earlier whole decoded source wit
             throw Object.assign(new Error('owned speech decoder interrupted'), { exitCode: 1 });
         }
         const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-        await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '이전의 인사입니다.' }, { index: 1, text: '뒤쪽의 원래 대화입니다.' }], terms: [] } : summary());
+        await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '이전의 인사입니다.' }, { index: 1, text: '뒤쪽의 원래 대화입니다.' }], terms: [] } : summary());
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
     assert.deepEqual(result.transcript, original);
@@ -869,8 +869,8 @@ test('long-video diagnostics retain totals and completed reviewed translations r
             return;
         }
         const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-        if (!schema.properties.subtitles && refuseSummary) throw Object.assign(new Error('safety refusal'), { exitCode: 1 });
-        await writeResponse(call, schema.properties.subtitles ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
+        if (!(schema.properties.subtitles || schema.properties.approvedIndexes) && refuseSummary) throw Object.assign(new Error('safety refusal'), { exitCode: 1 });
+        await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] } : summary());
     });
     const instance = provider(mocked.spawnImpl);
     const options = { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' };
@@ -929,7 +929,7 @@ test('translation-only repair never probes speech, extracts frames, or summarize
     const mocked = mockSpawn(async call => {
         assert.equal(call.args[0], 'exec', 'only a subtitle inference process may be launched');
         const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-        assert.ok(schema.properties.subtitles);
+        assert.ok((schema.properties.subtitles || schema.properties.approvedIndexes));
         assert.equal(call.args.includes('--image'), false);
         await writeResponse(call, { subtitles: [{ index: 0, text: '안녕하세요.' }], terms: [] });
     });
@@ -1262,7 +1262,7 @@ test('full analysis forwards and retains a translation diagnostic before returni
     const events = [];
     const mocked = mockSpawn(async call => {
         const schema = JSON.parse(await fs.promises.readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'));
-        await writeResponse(call, schema.properties.subtitles ? { subtitles: [], terms: [] } : summary());
+        await writeResponse(call, (schema.properties.subtitles || schema.properties.approvedIndexes) ? { subtitles: [], terms: [] } : summary());
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko', subtitleQuality: 'accurate',
         onDiagnostic: event => { events.push(event); throw new Error('owned observer failure'); } });
@@ -1327,7 +1327,7 @@ test('multi-batch translation retains identical checkpoint bytes while hashing i
         const instance = createNoKeyProvider({ spawnImpl: f.mocked.spawnImpl,
             environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' }, platform: 'win32',
             checkpointIO: { ...fs.promises, async writeFile(filename, contents, ...args) {
-                if (/-ko\.json\.|-translation-ko-v6\.json\./.test(filename)) written.push(contents);
+                if (/-ko\.json\.|-translation-ko-v7\.json\./.test(filename)) written.push(contents);
                 return fs.promises.writeFile(filename, contents, ...args);
             } } });
         const result = await instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'fast' });
@@ -1339,7 +1339,7 @@ test('multi-batch translation retains identical checkpoint bytes while hashing i
             assert.equal(written[index], written[index + 1], 'record and monotonic content index retain exactly the same JSON bytes');
             const saved = JSON.parse(written[index]);
             assert.equal(saved.sourceFingerprint, originalCreateHash('sha256').update(sourceBytes).digest('hex'));
-            assert.equal(saved.translationVersion, 6);
+            assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION);
         }
         assert.deepEqual(JSON.parse(written.at(-1)).subtitles.map(cue => [cue.id, cue.start, cue.end]), f.source.map(cue => [cue.id, cue.start, cue.end]));
     } finally { crypto.createHash = originalCreateHash; }
@@ -1354,7 +1354,7 @@ test('a short accurate draft reaches source review and only its corrected final 
     assert.equal(result.subtitleTranslation[0].text.replace(/\n/g, ' '), faithfulKorean);
     assert.equal(result.subtitleRepairStatus, 'completed');
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 6); assert.equal(saved.subtitles[0].text.includes('네.'), false);
+    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(saved.subtitles[0].text.includes('네.'), false);
 });
 
 test('fast translation still rejects a short result without starting an additional review', async t => {
@@ -1531,7 +1531,7 @@ test('an exact fully reviewed 160-cue version-three prefix migrates to version s
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.deepEqual(f.requests.map(item => item.start), [160, 160]);
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 6); assert.equal(saved.subtitles.length, 161);
+    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(saved.subtitles.length, 161);
     assert.deepEqual(saved.terms, [{ source: '太郎', translation: '타로' }]);
 });
 

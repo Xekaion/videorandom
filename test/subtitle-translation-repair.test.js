@@ -8,7 +8,7 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const express = require('express');
 const { createAnalysisService } = require('../lib/analysis-service');
-const { createNoKeyProvider } = require('../lib/no-key-provider');
+const { createNoKeyProvider, TRANSLATION_PROMPT_VERSION } = require('../lib/no-key-provider');
 const { saveKoreanSubtitle } = require('../lib/subtitle-sidecar');
 const { subtitleText } = require('../lib/subtitle-utils');
 const { httpJsonFixture } = require('./http-json-fixture');
@@ -304,9 +304,19 @@ test('an 1819-cue service repair resumes 160 reviewed v4 cues, fills one short r
         assert.equal(schema.properties.summary, undefined);
         const indices = input.subtitles.map(cue => cue.index), review = Boolean(input.draftSubtitles);
         assert.ok(indices.every(index => index >= 160), 'the v4 reviewed prefix must never be requested again');
-        assert.equal(schema.properties.subtitles.minItems, indices.length);
-        assert.equal(schema.properties.subtitles.maxItems, indices.length);
-        assert.deepEqual(schema.properties.subtitles.items.properties.index.enum, indices);
+        if (review) {
+          assert.equal(schema.properties.approvedIndexes.minItems, 0);
+          assert.equal(schema.properties.approvedIndexes.maxItems, indices.length);
+          assert.deepEqual(schema.properties.approvedIndexes.items.enum, indices);
+          assert.equal(schema.properties.corrections.minItems, 0);
+          assert.equal(schema.properties.corrections.maxItems, indices.length);
+          assert.deepEqual(schema.properties.corrections.items.properties.index.enum, indices);
+          assert.deepEqual(schema.required, ['approvedIndexes', 'corrections', 'terms']);
+        } else {
+          assert.equal(schema.properties.subtitles.minItems, indices.length);
+          assert.equal(schema.properties.subtitles.maxItems, indices.length);
+          assert.deepEqual(schema.properties.subtitles.items.properties.index.enum, indices);
+        }
         const shortened = review && indices[0] === 160 && indices.length === 80;
         const returned = shortened ? indices.slice(0, 37) : indices;
         requests.push({ indices, review, shortened });
@@ -371,9 +381,9 @@ test('an 1819-cue service repair resumes 160 reviewed v4 cues, fills one short r
   assert.deepEqual(saved.transcript, source);
   assert.deepEqual(saved.subtitleTranslation, record.subtitleTranslation);
   assert.deepEqual(saved.analysisProvenance, record.analysisProvenance);
-  const v6 = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', record.id + '-ko.json'), 'utf8'));
-  assert.equal(v6.translationVersion, 6);
-  assert.equal(v6.reviewPasses, 2);
-  assert.equal(v6.completedCues, total);
-  assert.equal(v6.complete, true);
+  const currentCheckpoint = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', record.id + '-ko.json'), 'utf8'));
+  assert.equal(currentCheckpoint.translationVersion, TRANSLATION_PROMPT_VERSION);
+  assert.equal(currentCheckpoint.reviewPasses, 2);
+  assert.equal(currentCheckpoint.completedCues, total);
+  assert.equal(currentCheckpoint.complete, true);
 });

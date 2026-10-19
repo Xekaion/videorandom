@@ -50,7 +50,7 @@ function fakeCodex(hostDataDir) {
           assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'mock responses stay inside the owned host directory');
         }
         const schema = JSON.parse(await fs.readFile(schemaPath, 'utf8'));
-        assert.ok(schema.properties.subtitles);
+        assert.ok(schema.properties.subtitles || schema.properties.approvedIndexes);
         assert.equal(schema.properties.summary, undefined, 'translation-only must not ask for a new summary');
         const input = JSON.parse(call.input.split('자료 JSON:\n').at(-1));
         assert.deepEqual(input.subtitles.map(cue => cue.text), transcript.map(cue => cue.text));
@@ -233,7 +233,7 @@ test('failed remote translation repairs keep the newly reviewed prefix and resum
             assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
           }
           const schema = JSON.parse(await fs.readFile(schemaPath, 'utf8'));
-          assert.ok(schema.properties.subtitles); assert.equal(schema.properties.summary, undefined);
+          assert.ok(schema.properties.subtitles || schema.properties.approvedIndexes); assert.equal(schema.properties.summary, undefined);
           const input = JSON.parse(Buffer.concat(chunks).toString('utf8').split('자료 JSON:\n').at(-1));
           const start = input.subtitles[0].index, review = Boolean(input.draftSubtitles);
           order.push(`${review ? 'review' : 'draft'}:${start}`);

@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter, getEventListeners } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { createNoKeyProvider } = require('../lib/no-key-provider');
+const { createNoKeyProvider, TRANSLATION_PROMPT_VERSION } = require('../lib/no-key-provider');
 
 const sourceText = '合成の列車が到着します。安全のためにホームの内側で待ち、案内と出発時間を確認してください。';
 const translatedText = '합성 열차가 도착합니다. 안전을 위해 승강장 안쪽에서 기다리고 안내와 출발 시간을 확인하세요.';
@@ -124,7 +124,7 @@ test('a still-short targeted review stops once and retains the exact strict cont
     assert.equal(f.calls.length, 5);
     assert.equal(failed.subtitleTranslationPartial.length, 100);
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 6); assert.equal(saved.reviewPasses, 2);
+    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(saved.reviewPasses, 2);
     assert.equal(saved.completedCues, 100); assert.equal(saved.translationComplete, false);
     assert.deepEqual(saved.subtitles.map(cue => [cue.id, cue.start, cue.end]), f.transcript.slice(0, 100).map(cue => [cue.id, cue.start, cue.end]));
     const previousCalls = f.calls.length;

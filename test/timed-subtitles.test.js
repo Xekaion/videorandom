@@ -126,7 +126,7 @@ test('Japanese speech language hint is passed to Whisper and actual detected lan
 
 test('Korean translation uses only source cue indexes and preserves source transcript and timestamps', async t => {
   const { dataDir, record } = await fixture(t);
-  const mocked = mockedProvider(call => call.schema.properties.subtitles
+  const mocked = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes)
     ? { subtitles: [{ index: 0, text: '안녕하세요.' }, { index: 1, text: '역은 어디인가요?' }] } : summary());
   const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
   assert.equal(result.status, 'completed', result.error);
@@ -143,7 +143,7 @@ test('long translations are chunked at cue boundaries and preserve the global cu
   const { dataDir, record } = await fixture(t, { transcript });
   const chunks = [];
   const mocked = mockedProvider(call => {
-    if (!call.schema.properties.subtitles) return summary();
+    if (!(call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) return summary();
     const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length)).subtitles;
     chunks.push(input);
     return { subtitles: input.map(cue => ({ index: cue.index, text: `일상 대화 ${cue.index}` })) };
@@ -159,7 +159,7 @@ test('malformed translations preserve the original and missing-cue repair stops 
   for (const [subtitles, expectedCalls] of [[[{ index: 0, text: '안녕하세요.' }], 2],
     [[{ index: 0, text: '중복' }, { index: 0, text: '대사' }], 1], [[{ index: 0, text: '' }, { index: 1, text: '대사' }], 1]]) {
     const { dataDir, record } = await fixture(t);
-    const mocked = mockedProvider(call => call.schema.properties.subtitles ? { subtitles } : summary());
+    const mocked = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes) ? { subtitles } : summary());
     const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
     assert.equal(result.status, 'partial');
     assert.equal(result.summary, summary().summary);
@@ -172,7 +172,7 @@ test('malformed translations preserve the original and missing-cue repair stops 
 
 test('full analysis orders a complete reversed translation by source index without regenerating it', async t => {
   const { dataDir, record } = await fixture(t);
-  const mocked = mockedProvider(call => call.schema.properties.subtitles
+  const mocked = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes)
     ? { subtitles: [{ index: 1, text: '역은 어디인가요?' }, { index: 0, text: '안녕하세요.' }] } : summary());
   const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
   assert.equal(result.status, 'completed', result.subtitleError);
@@ -183,7 +183,7 @@ test('full analysis orders a complete reversed translation by source index witho
 
 test('translation quota failure retains summary and original timed subtitles without retry', async t => {
   const { dataDir, record } = await fixture(t);
-  const mocked = mockedProvider(call => { if (call.schema.properties.subtitles) throw new Error('usage limit reached'); return summary(); });
+  const mocked = mockedProvider(call => { if ((call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) throw new Error('usage limit reached'); return summary(); });
   const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
   assert.equal(result.status, 'partial');
   assert.equal(result.summary, summary().summary);
@@ -208,7 +208,7 @@ test('content-addressed checkpoints resume fresh remote IDs with neighboring dia
   const { dataDir, record } = await fixture(t, { transcript });
   let batches = 0;
   const first = mockedProvider(call => {
-    if (!call.schema.properties.subtitles) return summary();
+    if (!(call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) return summary();
     batches++;
     if (batches === 2) throw new Error('usage limit reached');
     const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
@@ -233,7 +233,7 @@ test('content-addressed checkpoints resume fresh remote IDs with neighboring dia
     'a cached translation never bypasses a new summary refusal');
   const resumedInputs = [];
   const second = mockedProvider(call => {
-    if (!call.schema.properties.subtitles) return summary();
+    if (!(call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) return summary();
     const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
     resumedInputs.push(input);
     return { subtitles: input.subtitles.map(cue => ({ index: cue.index, text: `타로의 일상 대화 ${cue.index}` })), terms: [] };
@@ -265,7 +265,7 @@ test('content checkpoint reuse rejects wrong prompt version, target, source text
     const { dataDir, record } = await fixture(t, { transcript });
     let batches = 0;
     const first = mockedProvider(call => {
-      if (!call.schema.properties.subtitles) return summary();
+      if (!(call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) return summary();
       if (++batches === 2) throw new Error('usage limit reached');
       const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
       return { subtitles: input.subtitles.map(cue => ({ index: cue.index, text: `타로의 대화 ${cue.index}` })), terms: [] };
@@ -287,7 +287,7 @@ test('content checkpoint reuse rejects wrong prompt version, target, source text
     await fs.writeFile(indexPath, JSON.stringify(indexed));
     const starts = [];
     const next = mockedProvider(call => {
-      if (!call.schema.properties.subtitles) return summary();
+      if (!(call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) return summary();
       const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
       starts.push(input.subtitles[0].index);
       return { subtitles: input.subtitles.map(cue => ({ index: cue.index, text: `새 타로의 대화 ${cue.index}` })), terms: [] };
@@ -301,7 +301,7 @@ test('content checkpoint reuse rejects wrong prompt version, target, source text
 
 test('cancelling a fully cached translation never returns completed Korean output or completed progress', async t => {
   const { dataDir, record } = await fixture(t);
-  const first = mockedProvider(call => call.schema.properties.subtitles
+  const first = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes)
     ? { subtitles: [{ index: 0, text: '안녕하세요.' }, { index: 1, text: '역은 어디인가요?' }], terms: [] } : summary());
   const complete = await first.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
   assert.equal(complete.subtitleLanguage, 'ko');
@@ -323,7 +323,7 @@ test('cancelling a fully cached translation never returns completed Korean outpu
 test('translation rejects foreign-language copies and subtitle formatting without retry', async t => {
   for (const text of ['これは翻訳されていない日本語です。', 'This is not a Korean subtitle.', '00:00:01 --> 00:00:02\n한국어', '```\n한국어\n```']) {
     const { dataDir, record } = await fixture(t);
-    const mocked = mockedProvider(call => call.schema.properties.subtitles
+    const mocked = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes)
       ? { subtitles: [{ index: 0, text }, { index: 1, text: '역은 어디인가요?' }], terms: [] } : summary());
     const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
     assert.equal(result.status, 'partial');
@@ -338,7 +338,7 @@ test('new chunk name drift keeps the previous validated prefix and excessively c
   const { dataDir, record } = await fixture(t, { transcript });
   let batch = 0;
   const mocked = mockedProvider(call => {
-    if (!call.schema.properties.subtitles) return summary();
+    if (!(call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) return summary();
     const input = JSON.parse(call.input.slice(call.input.lastIndexOf('자료 JSON:\n') + '자료 JSON:\n'.length));
     batch++;
     return { subtitles: input.subtitles.map(cue => ({ index: cue.index, text: '타로가 말했다.' })), terms: [{ source: '太郎', translation: batch === 1 ? '타로' : '다로' }] };
@@ -348,7 +348,7 @@ test('new chunk name drift keeps the previous validated prefix and excessively c
   assert.equal(partial.subtitleLanguage, undefined);
   assert.match(partial.subtitleError, /표기가 앞 구간과 일치하지 않/);
   const shortFixture = await fixture(t, { transcript: [{ start: 1, end: 9, text: '明日の会議では現在の計画について最初から最後まで詳しく説明し質問にも一つずつ順番に答える予定です。' }] });
-  const short = mockedProvider(call => call.schema.properties.subtitles ? { subtitles: [{ index: 0, text: '네.' }], terms: [] } : summary());
+  const short = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '네.' }], terms: [] } : summary());
   const rejected = await short.provider.analyzeExtracted(shortFixture.record, { dataDir: shortFixture.dataDir, subtitleLanguage: 'ko' });
   assert.equal(rejected.subtitleLanguage, undefined);
   assert.match(rejected.subtitleError, /생략되었을 가능성/);
