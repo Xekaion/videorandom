@@ -122,7 +122,7 @@ body {
 /* --- Layout Elements --- */
 .app-container {
   width: 100%;
-  max-width: 1300px;
+  max-width: none;
   min-height: 100vh;
   padding: 24px;
   display: flex;
@@ -1471,16 +1471,16 @@ input[type="text"]::placeholder {
 .catalog-job progress::-webkit-progress-value { background: var(--grad-cyan); border-radius: 8px; transition: width .3s; }
 .catalog-job progress::-moz-progress-bar { background: var(--grad-cyan); }
 .catalog-job p { font-size: 11px; color: var(--color-text-muted); margin-top: 10px; overflow-wrap: anywhere; }
-.catalog-table-scroll { overflow: auto; border: 1px solid rgba(255,255,255,.1); border-radius: 12px; }
-.catalog-table { width: 100%; min-width: 1090px; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+.catalog-table-scroll { border: 1px solid rgba(255,255,255,.1); border-radius: 12px; }
+.catalog-table { width: 100%; min-width: 0; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
 .catalog-table thead { background: #161625; }
 .catalog-table th { padding: 12px; text-align: left; color: #a8b1c3; font-size: 11px; font-weight: 600; border-bottom: 1px solid rgba(255,255,255,.1); }
-.catalog-table th:nth-child(2) { width: 22%; }
-.catalog-table th:nth-child(3) { width: 22%; }
-.catalog-table th:nth-child(4) { width: 12%; }
+.catalog-table th:nth-child(2) { width: 24%; }
+.catalog-table th:nth-child(3) { width: 23%; }
+.catalog-table th:nth-child(4) { width: 8%; }
 .catalog-table th:nth-child(5) { width: 15%; }
-.catalog-table th:nth-child(6) { width: 20%; }
-.catalog-table th:nth-child(7) { width: 9%; }
+.catalog-table th:nth-child(6) { width: auto; }
+.catalog-table th:nth-child(7) { width: 180px; }
 .catalog-table td { padding: 15px 12px; vertical-align: top; border-bottom: 1px solid rgba(255,255,255,.055); overflow-wrap: anywhere; }
 .catalog-table tr:last-child td { border-bottom: 0; }
 .catalog-table tbody tr:hover { background: rgba(255,255,255,.025); }
@@ -1496,7 +1496,7 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-play-button { padding: 6px 10px; white-space: nowrap; }
 .catalog-text-clamp { line-height: 1.8; color: #cbd0da; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
 .catalog-labels { display: flex; flex-wrap: wrap; gap: 5px; }
-.catalog-label { border: 1px solid rgba(168,85,247,.2); background: rgba(168,85,247,.08); padding: 2px 5px; border-radius: 5px; font-size: 8px; line-height: 1.35; color: #d8b4fe; max-width: 100%; }
+.catalog-label { border: 1px solid rgba(168,85,247,.2); background: rgba(168,85,247,.08); padding: 2px 5px; border-radius: 5px; font-size: 8px; line-height: 1.35; color: #d8b4fe; max-width: 100%; overflow-wrap: anywhere; }
 .catalog-muted { color: var(--color-text-muted); font-size: 12px; line-height: 1.8; }
 .catalog-frame-strip { display: flex; flex-wrap: wrap; gap: 5px; }
 .catalog-frame-thumb { padding: 0; border: 1px solid rgba(255,255,255,.12); border-radius: 5px; overflow: hidden; background: #10101e; color: var(--color-text-muted); cursor: pointer; width: 59px; }
@@ -1504,7 +1504,7 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-frame-thumb > span { display: block; font-family: var(--font-mono); font-size: 8px; padding: 3px 1px; }
 .catalog-frame-thumb:hover { border-color: var(--color-accent); }
 .catalog-more-frames { color: #9dd5de; border: 0; padding: 2px; font-size: 10px; background: none; cursor: pointer; }
-.catalog-status { display: inline-block; font-size: 10px; line-height: 1.5; padding: 4px 7px; border-radius: 5px; color: var(--color-text-muted); background: rgba(255,255,255,.04); white-space: nowrap; }
+.catalog-status { display: inline-block; max-width: 100%; font-size: 10px; line-height: 1.5; padding: 4px 7px; border-radius: 5px; color: var(--color-text-muted); background: rgba(255,255,255,.04); white-space: normal; overflow-wrap: anywhere; }
 .catalog-status-completed { background: rgba(16,185,129,.09); color: #6ee7b7; }
 .catalog-status-partial { background: rgba(245,158,11,.1); color: #fcd34d; }
 .catalog-status-failed { background: rgba(244,63,94,.1); color: #fda4af; }
@@ -1779,6 +1779,23 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-heading .btn { min-height: 42px; font-size: 14px; }
 /* Keep the original compact library appearance below the newer workspace. */
 .catalog-library { --color-text-muted: #9ca3af; font-size: 16px; line-height: normal; }
+.catalog-table td { min-width: 0; }
+.catalog-table td > button, .catalog-file-actions > button { max-width: 100%; }
+@media (max-width: 1200px) {
+  .catalog-table, .catalog-table thead, .catalog-table tbody { display: block; }
+  .catalog-table thead tr, .catalog-table tbody tr { display: grid; grid-template-columns: 36px minmax(0,1fr); }
+  .catalog-table thead th:nth-child(2) { width: auto; }
+  .catalog-table thead th:nth-child(n+3) { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; clip: rect(0,0,0,0); overflow: hidden; white-space: nowrap; }
+  .catalog-table tbody { padding: 12px; display: grid; gap: 12px; }
+  .catalog-table tbody tr { border: 1px solid rgba(255,255,255,.1); border-radius: 10px; }
+  .catalog-table tbody td { grid-column: 1 / -1; display: block; padding: 12px 14px; }
+  .catalog-table tbody .catalog-select-cell { grid-column: 1; grid-row: 1; padding: 15px 6px 0 12px; }
+  .catalog-table tbody .catalog-name-cell { grid-column: 2; grid-row: 1; padding-left: 8px; }
+  .catalog-table tbody td[data-label]:not(.catalog-name-cell)::before { content: attr(data-label); display: block; color: #a8b1c3; font-size: 11px; font-weight: 600; margin-bottom: 7px; }
+  .catalog-table tbody td:last-child { border-bottom: 0; }
+  .catalog-table .catalog-empty { grid-column: 1 / -1; }
+  .catalog-file-actions { gap: 8px; }
+}
 .catalog-status-queued { color: #d3e6ff; background: #263f61; }
 .catalog-detail-dialog { --color-text-muted: #b6c3d6; }
 .catalog-detail-path, .catalog-detail-meta, .catalog-section-note { font-size: 13px; }

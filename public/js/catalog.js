@@ -982,6 +982,13 @@
       framesCell.append(strip);
 
       const statusCell = make('td');
+      [[selectCell, 'catalogColumnSelect'], [nameCell, 'catalogColumnFile', '영상 파일'],
+        [summaryCell, 'catalogColumnSummary', '줄거리 / 요약'], [labelsCell, 'catalogColumnLabels', '라벨'],
+        [dialogueCell, 'catalogColumnDialogue', '대사 요약'], [framesCell, 'catalogColumnFrames', '대표 이미지'],
+        [statusCell, 'catalogColumnStatus', '상태']].forEach(([cell, header, label]) => {
+        cell.setAttribute('headers', header);
+        if (label) cell.setAttribute('data-label', label);
+      });
       const statusText = activity?.label || healthLabel(record);
       statusCell.append(make('span', `catalog-status catalog-status-${activity?.tone || record?.status || 'pending'}`, statusText));
       if (activity) {
