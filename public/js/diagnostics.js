@@ -8,8 +8,10 @@
   const safeText = (value, limit = 500) => typeof value === 'string' ? value.slice(0, limit) : '';
   const integer = value => Number.isSafeInteger(value) && value >= 0 && value <= 10000000;
   const SYSTEM_CODES = new Set(['ENOENT', 'ENOSPC', 'EACCES', 'EPERM', 'EROFS', 'EIO', 'EMFILE', 'ENFILE', 'ENOTDIR', 'EISDIR',
+    'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS', 'EEXIST', 'ENAMETOOLONG', 'EINVAL', 'EBUSY',
     'EHOSTUNREACH', 'ENETUNREACH', 'ECONNREFUSED', 'ENOTFOUND', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'MODULE_NOT_FOUND']);
   const REFUSAL_CODES = new Set(['PROVIDER_REFUSAL', 'SUBTITLE_PROVIDER_REFUSAL', 'SUBTITLE_REFUSAL_TEXT_DETECTED']);
+  const CAUSE_CODES = new Set(['STORAGE_WRITE_FAILED', 'FILE_NOT_FOUND', 'DIAGNOSTIC_UNKNOWN', 'SUBTITLE_CUE_COUNT_MISMATCH', 'SUBTITLE_BATCH_INVALID']);
   const REFUSAL_SOURCES = Object.assign(Object.create(null), { 'response-field': '응답의 거절 표시',
     'subtitle-text': '자막 속 작업 거절 문구 감지', 'execution-error': '도구 실행 오류의 거절 표시' });
   const EXECUTION_SOURCES = Object.assign(Object.create(null), { 'local-deadline': '도구 대기 제한 초과', 'provider-error': '서비스 오류 응답',
@@ -32,6 +34,7 @@
     for (const key of ['totalCues', 'completedCues', 'expectedCues', 'returnedCues', 'startCue', 'endCue']) if (integer(value[key])) item[key] = value[key];
     if (Number.isInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) item.httpStatus = value.httpStatus;
     if (SYSTEM_CODES.has(value.systemCode)) item.systemCode = value.systemCode;
+    if (CAUSE_CODES.has(value.causeCode)) item.causeCode = value.causeCode;
     if (typeof value.refusalSource === 'string' && Object.hasOwn(REFUSAL_SOURCES, value.refusalSource)) item.refusalSource = value.refusalSource;
     if (typeof value.executionSource === 'string' && Object.hasOwn(EXECUTION_SOURCES, value.executionSource)) item.executionSource = value.executionSource;
     for (const key of ['executionElapsedMs', 'executionDeadlineMs']) if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 604800000) item[key] = value[key];
@@ -101,7 +104,7 @@
       const message = node('td');
       if (event.event) message.append(node('strong', '', eventNames[event.event] || safeText(event.event, 120)));
       if (event.code) message.append(node('span', 'diagnostics-meta', safeText(event.code, 160)));
-      const technicalCodes = [event.httpStatus ? `HTTP ${event.httpStatus}` : '', event.systemCode ? `시스템 ${event.systemCode}` : ''].filter(Boolean).join(' · ');
+      const technicalCodes = [event.httpStatus ? `HTTP ${event.httpStatus}` : '', event.systemCode ? `시스템 ${event.systemCode}` : '', event.causeCode ? `원인 ${event.causeCode}` : ''].filter(Boolean).join(' · ');
       if (technicalCodes) message.append(node('span', 'diagnostics-meta', technicalCodes));
       if (event.executionSource) {
         const times = [Number.isSafeInteger(event.executionElapsedMs) ? `대기 ${Math.round(event.executionElapsedMs / 1000)}초` : '',

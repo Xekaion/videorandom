@@ -1357,11 +1357,14 @@ test('a short accurate draft reaches source review and only its corrected final 
     assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(saved.subtitles[0].text.includes('네.'), false);
 });
 
-test('fast translation still rejects a short result without starting an additional review', async t => {
+test('fast translation isolates a still-short result after one correction without claiming an independent review', async t => {
     const f = await translationGuardFixture(t, { respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index, text: '네.' })), terms: [] }) });
     const result = await f.run({ subtitleQuality: 'fast' });
-    assert.equal(f.requests.length, 1); assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.match(result.subtitleError, /지나치게 짧아/); assert.equal(result.subtitleTranslation, undefined);
+    assert.equal(f.requests.length, 2); assert.equal(result.subtitleRepairStatus, 'failed');
+    assert(f.requests.every(item => !item.review));
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationProgress.completedCues, 0);
+    assert.equal(result.subtitleTranslation, undefined);
 });
 
 test('faithful numeric compression and full-width digits count as translation content in both profiles and checkpoints', async t => {
@@ -1425,15 +1428,20 @@ test('a later batch can correct its own short reviewed cues within the shared op
     assert.equal(result.subtitleTranslationProgress.translationComplete, true);
 });
 
-test('a failing small correction group stops without recursion and preserves only already reviewed groups', async t => {
+test('a still-short correction group stays unapproved while subsequent reviewed groups are preserved without recursion', async t => {
     const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
         text: item.review && (item.count > 20 || item.start === 20) ? '네.' : faithfulKorean })), terms: [] }) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 4);
-    assert.equal(result.subtitleTranslationPartial.length, 20);
+    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 6);
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.deepEqual(f.requests.slice(2).map(item => [item.start, item.count]), [[0, 20], [20, 20], [40, 20], [60, 20]]);
+    assert.equal(result.subtitleTranslationPartial.length, 60);
     assert.ok(result.subtitleTranslationPartial.every(cue => cue.text.replace(/\n/g, ' ') === faithfulKorean));
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.subtitles.length, 20); assert.equal(saved.translationComplete, false);
+    const indexes = Array.from({ length: 80 }, (_, index) => index).filter(index => index < 20 || index >= 40);
+    assert.equal(saved.version, 2); assert.deepEqual(saved.cueIndexes, indexes);
+    assert.deepEqual(saved.subtitles.map(cue => cue.index), indexes);
+    assert.equal(saved.subtitles.length, 60); assert.equal(saved.translationComplete, false);
 });
 
 for (const failure of ['safety refusal', 'quota usage limit', '401 authentication failed', '503 service unavailable', 'execution timeout']) {

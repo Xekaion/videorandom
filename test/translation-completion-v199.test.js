@@ -111,7 +111,7 @@ test('a last single-cue review receives one targeted correction without a minimu
     await f.drained();
 });
 
-test('a still-short targeted review stops once and retains the exact strict contiguous prefix for resume', async t => {
+test('a still-short targeted review isolates its cue and retains every other strict cue for missing-only resume', async t => {
     let failing = true;
     const f = await fixture(t, { count: 160, handler: call => {
         const result = answer(call);
@@ -120,18 +120,20 @@ test('a still-short targeted review stops once and retains the exact strict cont
     } });
     const failed = await f.run();
     assert.equal(failed.subtitleRepairStatus, 'failed');
-    assert.equal(failed.subtitleDiagnostic.code, 'SUBTITLE_REVIEW_TOO_SHORT');
+    assert.equal(failed.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(f.calls.length, 5);
-    assert.equal(failed.subtitleTranslationPartial.length, 100);
+    assert.equal(failed.subtitleTranslationPartial.length, 159);
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
     assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(saved.reviewPasses, 2);
-    assert.equal(saved.completedCues, 100); assert.equal(saved.translationComplete, false);
-    assert.deepEqual(saved.subtitles.map(cue => [cue.id, cue.start, cue.end]), f.transcript.slice(0, 100).map(cue => [cue.id, cue.start, cue.end]));
+    const indexes = Array.from({ length: 160 }, (_, index) => index).filter(index => index !== 100);
+    assert.equal(saved.version, 2); assert.deepEqual(saved.cueIndexes, indexes);
+    assert.equal(saved.completedCues, 159); assert.equal(saved.translationComplete, false);
+    assert.deepEqual(saved.subtitles.map(cue => [cue.id, cue.start, cue.end]), indexes.map(index => f.transcript[index]).map(cue => [cue.id, cue.start, cue.end]));
     const previousCalls = f.calls.length;
     failing = false;
     const completed = await f.run();
     assert.equal(completed.subtitleRepairStatus, 'completed', completed.subtitleError);
-    assert.deepEqual(f.calls.slice(previousCalls).map(call => [call.start, call.count, call.review]), [[100, 60, false], [100, 60, true]]);
+    assert.deepEqual(f.calls.slice(previousCalls).map(call => [call.start, call.count, call.review]), [[100, 1, false], [100, 1, true]]);
     assert.equal(completed.subtitleTranslation.length, 160);
     await f.drained();
 });

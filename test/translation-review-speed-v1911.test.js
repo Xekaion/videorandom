@@ -163,11 +163,14 @@ test('explicit sparse approval cannot bypass the existing short-text check or re
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_REVIEW_TOO_SHORT');
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(f.calls.length, 3);
     assert.deepEqual(f.calls.at(-1).indexes, [20]);
     assert.deepEqual(f.calls[1].input.omissionCheckIndexes, [20]);
-    assert.equal(result.subtitleTranslationPartial.length, 20);
+    assert.equal(result.subtitleTranslationPartial.length, 79);
+    assert.equal(result.subtitleTranslationProgress.version, 2);
+    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 20));
+    assert(result.subtitleTranslationPartial.every(cue => unwrapped(cue.text) === koreanText));
     await f.drained();
 });
 

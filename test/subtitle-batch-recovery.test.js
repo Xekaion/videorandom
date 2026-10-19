@@ -206,9 +206,12 @@ for (const phase of ['draft', 'review']) test(`a ${phase} subset with a semantic
     assert.deepEqual(f.requests[2].input.omissionCheckIndexes, [0, 79], 'both short draft cues still require source review');
   } else {
     assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_REVIEW_TOO_SHORT');
+    assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_CUES_PENDING');
     assert.deepEqual(f.requests[2].input.subtitles.map(cue => cue.index), [0, 79], 'only the short and missing reviewed cues are requested again');
-    assert.equal(result.subtitleTranslationPartial?.length || 0, 0, 'the short first cue prevents any prefix checkpoint');
+    assert.equal(result.subtitleTranslationPartial.length, 79, 'the short first cue is excluded while every later strictly reviewed cue survives');
+    assert.equal(result.subtitleTranslationProgress.version, 2);
+    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, Array.from({ length: 79 }, (_, index) => index + 1));
+    assert(result.subtitleTranslationPartial.every(cue => cue.text.replace(/\s+/g, ' ').trim() === KOREAN));
   }
 });
 

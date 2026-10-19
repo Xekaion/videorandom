@@ -351,8 +351,9 @@ test('new chunk name drift keeps the previous validated prefix and excessively c
   const short = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '네.' }], terms: [] } : summary());
   const rejected = await short.provider.analyzeExtracted(shortFixture.record, { dataDir: shortFixture.dataDir, subtitleLanguage: 'ko' });
   assert.equal(rejected.subtitleLanguage, undefined);
-  assert.match(rejected.subtitleError, /생략되었을 가능성/);
-  assert.equal(short.calls.filter(call => call.schema?.properties.subtitles).length, 1);
+  assert.equal(rejected.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+  assert.match(rejected.subtitleError, /미완료.*나머지 검증된 번역/);
+  assert.equal(short.calls.filter(call => call.schema?.properties.subtitles).length, 2);
 });
 
 test('LAN transports language options and aligned Korean subtitle text without host paths', async t => {
