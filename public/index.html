@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.9.13">
+  <link rel="stylesheet" href="css/style.css?v=1.9.14">
 </head>
 <body>
 
@@ -40,7 +40,7 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link header-analysis-link" href="#videoCatalog">분석 현황 · 대기열</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.13</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.14</span>
         <button id="appUpdateToggle" class="header-link app-update-toggle" type="button" aria-expanded="false" aria-controls="appUpdatePanel">업데이트</button>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
@@ -584,7 +584,7 @@
       <p class="catalog-detail-meta" id="catalogDetailMeta"></p>
       <p class="catalog-section-note hidden" id="catalogAnalysisTimings"></p>
       <p class="catalog-section-note" id="catalogAnalysisVersions"></p>
-      <div class="catalog-repair-panel"><div><strong id="catalogDetailHealth"></strong><p id="catalogDetailRepairNote" class="catalog-section-note"></p><progress id="catalogDetailProgress" class="catalog-detail-progress hidden" max="100" aria-label="이 영상의 분석 진행률"></progress></div><div class="catalog-repair-actions"><button id="catalogSubtitleRepair" class="btn btn-primary" type="button" title="저장된 원문 대사와 시간으로 한국어 번역만 복구합니다. 음성 인식과 줄거리는 다시 만들지 않습니다.">한국어 자막 번역만 복구</button><button id="catalogDetailRepair" class="btn btn-secondary" type="button">복구 / 다시 분석</button></div></div>
+      <div class="catalog-repair-panel"><div><strong id="catalogDetailHealth"></strong><p id="catalogDetailRepairNote" class="catalog-section-note"></p><progress id="catalogDetailProgress" class="catalog-detail-progress hidden" max="100" aria-label="이 영상의 분석 진행률"></progress></div><div class="catalog-repair-actions"><button id="catalogDetailPrimaryRepair" class="btn btn-primary hidden" type="button"></button><details id="catalogDetailExtraActions" class="catalog-extra-actions"><summary>추가 작업 · 선택 사항</summary><button id="catalogSubtitleRepair" class="btn btn-secondary" type="button" title="저장된 원문 대사와 시간으로 한국어 번역만 복구합니다. 음성 인식과 줄거리는 다시 만들지 않습니다.">한국어 자막 번역만 복구</button><button id="catalogDetailRepair" class="btn btn-secondary" type="button">다시 분석</button></details></div></div>
       <p class="catalog-notice hidden" id="catalogDetailWarnings"></p>
       <form id="catalogEditForm">
         <div class="catalog-edit-grid">
@@ -619,9 +619,9 @@
   <script src="js/app.js?v=1.6.0" defer></script>
   <script src="js/history.js?v=1.6.0" defer></script>
   <script src="js/catalog-sort.js?v=1.6.0" defer></script>
-  <script src="js/analysis-progress.js?v=1.9.13" defer></script>
-  <script src="js/catalog.js?v=1.9.13" defer></script>
-  <script src="js/diagnostics.js?v=1.9.13" defer></script>
-  <script src="js/app-update.js?v=1.9.13" defer></script>
+  <script src="js/analysis-progress.js?v=1.9.14" defer></script>
+  <script src="js/catalog.js?v=1.9.14" defer></script>
+  <script src="js/diagnostics.js?v=1.9.14" defer></script>
+  <script src="js/app-update.js?v=1.9.14" defer></script>
 </body>
 </html>

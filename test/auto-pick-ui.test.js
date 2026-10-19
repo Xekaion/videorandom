@@ -598,7 +598,7 @@ test('catalog health distinguishes intentional local extraction from missing sum
   assert.equal(localRow.childNodes[6].childNodes[0].textContent, '로컬 추출 · 자동 요약 전');
   assert.equal(missingRow.childNodes[6].childNodes[0].textContent, '요약 실패 / 누락');
   assert.equal(missingRow.childNodes[2].childNodes[0].textContent, missing.health.reason);
-  await missingRow.childNodes[6].childNodes.at(-1).dispatch('click');
+  await descendants(missingRow).find(node => String(node.className || '').includes('catalog-analysis-recovery')).dispatch('click');
   const posted = ui.calls.find(call => call.url.endsWith('/missing/repair'));
   assert.equal(posted.method, 'POST');
   assert.equal(posted.body.options.mode, 'codex');
@@ -629,7 +629,7 @@ test('a provider refusal is displayed as a failed repair without an automatic re
   const record = { ...picked('검증 영상.mp4'), id: 'refused', status: 'partial', summary: '', frames: [] };
   const error = '서비스가 이 콘텐츠의 분석을 거부했습니다.';
   const ui = await boot({ records: [record], repairStatus: 403, repairResponse: { error } });
-  await ui.elements.get('catalogRows').childNodes[0].childNodes[6].childNodes.at(-1).dispatch('click');
+  await descendants(ui.elements.get('catalogRows').childNodes[0]).find(node => String(node.className || '').includes('catalog-analysis-recovery')).dispatch('click');
   assert(ui.elements.get('catalogNotice').textContent.includes(error));
   assert(ui.elements.get('catalogNotice').classList.contains('catalog-error'));
   await ui.runTimers(1500);

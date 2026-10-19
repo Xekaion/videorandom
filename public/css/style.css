@@ -1527,6 +1527,12 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-subtitle-repair { display: block; text-align: left; padding: 7px 8px; border: 1px solid rgba(245,158,11,.45); background: rgba(245,158,11,.1); border-radius: 6px; color: #fcd34d; font-weight: 600; font-size: 11px; line-height: 1.6; margin-top: 2px; width: 100%; word-break: keep-all; overflow-wrap: normal; }
 .catalog-subtitle-filter { color: #fcd34d; border: 1px solid rgba(245,158,11,.4); background: rgba(245,158,11,.08); }
 .catalog-subtitle-filter[aria-pressed="true"] { background: rgba(245,158,11,.2); border-color: #f59e0b; }
+.catalog-extra-actions { margin-top: 9px; font-size: 11px; color: #a8b1c3; }
+.catalog-extra-actions > summary { cursor: pointer; line-height: 1.7; }
+.catalog-extra-actions[open] > summary { margin-bottom: 7px; }
+.catalog-extra-actions > button { display: block; max-width: 100%; margin-top: 7px; }
+.catalog-save-retry, .catalog-analysis-recovery { display: block; padding: 7px 9px; border: 1px solid rgba(6,182,212,.35); border-radius: 6px; background: rgba(6,182,212,.08); line-height: 1.6; }
+.catalog-repair-actions .catalog-extra-actions { margin-top: 0; }
 .catalog-table tbody tr.catalog-row-active { background: rgba(6,182,212,.045); }
 .catalog-row-stage, .catalog-row-previous { display: block; font-size: 10px; line-height: 1.7; margin-top: 7px; overflow-wrap: anywhere; }
 .catalog-row-stage { color: #a5e6ef; }
