@@ -12,6 +12,8 @@
   const REFUSAL_CODES = new Set(['PROVIDER_REFUSAL', 'SUBTITLE_PROVIDER_REFUSAL', 'SUBTITLE_REFUSAL_TEXT_DETECTED']);
   const REFUSAL_SOURCES = Object.assign(Object.create(null), { 'response-field': '응답의 거절 표시',
     'subtitle-text': '자막 속 작업 거절 문구 감지', 'execution-error': '도구 실행 오류의 거절 표시' });
+  const EXECUTION_SOURCES = Object.assign(Object.create(null), { 'local-deadline': '도구 대기 제한 초과', 'provider-error': '서비스 오류 응답',
+    'process-exit': '도구 비정상 종료', 'process-error': '도구 실행 오류', cancelled: '작업 중지' });
   const openAndVisible = () => element('diagnosticsPanel').open && document.hidden !== true && document.visibilityState !== 'hidden';
   const node = (tag, className, value) => { const item = document.createElement(tag); if (className) item.className = className; if (value !== undefined) item.textContent = String(value); return item; };
   const stages = Object.assign(Object.create(null), { translation_draft: '한국어 번역 초안', translation_review: '한국어 번역 검수', translation: '한국어 번역',
@@ -31,6 +33,11 @@
     if (Number.isInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) item.httpStatus = value.httpStatus;
     if (SYSTEM_CODES.has(value.systemCode)) item.systemCode = value.systemCode;
     if (typeof value.refusalSource === 'string' && Object.hasOwn(REFUSAL_SOURCES, value.refusalSource)) item.refusalSource = value.refusalSource;
+    if (typeof value.executionSource === 'string' && Object.hasOwn(EXECUTION_SOURCES, value.executionSource)) item.executionSource = value.executionSource;
+    for (const key of ['executionElapsedMs', 'executionDeadlineMs']) if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 604800000) item[key] = value[key];
+    for (const key of ['providerReconnectAttempt', 'providerReconnectLimit']) if (integer(value[key]) && value[key] <= 1000) item[key] = value[key];
+    if (Number.isInteger(value.providerHttpStatus) && value.providerHttpStatus >= 100 && value.providerHttpStatus <= 599) item.providerHttpStatus = value.providerHttpStatus;
+    if (SYSTEM_CODES.has(value.providerSystemCode)) item.providerSystemCode = value.providerSystemCode;
     if (Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100) item.percent = value.percent;
     return item;
   }
@@ -96,6 +103,14 @@
       if (event.code) message.append(node('span', 'diagnostics-meta', safeText(event.code, 160)));
       const technicalCodes = [event.httpStatus ? `HTTP ${event.httpStatus}` : '', event.systemCode ? `시스템 ${event.systemCode}` : ''].filter(Boolean).join(' · ');
       if (technicalCodes) message.append(node('span', 'diagnostics-meta', technicalCodes));
+      if (event.executionSource) {
+        const times = [Number.isSafeInteger(event.executionElapsedMs) ? `대기 ${Math.round(event.executionElapsedMs / 1000)}초` : '',
+          Number.isSafeInteger(event.executionDeadlineMs) ? `제한 ${Math.round(event.executionDeadlineMs / 1000)}초` : ''].filter(Boolean).join(' / ');
+        message.append(node('span', 'diagnostics-meta', `${EXECUTION_SOURCES[event.executionSource]}${times ? ` · ${times}` : ''}`));
+        const signals = [event.providerHttpStatus ? `HTTP ${event.providerHttpStatus}` : '', event.providerSystemCode || '',
+          integer(event.providerReconnectAttempt) ? `도구 재연결 ${event.providerReconnectAttempt}${integer(event.providerReconnectLimit) ? `/${event.providerReconnectLimit}` : ''}` : ''].filter(Boolean);
+        if (signals.length) message.append(node('span', 'diagnostics-meta', `대기 중 관측한 기술 신호: ${signals.join(' · ')}`));
+      }
       if (event.message) message.append(node('p', '', safeText(event.message, 1000)));
       if (REFUSAL_CODES.has(event.code)) {
         const basis = REFUSAL_SOURCES[event.refusalSource];

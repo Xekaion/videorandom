@@ -163,7 +163,8 @@ for (const phase of ['draft', 'review']) test(`a deficient ${phase} supplement s
   const result = await f.run();
   assert.equal(result.subtitleRepairStatus, 'failed');
   assert.equal(f.requests.length, phase === 'draft' ? 2 : 3);
-  assert.equal(result.subtitleTranslationPartial?.length || 0, 0, 'an unreviewed incomplete batch is never committed');
+  assert.equal(result.subtitleTranslationPartial?.length || 0, phase === 'review' ? 40 : 0,
+    'only the strict contiguous reviewed prefix is committed; an unreviewed draft is never committed');
 });
 
 test('a semantically short review supplement stops after three calls instead of entering the old length-repair path', async t => {
@@ -174,10 +175,10 @@ test('a semantically short review supplement stops after three calls instead of 
   const result = await f.run();
   assert.equal(result.subtitleRepairStatus, 'failed');
   assert.equal(f.requests.length, 3, 'a failed supplement cannot trigger a whole-batch semantic retry');
-  assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
+  assert.equal(result.subtitleTranslationPartial?.length || 0, 79, 'the valid reviewed prefix survives the failed last-cue correction');
 });
 
-for (const phase of ['draft', 'review']) test(`a ${phase} subset with a semantically short accepted row cannot trigger missing-cue repair`, async t => {
+for (const phase of ['draft', 'review']) test(`a ${phase} subset with a semantically short row receives one bounded correction without accepting a short final cue`, async t => {
   const f = await fixture(t, { respond: item => {
     if (item.review === (phase === 'review')) {
       const response = responseFor(item.input.subtitles.slice(0, 79));
@@ -186,10 +187,17 @@ for (const phase of ['draft', 'review']) test(`a ${phase} subset with a semantic
     }
   } });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, 'failed');
-  assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_CUE_COUNT_MISMATCH');
-  assert.equal(f.requests.length, phase === 'draft' ? 1 : 2);
-  assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
+  assert.equal(f.requests.length, 3);
+  if (phase === 'draft') {
+    await assertCompleted(f, result);
+    assert.deepEqual(f.requests.map(item => [item.start, item.count, item.review]), [[0, 80, false], [79, 1, false], [0, 80, true]]);
+    assert.deepEqual(f.requests[2].input.omissionCheckIndexes, [0, 79], 'both short draft cues still require source review');
+  } else {
+    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_REVIEW_TOO_SHORT');
+    assert.deepEqual(f.requests[2].input.subtitles.map(cue => cue.index), [0, 79], 'only the short and missing reviewed cues are requested again');
+    assert.equal(result.subtitleTranslationPartial?.length || 0, 0, 'the short first cue prevents any prefix checkpoint');
+  }
 });
 
 for (const phase of ['draft', 'review']) test(`a ${phase} supplement receives the other source cues as context and already accepted same-stage terminology`, async t => {
@@ -360,7 +368,9 @@ test('supplement and failure diagnostics retain only technical counters and cano
   assert.equal(warning.startCue, 1); assert.equal(warning.endCue, 80);
   const failure = diagnostics.find(event => event.code === 'PROVIDER_UNAVAILABLE');
   assert.equal(failure.stage, 'translation_review'); assert.equal(failure.httpStatus, 503);
-  const allowed = new Set(['source', 'level', 'event', 'stage', 'totalCues', 'completedCues', 'expectedCues', 'returnedCues', 'startCue', 'endCue', 'code', 'message', 'httpStatus']);
+  const allowed = new Set(['source', 'level', 'event', 'stage', 'totalCues', 'completedCues', 'expectedCues', 'returnedCues', 'startCue', 'endCue', 'code', 'message', 'httpStatus',
+    'executionSource', 'executionElapsedMs', 'executionDeadlineMs', 'providerErrorType', 'providerSystemCode',
+    'providerReconnectAttempt', 'providerReconnectLimit', 'providerHttpStatus']);
   for (const event of [...diagnostics, result.subtitleDiagnostic]) assert.ok(Object.keys(event).every(key => allowed.has(key)), JSON.stringify(event));
   const serialized = JSON.stringify([...diagnostics, result.subtitleDiagnostic]);
   for (const secret of [JAPANESE, KOREAN, RETAINED, marker, privatePath, f.dataDir, 'contextOtherSubtitles', '자료 JSON:']) assert.equal(serialized.includes(secret), false);

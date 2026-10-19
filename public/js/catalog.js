@@ -162,6 +162,8 @@
   }
 
   function detailRepairNote(record) {
+    const execution = subtitleExecutionNote(record);
+    if (execution) return `${record.subtitleError || '한국어 번역이 중단되었습니다.'}\n${execution}\n저장된 원문과 검수된 번역은 보관합니다.`;
     const refusal = subtitleRefusalNote(record);
     if (refusal) return `${record.subtitleError || '한국어 번역이 중단되었습니다.'}\n${refusal}\n저장된 원문과 검수된 번역은 보관합니다.`;
     return translationNeedsRecovery(record)
@@ -177,6 +179,21 @@
     const source = typeof diagnostic.refusalSource === 'string' && Object.hasOwn(sources, diagnostic.refusalSource) ? diagnostic.refusalSource : undefined;
     const basis = sources[source];
     return `판정 근거: ${basis || '미기록 · 이전 버전에서는 구분해 저장하지 않았습니다.'}${basis ? '.' : ''} 구체적인 거절 사유는 기록되지 않았습니다.${!source || source === 'subtitle-text' ? ' 이 기록만으로 실제 서비스가 요청을 거절했는지는 확정할 수 없습니다.' : ''}`;
+  }
+
+  function subtitleExecutionNote(record) {
+    const d = record?.subtitleDiagnostic;
+    const sources = Object.assign(Object.create(null), { 'local-deadline': '분석 도구가 대기 제한 시간에 도달해 종료됐습니다.',
+      'provider-error': '분석 도구에서 오류 응답을 받았습니다.', 'process-exit': '분석 도구가 비정상 종료됐습니다.',
+      'process-error': '분석 도구 실행 중 오류가 발생했습니다.', cancelled: '작업이 중지됐습니다.' });
+    if (!d || typeof d.executionSource !== 'string' || !Object.hasOwn(sources, d.executionSource)) return '';
+    const bounded = (v, max) => Number.isSafeInteger(v) && v >= 0 && v <= max;
+    const times = [bounded(d.executionElapsedMs, 604800000) ? `요청 대기 ${Math.round(d.executionElapsedMs / 1000)}초` : '',
+      bounded(d.executionDeadlineMs, 604800000) ? `도구 제한 ${Math.round(d.executionDeadlineMs / 1000)}초` : ''].filter(Boolean);
+    const signals = [bounded(d.providerHttpStatus, 599) && d.providerHttpStatus >= 100 ? `HTTP ${d.providerHttpStatus}` : '',
+      bounded(d.providerReconnectAttempt, 1000) ? `도구 재연결 ${d.providerReconnectAttempt}${bounded(d.providerReconnectLimit, 1000) ? `/${d.providerReconnectLimit}` : ''}` : ''].filter(Boolean);
+    return [sources[d.executionSource], times.join(' · '), signals.length ? `대기 중 관측한 기술 신호: ${signals.join(' · ')}`
+      : '세부 연결 원인은 기록되지 않았습니다.'].filter(Boolean).join('\n');
   }
 
   function translationInProgress(record) {
@@ -1464,15 +1481,17 @@
     const remainingLabel = Number.isFinite(remaining) ? remaining >= 3600
       ? `약 ${Math.floor(roundedMinutes / 60)}시간${roundedMinutes % 60 ? ` ${roundedMinutes % 60}분` : ''}`
       : remaining >= 60 ? `약 ${Math.ceil(remaining / 60)}분` : `약 ${Math.max(1, Math.ceil(remaining))}초` : '';
-    $('catalogJobEta').textContent = active ? state.jobConnectionError ? '연결 확인 중' : presentation?.stale ? '진행 확인 중' : remainingLabel || '처리 속도 측정 중'
+    $('catalogJobEta').textContent = active ? state.jobConnectionError ? '연결 확인 중'
+      : presentation?.delayed ? `${presentation.requestLabel || '번역'} 응답 지연`
+      : presentation?.stale ? '진행 확인 중' : presentation?.remainingText || remainingLabel || '처리 속도 측정 중'
       : translationIncomplete || partialResults || job.status === 'failed' ? '중단 · 확인 필요' : job.status === 'cancelled' ? '중지됨' : '완료';
-    $('catalogJobEta').classList.toggle('catalog-eta-stale', presentation?.stale === true);
+    $('catalogJobEta').classList.toggle('catalog-eta-stale', presentation?.stale === true || presentation?.delayed === true);
     const phaseCount = presentation && Number.isFinite(presentation.completed) && Number.isFinite(presentation.total)
       ? presentation.unit === 'audioSeconds' ? `음성 처리 ${time(presentation.completed)} / ${time(presentation.total)}`
       : `${presentation.unit === 'cues' ? '검수 저장' : '요약 완료'} ${presentation.completed.toLocaleString()} / ${presentation.total.toLocaleString()}${presentation.unit === 'cues' ? '구간' : '묶음'}` : '';
     const speechMetadata = window.videoAnalysisProgress?.normalizeSpeechMetadata?.(job.phaseProgress);
     const speechLabel = speechMetadata && Object.keys(speechMetadata).length ? window.videoAnalysisProgress?.formatSpeechMetadata?.(speechMetadata) : '';
-    $('catalogJobPhase').textContent = active ? [phaseCount, speechLabel].filter(Boolean).join(' · ') || (presentation ? '' : phaseTimingText(job)) : '';
+    $('catalogJobPhase').textContent = active ? [phaseCount, speechLabel, presentation?.requestText].filter(Boolean).join(' · ') || (presentation ? '' : phaseTimingText(job)) : '';
     $('catalogJobEtaNote').classList.toggle('hidden', !active);
     const problem = !active && job.results?.find(record => translationNeedsRecovery(record) || record.subtitleRepairStatus === 'failed' || ['partial', 'failed'].includes(record.status));
     const failure = active && state.jobConnectionError ? `작업 상태 연결 확인 중 · ${state.jobConnectionError}` : job.error || problem?.subtitleError || problem?.error || (problem ? healthFor(problem).reason : '');
@@ -1688,7 +1707,8 @@
     $('catalogSubtitleRepair').disabled = state.starting || isActive(state.job) || !state.config || !record.transcript?.length;
     $('catalogSubtitleRepair').title = record.transcript?.length ? '저장된 원문과 시간으로 한국어 자막만 번역합니다. 음성 인식과 줄거리는 다시 생성하지 않습니다.' : '저장된 원문 대사가 있어야 번역만 복구할 수 있습니다.';
     const refusal = subtitleRefusalNote(record);
-    const warnings = [...(Array.isArray(record.warnings) ? record.warnings : []), ...(record.error ? [record.error] : []), ...(record.subtitleError ? [record.subtitleError] : []), ...(refusal ? [refusal] : [])];
+    const execution = subtitleExecutionNote(record);
+    const warnings = [...(Array.isArray(record.warnings) ? record.warnings : []), ...(record.error ? [record.error] : []), ...(record.subtitleError ? [record.subtitleError] : []), ...(refusal ? [refusal] : []), ...(execution ? [execution] : [])];
     $('catalogDetailWarnings').textContent = warnings.join('\n');
     $('catalogDetailWarnings').classList.toggle('hidden', !warnings.length);
     $('catalogEditSummary').value = record.summary || '';
@@ -1805,7 +1825,7 @@
           : '한국어 미번역 구간이 남아 있습니다. 번역 복구가 필요합니다. 저장된 원문과 시간으로 한국어 번역만 복구할 수 있습니다.';
     const message = [partial ? `검수된 한국어 부분 자막 ${translations.length.toLocaleString()} / ${transcript.length.toLocaleString()}구간을 표시합니다.` : '',
       counts, status, partial ? '부분 SRT / VTT로 직접 저장할 수 있습니다.' : '',
-      record.subtitleError ? `${partial && allSourceCuesTranslated ? '원어 확인 안내' : translating ? '이전 번역 안내' : '원인'}: ${record.subtitleError}` : '', refusal].filter(Boolean).join('\n');
+      record.subtitleError ? `${partial && allSourceCuesTranslated ? '원어 확인 안내' : translating ? '이전 번역 안내' : '원인'}: ${record.subtitleError}` : '', refusal, subtitleExecutionNote(record)].filter(Boolean).join('\n');
     $('catalogSubtitleNotice').textContent = message;
     $('catalogSubtitleNotice').classList.remove('hidden');
     $('catalogSubtitleNotice').classList.toggle('catalog-error', !!record.subtitleError);

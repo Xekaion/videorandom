@@ -1172,19 +1172,20 @@ for (const phase of ['draft', 'review']) test(`an unrecoverable ${phase} count m
     assert.equal(result.subtitleError, '한국어 자막 번역의 대사 수가 원문과 일치하지 않습니다.');
     assert.equal(result.subtitleRepairStatus, 'failed');
     assert.equal(f.requests.length, phase === 'draft' ? 6 : 7, 'one missing-cue request fails without recursion');
-    assert.equal(result.subtitleTranslationPartial.length, 160);
+    const retained = phase === 'review' ? 197 : 160;
+    assert.equal(result.subtitleTranslationPartial.length, retained);
     const diagnostic = result.subtitleDiagnostic;
     assert.deepEqual({ stage: diagnostic.stage, event: diagnostic.event, code: diagnostic.code,
         totalCues: diagnostic.totalCues, completedCues: diagnostic.completedCues, startCue: diagnostic.startCue,
         endCue: diagnostic.endCue, expectedCues: diagnostic.expectedCues, returnedCues: diagnostic.returnedCues }, {
         stage: `translation_${phase}`, event: 'error', code: 'SUBTITLE_CUE_COUNT_MISMATCH',
-        totalCues: 241, completedCues: 160, startCue: 198, endCue: 217, expectedCues: 20, returnedCues: 0
+        totalCues: 241, completedCues: retained, startCue: 198, endCue: 217, expectedCues: 20, returnedCues: 0
     });
     assert.equal(diagnostic.privateInjection, undefined);
     assert.equal(events.filter(event => event.event === 'error').length, 1);
     assert.ok(events.some(event => event.level === 'warning' && event.expectedCues === 80 && event.returnedCues === 37));
     assert.deepEqual(events.filter(event => event.event === 'committed').map(event => [event.stage, event.completedCues]),
-        [['translation_review', 80], ['translation_review', 160]]);
+        [['translation_review', 80], ['translation_review', 160], ...(phase === 'review' ? [['translation_review', 197]] : [])]);
     assert.equal(events.some(event => event.stage === 'translation_draft' && event.event === 'committed'), false, 'an unreviewed draft is never recorded as saved');
     const technical = JSON.stringify([diagnostic, events]);
     for (const secret of [longJapanese, faithfulKorean, f.record.path, f.record.name, 'draftSubtitles', 'properNames', 'stack']) {
@@ -1400,34 +1401,35 @@ test('a genuinely conflicting proper-name mapping stops the new draft before rev
     assert.equal(result.subtitleTranslationPartial.length, 80);
 });
 
-test('one final-review length failure can use at most four smaller fully reviewed groups without committing the rejected draft', async t => {
+test('one final-review length failure corrects at most four reviewed groups without repeating the already valid draft', async t => {
     const progress = [];
     const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
         text: item.review && item.count > 20 ? '네.' : faithfulKorean })), terms: [] }) });
     const result = await f.run({ onProgress: stage => progress.push(stage) });
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
-    assert.equal(f.requests.length, 10, 'one original draft/review plus at most eight bounded correction calls');
-    assert.deepEqual(f.requests.map(item => [item.start, item.count]), [[0, 80], [0, 80], [0, 20], [0, 20], [20, 20], [20, 20], [40, 20], [40, 20], [60, 20], [60, 20]]);
+    assert.equal(f.requests.length, 6, 'one original draft/review plus four bounded source-review correction calls');
+    assert.deepEqual(f.requests.map(item => [item.start, item.count]), [[0, 80], [0, 80], [0, 20], [20, 20], [40, 20], [60, 20]]);
+    assert.ok(f.requests.slice(2).every(item => item.review));
     assert.ok(result.subtitleTranslation.every(cue => cue.text.replace(/\n/g, ' ') === faithfulKorean));
-    assert.ok(progress.some(stage => /작은 묶음 1\/4/.test(stage)));
+    assert.ok(progress.some(stage => /누락·길이 보완 · 0\/80구간/.test(stage)));
     assert.deepEqual(result.transcript, f.source);
 });
 
-test('the length correction budget is global and a second failing large batch stops with the first reviewed prefix', async t => {
+test('a later batch can correct its own short reviewed cues within the shared operation request bound', async t => {
     const f = await translationGuardFixture(t, { count: 160, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
         text: item.review && item.count > 20 ? '네.' : faithfulKorean })), terms: [] }) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.match(result.subtitleError, /지나치게 짧아/);
-    assert.equal(f.requests.length, 12); assert.equal(result.subtitleTranslationPartial.length, 80);
-    assert.equal(f.requests.some(item => item.start >= 80 && item.count <= 20), false);
-    assert.equal(result.subtitleTranslationProgress.translationComplete, false);
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.equal(f.requests.length, 12); assert.equal(result.subtitleTranslation.length, 160);
+    assert.equal(f.requests.filter(item => item.start >= 80 && item.count <= 20).length, 4);
+    assert.equal(result.subtitleTranslationProgress.translationComplete, true);
 });
 
 test('a failing small correction group stops without recursion and preserves only already reviewed groups', async t => {
     const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
         text: item.review && (item.count > 20 || item.start === 20) ? '네.' : faithfulKorean })), terms: [] }) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 6);
+    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 4);
     assert.equal(result.subtitleTranslationPartial.length, 20);
     assert.ok(result.subtitleTranslationPartial.every(cue => cue.text.replace(/\n/g, ' ') === faithfulKorean));
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
@@ -1447,13 +1449,12 @@ for (const failure of ['safety refusal', 'quota usage limit', '401 authenticatio
     });
 }
 
-for (const failure of ['wrong-index', 'wrong-count', 'foreign-text', 'unconfirmed-term']) {
+for (const failure of ['wrong-index', 'foreign-text', 'unconfirmed-term']) {
     test(`a ${failure} error takes precedence over a short review and never starts correction`, async t => {
         const f = await translationGuardFixture(t, { count: 80, respond: item => {
             const subtitles = item.input.subtitles.map(cue => ({ index: cue.index, text: item.review ? '네.' : faithfulKorean }));
             const terms = item.review ? [] : [{ source: '太郎', translation: '타로' }];
             if (item.review && failure === 'wrong-index') subtitles[0].index++;
-            if (item.review && failure === 'wrong-count') subtitles.pop();
             if (item.review && failure === 'foreign-text') subtitles[0].text = 'これは翻訳されていません。';
             if (item.review && failure !== 'unconfirmed-term') terms.push({ source: '太郎', translation: '타로' });
             return { subtitles, terms };

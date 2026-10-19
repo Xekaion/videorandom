@@ -222,6 +222,24 @@ test('snapshot age removes a numeric ETA and a failed status poll immediately sh
   assert.equal(ui.state.job.status, 'running', 'a connection error does not assert the worker has ended');
 });
 
+test('the dashboard shows measured ETA variation and a live delayed review wait', () => {
+  const ui = boot();
+  ui.sandbox.videoAnalysisProgress = progress;
+  const job = { id: 'synthetic-request-wait', status: 'running', total: 1, completed: 0, percent: 70,
+    phaseProgress: { phase: 'translation', completedCues: 160, totalCues: 480, elapsedSeconds: 30,
+      sampleAgeSeconds: 0, remainingSeconds: 240, remainingMinSeconds: 120, remainingMaxSeconds: 300,
+      requestStage: 'translation_review', activeRequestCount: 2, requestElapsedSeconds: 5, requestExpectedSeconds: 10 } };
+  ui.state.job = job; ui.state.jobReceivedAt = ui.now();
+  ui.displayJob(job);
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '약 2분~5분');
+  assert.match(ui.elements.get('catalogJobPhase').textContent, /검수 응답 대기 00:05/);
+  ui.advance(60000); ui.displayJob(job);
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '검수 응답 지연');
+  assert.match(ui.elements.get('catalogJobPhase').textContent, /검수 응답 대기 01:05/);
+  assert.equal(ui.elements.get('catalogJobEta').classList.contains('catalog-eta-stale'), true);
+  assert.equal(ui.elements.get('catalogJobPercent').textContent, '70%', 'waiting never advances durable progress');
+});
+
 test('queue failures retain prior rows and a successful reconnect clears the transport message', async () => {
   let failed = true;
   const ui = boot(async () => failed ? { status: 503, body: { error: '합성 연결 실패' } } : snapshot([file('보관된 영상.mp4')]));

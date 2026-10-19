@@ -93,6 +93,31 @@ test('private address validation rejects public and malformed addresses', async 
   await assert.rejects(resolveRemoteUrl('http://8.8.8.8'));
 });
 
+test('local provider deadlines and observed transport signals survive LAN journals and owned restart without another request', async t => {
+  let calls = 0;
+  const detail = { code: 'PROVIDER_TIMEOUT', executionSource: 'local-deadline', executionElapsedMs: 900028,
+    executionDeadlineMs: 900000, providerHttpStatus: 503, providerReconnectAttempt: 3, providerReconnectLimit: 5,
+    providerErrorType: 'unavailable', stage: 'translation_review', completedCues: 240, totalCues: 390 };
+  const f = await fixture(t, async ({ record }) => {
+    calls++;
+    return { ...record, status: 'partial', subtitleError: '합성 도구 제한 초과', subtitleDiagnostic: {
+      ...detail, stderr: 'PRIVATE_STDERR', prompt: 'PRIVATE_PROMPT', connectionCode: 'PRIVATE_CODE' } };
+  });
+  const accepted = await (await f.submit()).json(), done = await finished(f, accepted.id);
+  const verify = diagnostic => { for (const [key, value] of Object.entries(detail)) assert.equal(diagnostic[key], value); };
+  verify(done.result.subtitleDiagnostic);
+  const terminal = JSON.parse(await fs.readFile(path.join(f.dataDir, 'remote', 'jobs', accepted.id, 'terminal.json'), 'utf8'));
+  verify(terminal.result.subtitleDiagnostic);
+  assert.doesNotMatch(JSON.stringify(terminal), /PRIVATE_/);
+  await f.service.stop();
+  const restored = createLanAnalysis({ dataDir: f.dataDir, processPackage: async () => { calls++; throw new Error('No replay'); } });
+  const status = await restored.start({ port: 0, host: '127.0.0.1' });
+  try {
+    const r = await httpFixtureResponse(`http://127.0.0.1:${status.port}/v1/jobs/${accepted.id}`, { headers: { Authorization: 'Bearer ' + status.connectionCode } });
+    verify((await r.json()).result.subtitleDiagnostic); assert.equal(calls, 1);
+  } finally { await restored.stop(); }
+});
+
 test('metadata rejects injected paths, options, frame traversal and invalid transcript', () => {
   assert.equal(validateMetadata(metadata()).frames.length, 1);
   for (const changes of [{ path: 'C:/secret' }, { apiKey: 'secret' }, { model: 'x' }, { name: '../video.mp4' }, { duration: NaN }, { frames: [] },

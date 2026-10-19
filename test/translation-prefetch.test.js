@@ -332,7 +332,7 @@ test('current review service failure cancels the next draft and preserves the fi
     await f.assertDrained();
 });
 
-test('one local review-length correction cancels lookahead and preserves the existing bounded small-group repair', async t => {
+test('local review-length correction drains lookahead before bounded source-review repair without repeating drafts', async t => {
     let firstPrefetch = true;
     const f = await fixture(t, { handler: async call => {
         if (call.start === 160 && !call.review && firstPrefetch) {
@@ -345,8 +345,9 @@ test('one local review-length correction cancels lookahead and preserves the exi
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
-    assert.equal(f.calls.filter(call => call.start >= 80 && call.start < 160 && call.count === 20).length, 8);
-    assert.ok(f.calls.length <= 21); assert.equal(f.peakReviews, 1);
+    assert.equal(f.calls.filter(call => call.start >= 80 && call.start < 160 && call.count === 20).length, 4);
+    assert.ok(f.calls.filter(call => call.start >= 80 && call.start < 160 && call.count === 20).every(call => call.review));
+    assert.ok(f.calls.length <= 17); assert.equal(f.peakReviews, 1);
     assert.equal(f.events.some(event => event.code === 'ANALYSIS_CANCELLED'), false, 'discarded speculative work is not reported as an analysis failure');
     await f.assertDrained();
 });

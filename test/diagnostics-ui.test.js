@@ -245,3 +245,16 @@ test('refusal diagnostics distinguish recorded detection sources and never infer
   assert.ok(rows.filter(row => textOf(row).includes('판정 근거: 미기록')).length >= 3);
   assert.ok(ui.calls.every(call => !call.options?.method || call.options.method === 'GET'));
 });
+
+test('execution diagnostics display the local deadline and observed signals without printing untrusted output', async () => {
+  const ui = await boot({ response: result([event('01', { code: 'PROVIDER_TIMEOUT', executionSource: 'local-deadline',
+    executionElapsedMs: 900028, executionDeadlineMs: 900000, providerHttpStatus: 503,
+    providerReconnectAttempt: 2, providerReconnectLimit: 5, stderr: 'PRIVATE_STDERR', providerErrorType: 'PRIVATE_TYPE' }),
+  event('02', { executionSource: 'PRIVATE_SOURCE', executionElapsedMs: -1, providerHttpStatus: 999,
+    providerReconnectAttempt: 999999, providerSystemCode: 'PRIVATE_CODE' })]) });
+  await ui.open(true);
+  const text = textOf(ui.elements.get('diagnosticsRows'));
+  assert.match(text, /도구 대기 제한 초과.*대기 900초.*제한 900초/);
+  assert.match(text, /대기 중 관측한 기술 신호: HTTP 503 · 도구 재연결 2\/5/);
+  assert.doesNotMatch(text, /PRIVATE_|999|대기 -1/);
+});
