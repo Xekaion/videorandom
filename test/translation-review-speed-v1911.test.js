@@ -97,7 +97,7 @@ for (const count of [80, 160, 320]) test(`sparse review explicitly approves ever
         } else assert(call.schema.properties.subtitles, 'the initial translation remains a complete normal draft');
     }
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 7); assert.equal(TRANSLATION_PROMPT_VERSION, 7);
+    assert.equal(saved.translationVersion, 8); assert.equal(TRANSLATION_PROMPT_VERSION, 8);
     assert.equal(saved.reviewPasses, 2); assert.equal(saved.completedCues, count);
     await f.drained();
 });
@@ -183,35 +183,36 @@ test('empty sparse approval and correction arrays cannot certify an unchecked ba
     await f.drained();
 });
 
-test('explicit sparse approval cannot bypass the existing short-text check or repeated-short correction limit', async t => {
+test('explicit sparse review can approve a short Korean draft after independently checking the full source', async t => {
     const f = await fixture(t, { handler: call => {
         const result = answer(call);
         if (!call.review) result.subtitles.find(cue => cue.index === 20).text = '네.';
-        return result;
-    } });
-    const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'partial');
-    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
-    assert.equal(f.calls.length, 3);
-    assert.deepEqual(f.calls.at(-1).indexes, [20]);
-    assert.deepEqual(f.calls[1].input.omissionCheckIndexes, [20]);
-    assert.equal(result.subtitleTranslationPartial.length, 79);
-    assert.equal(result.subtitleTranslationProgress.version, 2);
-    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 20));
-    assert(result.subtitleTranslationPartial.every(cue => unwrapped(cue.text) === koreanText));
-    await f.drained();
-});
-
-test('a sparse targeted correction can fix a short approved draft without changing the other cues', async t => {
-    const f = await fixture(t, { handler: call => {
-        const result = answer(call);
-        if (!call.review) result.subtitles.find(cue => cue.index === 20).text = '네.';
-        if (call.review && call.count === 1) return { approvedIndexes: [], corrections: [{ index: 20, text: koreanText }], terms: [] };
         return result;
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
-    assert.equal(f.calls.length, 3);
+    assert.equal(f.calls.length, 2, 'a length difference alone does not trigger another provider request');
+    assert.deepEqual(f.calls[1].input.omissionCheckIndexes, [20]);
+    assert.equal(f.calls[1].input.subtitles.find(cue => cue.index === 20).text, sourceText);
+    assert.equal(f.calls[1].input.draftSubtitles.find(cue => cue.index === 20).text, '네.');
+    assert.equal(result.subtitleTranslation.length, 80);
+    assert.equal(unwrapped(result.subtitleTranslation[20].text), '네.');
+    assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), f.transcript.map(cue => [cue.id, cue.start, cue.end]));
+    assert(f.diagnostics.some(event => event.code === 'SUBTITLE_LENGTH_REVIEW' && event.level === 'warning'));
+    await f.drained();
+});
+
+test('an independent sparse review can replace a short draft without requesting an extra correction', async t => {
+    const f = await fixture(t, { handler: call => {
+        const result = answer(call);
+        if (!call.review) result.subtitles.find(cue => cue.index === 20).text = '네.';
+        if (call.review) return { approvedIndexes: call.indexes.filter(index => index !== 20),
+            corrections: [{ index: 20, text: koreanText }], terms: [] };
+        return result;
+    } });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.equal(f.calls.length, 2);
     assert(result.subtitleTranslation.every(cue => unwrapped(cue.text) === koreanText));
     await f.drained();
 });
@@ -308,7 +309,7 @@ test('parent cancellation during sparse review kills and drains its child before
     await f.drained();
 });
 
-test('an exact v6 fully reviewed checkpoint migrates to v7 without any new translation or review request', async t => {
+test('an exact v6 fully reviewed checkpoint migrates to v8 without any new translation or review request', async t => {
     const f = await fixture(t);
     const sourceFingerprint = crypto.createHash('sha256').update(JSON.stringify(f.transcript.map(cue => [cue.id, cue.start, cue.end, cue.text]))).digest('hex');
     const saved = { version: 1, translationVersion: 6, targetLanguage: 'ko', subtitleQuality: 'accurate', reviewPasses: 2,
@@ -325,6 +326,6 @@ test('an exact v6 fully reviewed checkpoint migrates to v7 without any new trans
     assert.equal(result.subtitleTranslation.length, 80);
     assert(result.subtitleTranslation.every(cue => unwrapped(cue.text) === koreanText));
     const migrated = JSON.parse(await fs.readFile(path.join(checkpointDir, f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(migrated.translationVersion, 7); assert.equal(migrated.reviewPasses, 2); assert.equal(migrated.completedCues, 80);
+    assert.equal(migrated.translationVersion, 8); assert.equal(migrated.reviewPasses, 2); assert.equal(migrated.completedCues, 80);
     await f.drained();
 });

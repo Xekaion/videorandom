@@ -1340,7 +1340,7 @@ test('multi-batch translation retains identical checkpoint bytes while hashing i
         const instance = createNoKeyProvider({ spawnImpl: f.mocked.spawnImpl,
             environment: { VIDEORANDOM_CODEX: 'mock-codex', VIDEORANDOM_PYTHON: 'mock-python' }, platform: 'win32',
             checkpointIO: { ...fs.promises, async writeFile(filename, contents, ...args) {
-                if (/-ko\.json\.|-translation-ko-v7\.json\./.test(filename)) written.push(contents);
+                if (new RegExp(`-ko\\.json\\.|-translation-ko-v${TRANSLATION_PROMPT_VERSION}\\.json\\.`).test(filename)) written.push(contents);
                 return fs.promises.writeFile(filename, contents, ...args);
             } } });
         const result = await instance.translateKoreanOnly(f.record, { dataDir: f.dataDir, subtitleQuality: 'fast' });
@@ -1370,14 +1370,14 @@ test('a short accurate draft reaches source review and only its corrected final 
     assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(saved.subtitles[0].text.includes('네.'), false);
 });
 
-test('fast translation isolates a still-short result after one correction without claiming an independent review', async t => {
+test('fast translation retains a concise Korean result without claiming an independent review or correcting length', async t => {
     const f = await translationGuardFixture(t, { respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index, text: '네.' })), terms: [] }) });
     const result = await f.run({ subtitleQuality: 'fast' });
-    assert.equal(f.requests.length, 2); assert.equal(result.subtitleRepairStatus, 'partial');
+    assert.equal(f.requests.length, 1); assert.equal(result.subtitleRepairStatus, 'completed');
     assert(f.requests.every(item => !item.review));
-    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
-    assert.equal(result.subtitleTranslationProgress.completedCues, 0);
-    assert.equal(result.subtitleTranslation, undefined);
+    assert.equal(result.subtitleDiagnostic, undefined);
+    assert.equal(result.subtitleTranslationProgress.completedCues, 1);
+    assert.equal(result.subtitleTranslation[0].text, '네.');
 });
 
 test('faithful numeric compression and full-width digits count as translation content in both profiles and checkpoints', async t => {
@@ -1417,10 +1417,10 @@ test('a genuinely conflicting proper-name mapping stops the new draft before rev
     assert.equal(result.subtitleTranslationPartial.length, 80);
 });
 
-test('one final-review length failure corrects at most four reviewed groups without repeating the already valid draft', async t => {
+test('one final-review missing subset corrects at most four reviewed groups without repeating the already valid draft', async t => {
     const progress = [];
-    const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
-        text: item.review && item.count > 20 ? '네.' : faithfulKorean })), terms: [] }) });
+    const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles:
+        item.review && item.count > 20 ? [] : item.input.subtitles.map(cue => ({ index: cue.index, text: faithfulKorean })), terms: [] }) });
     const result = await f.run({ onProgress: stage => progress.push(stage) });
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.equal(f.requests.length, 6, 'one original draft/review plus four bounded source-review correction calls');
@@ -1431,9 +1431,9 @@ test('one final-review length failure corrects at most four reviewed groups with
     assert.deepEqual(result.transcript, f.source);
 });
 
-test('a later batch can correct its own short reviewed cues within the shared operation request bound', async t => {
-    const f = await translationGuardFixture(t, { count: 160, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
-        text: item.review && item.count > 20 ? '네.' : faithfulKorean })), terms: [] }) });
+test('a later batch can correct its own missing reviewed cues within the shared operation request bound', async t => {
+    const f = await translationGuardFixture(t, { count: 160, respond: item => ({ subtitles:
+        item.review && item.count > 20 ? [] : item.input.subtitles.map(cue => ({ index: cue.index, text: faithfulKorean })), terms: [] }) });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.equal(f.requests.length, 12); assert.equal(result.subtitleTranslation.length, 160);
@@ -1441,13 +1441,13 @@ test('a later batch can correct its own short reviewed cues within the shared op
     assert.equal(result.subtitleTranslationProgress.translationComplete, true);
 });
 
-test('a still-short correction group stays unapproved while subsequent reviewed groups are preserved without recursion', async t => {
-    const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
-        text: item.review && (item.count > 20 || item.start === 20) ? '네.' : faithfulKorean })), terms: [] }) });
+test('a still-missing correction group stays unapproved while subsequent reviewed groups are preserved without recursion', async t => {
+    const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles:
+        item.review && (item.count > 20 || item.start >= 20 && item.start < 40) ? [] : item.input.subtitles.map(cue => ({ index: cue.index, text: faithfulKorean })), terms: [] }) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(f.requests.length, 6);
+    assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(f.requests.length, 26);
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
-    assert.deepEqual(f.requests.slice(2).map(item => [item.start, item.count]), [[0, 20], [20, 20], [40, 20], [60, 20]]);
+    assert.deepEqual(f.requests.slice(2).filter(item => item.count === 20).map(item => [item.start, item.count]), [[0, 20], [20, 20], [40, 20], [60, 20]]);
     assert.equal(result.subtitleTranslationPartial.length, 60);
     assert.ok(result.subtitleTranslationPartial.every(cue => cue.text.replace(/\n/g, ' ') === faithfulKorean));
     const saved = JSON.parse(await fs.promises.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
@@ -1555,6 +1555,17 @@ test('an exact fully reviewed 160-cue version-three prefix migrates to version s
     assert.deepEqual(saved.terms, [{ source: '太郎', translation: '타로' }]);
 });
 
+test('a fully reviewed compatible legacy checkpoint retains concise Korean instead of retranslating solely for length', async t => {
+    const f = await translationGuardFixture(t, { count: 81 });
+    await seedVersionThreePrefix(f, saved => { saved.subtitles[0].text = '네.'; });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.deepEqual(f.requests.map(item => item.start), [80, 80]);
+    assert.equal(result.subtitleTranslation[0].text, '네.');
+    assert.equal(result.subtitleTranslationProgress.completedCues, 81);
+    assert(result.warnings.some(warning => warning.includes('길이 차이') && warning.includes('보관')));
+});
+
 for (const [label, change] of [
     ['older version two', saved => { saved.translationVersion = 2; }],
     ['older version one', saved => { saved.translationVersion = 1; }],
@@ -1564,8 +1575,7 @@ for (const [label, change] of [
     ['different cue ID', saved => { saved.subtitles[0].id = 'changed'; }],
     ['different cue time', saved => { saved.subtitles[0].start = 0.75; }],
     ['different source fingerprint', saved => { saved.sourceFingerprint = '0'.repeat(64); }],
-    ['untranslated prefix', saved => { saved.subtitles[0].text = 'これは翻訳されていません。'; }],
-    ['unverified short prefix', saved => { saved.subtitles[0].text = '네.'; }]
+    ['untranslated prefix', saved => { saved.subtitles[0].text = 'これは翻訳されていません。'; }]
 ]) test(`version-three migration rejects an incompatible checkpoint: ${label}`, async t => {
     const f = await translationGuardFixture(t, { count: 81 }); await seedVersionThreePrefix(f, change);
     const result = await f.run();

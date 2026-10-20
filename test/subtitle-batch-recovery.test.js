@@ -186,18 +186,19 @@ for (const phase of ['draft', 'review']) test(`a deficient ${phase} supplement p
   }
 });
 
-test('a semantically short review supplement stops after three calls instead of entering the old length-repair path', async t => {
+test('a concise review supplement is retained after the three missing-only calls', async t => {
   const f = await fixture(t, { respond: item => {
     if (item.review && item.count === 80) return responseFor(item.input.subtitles.slice(0, 79));
     if (item.review && item.count === 1) return responseFor(item.input.subtitles, { subtitles: [{ index: item.input.subtitles[0].index, text: '네.' }] });
   } });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, 'partial');
-  assert.equal(f.requests.length, 3, 'a failed supplement cannot trigger a whole-batch semantic retry');
-  assert.equal(result.subtitleTranslationPartial?.length || 0, 79, 'the valid reviewed prefix survives the failed last-cue correction');
+  assert.equal(result.subtitleRepairStatus, 'completed');
+  assert.equal(f.requests.length, 3, 'a concise supplement cannot trigger a whole-batch length retry');
+  assert.equal(result.subtitleTranslation.length, 80);
+  assert.equal(result.subtitleTranslation.at(-1).text, '네.');
 });
 
-for (const phase of ['draft', 'review']) test(`a ${phase} subset with a semantically short row receives one bounded correction without accepting a short final cue`, async t => {
+for (const phase of ['draft', 'review']) test(`a ${phase} subset with a concise row receives only a missing-index correction`, async t => {
   const f = await fixture(t, { respond: item => {
     if (item.review === (phase === 'review')) {
       const response = responseFor(item.input.subtitles.slice(0, 79));
@@ -212,13 +213,15 @@ for (const phase of ['draft', 'review']) test(`a ${phase} subset with a semantic
     assert.deepEqual(f.requests.map(item => [item.start, item.count, item.review]), [[0, 80, false], [79, 1, false], [0, 80, true]]);
     assert.deepEqual(f.requests[2].input.omissionCheckIndexes, [0, 79], 'both short draft cues still require source review');
   } else {
-    assert.equal(result.subtitleRepairStatus, 'partial');
-    assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_CUES_PENDING');
-    assert.deepEqual(f.requests[2].input.subtitles.map(cue => cue.index), [0, 79], 'only the short and missing reviewed cues are requested again');
-    assert.equal(result.subtitleTranslationPartial.length, 79, 'the short first cue is excluded while every later strictly reviewed cue survives');
-    assert.equal(result.subtitleTranslationProgress.version, 2);
-    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, Array.from({ length: 79 }, (_, index) => index + 1));
-    assert(result.subtitleTranslationPartial.every(cue => cue.text.replace(/\s+/g, ' ').trim() === KOREAN));
+    assert.equal(result.subtitleRepairStatus, 'completed');
+    assert.equal(result.subtitleDiagnostic, undefined);
+    assert.deepEqual(f.requests[2].input.subtitles.map(cue => cue.index), [79], 'only the missing reviewed cue is requested again');
+    assert.equal(result.subtitleTranslation.length, 80);
+    assert.equal(result.subtitleTranslation[0].text, '네.');
+    assert.equal(result.subtitleTranslation[79].text, '네.');
+    assert.equal(result.subtitleTranslationProgress.version, 1);
+    assert.equal(result.subtitleTranslationProgress.complete, true);
+    assert(result.subtitleTranslation.slice(1, 79).every(cue => cue.text.replace(/\s+/g, ' ').trim() === KOREAN));
   }
 });
 

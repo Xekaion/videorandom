@@ -66,27 +66,25 @@ async function fixture(t, { count = 80, handler, environment = {} } = {}) {
     return { dataDir, transcript, record, calls, commits, checkpoints, diagnostics, progress, controller, run, drained };
 }
 
-test('separate batches and a final seventeen-cue batch correct only their short reviewed cue once', async t => {
-    const corrected = new Set(), flagged = new Set([12, 109, 176]);
+test('separate batches and a final seventeen-cue batch keep explicitly reviewed concise cues without extra requests', async t => {
+    const flagged = new Set([12, 109, 176]);
     const f = await fixture(t, { count: 177, handler: call => {
         const result = answer(call);
         if (call.review && call.count > 1) for (const cue of result.subtitles) if (flagged.has(cue.index)) cue.text = '네.';
-        if (call.review && call.count === 1) { assert(flagged.has(call.start)); assert(!corrected.has(call.start)); corrected.add(call.start); }
         return result;
     } });
     const original = structuredClone(f.transcript);
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
-    assert.equal(f.calls.length, 9, 'six ordinary calls plus three one-cue reviews, with no repeated whole draft');
-    assert.deepEqual([...corrected], [...flagged]);
+    assert.equal(f.calls.length, 6, 'only six ordinary draft/review calls; length alone requires no correction');
     assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), original.map(cue => [cue.id, cue.start, cue.end]));
-    assert(result.subtitleTranslation.every(cue => cue.text.replace(/\n/g, ' ') === translatedText));
+    assert(result.subtitleTranslation.every((cue, index) => cue.text.replace(/\n/g, ' ') === (flagged.has(index) ? '네.' : translatedText)));
     assert.deepEqual(f.transcript, original);
     assert.equal(result.subtitleTranslation.length, 177, 'prefix checkpointing never duplicates a retained cue');
     await f.drained();
 });
 
-test('mixed missing and short cues repair only the defective indexes while accurate drafts still receive full review', async t => {
+test('mixed missing and short cues repair only missing indexes while concise accurate drafts still receive full review', async t => {
     const f = await fixture(t, { handler: call => {
         const result = answer(call);
         if (!call.review && call.count === 80) { result.subtitles = result.subtitles.filter(cue => cue.index !== 70); result.subtitles[10].text = '네.'; }
@@ -96,19 +94,19 @@ test('mixed missing and short cues repair only the defective indexes while accur
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.deepEqual(f.calls.map(call => [call.review, call.indexes]), [[false, Array.from({ length: 80 }, (_, i) => i)],
-        [false, [70]], [true, Array.from({ length: 80 }, (_, i) => i)], [true, [20, 72]]]);
+        [false, [70]], [true, Array.from({ length: 80 }, (_, i) => i)], [true, [72]]]);
     assert.deepEqual(f.calls[2].input.omissionCheckIndexes, [10], 'the short draft goes through normal source review');
     assert.equal(result.subtitleTranslation.length, 80);
-    const confirmed = Array.from({ length: 80 }, (_, index) => index).filter(index => ![20, 72].includes(index));
-    const beforeCorrection = f.checkpoints.find(value => value.progress?.completedCues === 78);
-    assert.deepEqual(beforeCorrection?.progress.cueIndexes, confirmed, 'the exact reviewed set is durable before correction without accepting either defective cue');
+    const confirmed = Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 72);
+    const beforeCorrection = f.checkpoints.find(value => value.progress?.completedCues === 79);
+    assert.deepEqual(beforeCorrection?.progress.cueIndexes, confirmed, 'the exact reviewed set including its concise cue is durable before missing-only correction');
     assert.deepEqual(beforeCorrection.cues.map(cue => [cue.id, cue.start, cue.end]),
         confirmed.map(index => f.transcript[index]).map(cue => [cue.id, cue.start, cue.end]));
-    assert(beforeCorrection.cues.every(cue => cue.text.replace(/\n/g, ' ') === translatedText));
+    assert(beforeCorrection.cues.every((cue, offset) => cue.text.replace(/\n/g, ' ') === (confirmed[offset] === 20 ? '네.' : translatedText)));
     await f.drained();
 });
 
-test('a last single-cue review receives one targeted correction without a minimum-batch loophole', async t => {
+test('a last single-cue concise review is retained without a minimum-batch exception', async t => {
     const f = await fixture(t, { count: 1, handler: (call, state) => {
         const result = answer(call);
         if (call.review && state.calls.length === 2) result.subtitles[0].text = '네.';
@@ -116,15 +114,16 @@ test('a last single-cue review receives one targeted correction without a minimu
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
-    assert.deepEqual(f.calls.map(call => call.review), [false, true, true]);
+    assert.deepEqual(f.calls.map(call => call.review), [false, true]);
+    assert.equal(result.subtitleTranslation[0].text, '네.');
     await f.drained();
 });
 
-test('a still-short targeted review isolates its cue and retains every other strict cue for missing-only resume', async t => {
+test('a still-missing targeted review isolates its cue and retains every other strict cue for missing-only resume', async t => {
     let failing = true;
     const f = await fixture(t, { count: 160, handler: call => {
         const result = answer(call);
-        if (failing && call.review && call.indexes.includes(100)) result.subtitles.find(cue => cue.index === 100).text = '네.';
+        if (failing && call.review && call.indexes.includes(100)) result.subtitles = result.subtitles.filter(cue => cue.index !== 100);
         return result;
     } });
     const failed = await f.run();
@@ -169,14 +168,16 @@ test('a correction cannot change a confirmed proper name after a strict prefix c
     const f = await fixture(t, { handler: call => {
         const result = answer(call);
         result.terms = [{ source: '太郎', translation: call.count === 1 ? '다로' : '타로' }];
-        if (call.review && call.count === 80) result.subtitles[20].text = '네.';
+        if (call.review && call.count === 80) result.subtitles = result.subtitles.filter(cue => cue.index !== 20);
         return result;
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'failed');
     assert.match(result.subtitleError, /표기가 앞 구간과 일치하지 않습니다/);
     assert.equal(f.calls.length, 3);
-    assert.equal(result.subtitleTranslationPartial.length, 20);
+    assert.equal(result.subtitleTranslationPartial.length, 79);
+    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes,
+        Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 20));
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
     assert.deepEqual(saved.terms, [{ source: '太郎', translation: '타로' }]);
     await f.drained();
@@ -185,12 +186,14 @@ test('a correction cannot change a confirmed proper name after a strict prefix c
 test('parent cancellation during targeted correction drains the child and keeps the durable reviewed prefix', async t => {
     const f = await fixture(t, { count: 160, handler: (call, state) => {
         const result = answer(call);
-        if (call.review && call.start === 80) result.subtitles.find(cue => cue.index === 100).text = '네.';
+        if (call.review && call.start === 80) result.subtitles = result.subtitles.filter(cue => cue.index !== 100);
         if (call.review && call.start === 100) state.controller.abort();
         return result;
     } });
     await assert.rejects(f.run(), { name: 'AbortError' });
-    assert.equal(f.record.subtitleTranslationPartial.length, 100);
+    assert.equal(f.record.subtitleTranslationPartial.length, 159);
+    assert.deepEqual(f.record.subtitleTranslationProgress.cueIndexes,
+        Array.from({ length: 160 }, (_, index) => index).filter(index => index !== 100));
     assert.equal(f.calls.length, 5);
     assert.equal(f.calls.at(-1).killed, true);
     await f.drained();
@@ -200,7 +203,7 @@ for (const failure of ['response refusal', 'quota usage limit', '401 authenticat
     test(`a targeted correction ${failure} stops immediately, preserves the checked prefix and never reissues a request`, async t => {
         const f = await fixture(t, { count: 160, handler: call => {
             const result = answer(call);
-            if (call.review && call.start === 80) result.subtitles.find(cue => cue.index === 100).text = '네.';
+            if (call.review && call.start === 80) result.subtitles = result.subtitles.filter(cue => cue.index !== 100);
             if (call.review && call.start === 100) {
                 if (failure === 'response refusal') return { refusal: true };
                 throw new Error(`Owned synthetic ${failure}`);
@@ -211,7 +214,9 @@ for (const failure of ['response refusal', 'quota usage limit', '401 authenticat
         assert.equal(result.subtitleRepairStatus, 'failed');
         assert.equal(f.calls.length, 5);
         assert.equal(f.calls.filter(call => call.start === 100).length, 1);
-        assert.equal(result.subtitleTranslationPartial.length, 100);
+        assert.equal(result.subtitleTranslationPartial.length, 159);
+        assert.deepEqual(result.subtitleTranslationProgress.cueIndexes,
+            Array.from({ length: 160 }, (_, index) => index).filter(index => index !== 100));
         if (failure === 'response refusal') {
             assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_PROVIDER_REFUSAL');
             assert.equal(result.subtitleDiagnostic.refusalSource, 'response-field');
@@ -220,11 +225,11 @@ for (const failure of ['response refusal', 'quota usage limit', '401 authenticat
     });
 }
 
-test('missing and short corrections use exactly sixty-four requests while later strict tail cues remain durable', async t => {
+test('missing corrections use exactly sixty-four requests while later strict tail cues remain durable', async t => {
     const f = await fixture(t, { count: 1360, handler: call => {
         const result = answer(call);
         if (!call.review && call.start === 0 && call.count === 80) result.subtitles.pop();
-        if (call.review && call.count === 80) for (const cue of result.subtitles) if (cue.index !== 1359) cue.text = '네.';
+        if (call.review && call.count === 80) result.subtitles = result.subtitles.filter(cue => cue.index === 1359);
         return result;
     } });
     const result = await f.run();
@@ -255,7 +260,7 @@ test('missing and short corrections use exactly sixty-four requests while later 
 test('translation progress exposes real draft, review and repair waits and clears every finished request', async t => {
     const f = await fixture(t, { count: 1, handler: (call, state) => {
         const result = answer(call);
-        if (call.review && state.calls.length === 2) result.subtitles[0].text = '네.';
+        if (call.review && state.calls.length === 2) result.subtitles = [];
         return result;
     } });
     const result = await f.run();

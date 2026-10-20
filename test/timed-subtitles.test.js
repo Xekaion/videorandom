@@ -374,7 +374,7 @@ test('a full analysis clears an older failed repair marker before returning a ne
   assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, 2);
 });
 
-test('new chunk name drift keeps the previous validated prefix and excessively compressed cues are rejected', async t => {
+test('new chunk name drift keeps the validated prefix while concise valid cues are retained with an advisory', async t => {
   const transcript = Array.from({ length: 85 }, (_, index) => ({ start: index * 10, end: index * 10 + 3, text: `太郎は言いました ${index}` }));
   const { dataDir, record } = await fixture(t, { transcript });
   let batch = 0;
@@ -390,12 +390,14 @@ test('new chunk name drift keeps the previous validated prefix and excessively c
   assert.match(partial.subtitleError, /표기가 앞 구간과 일치하지 않/);
   const shortFixture = await fixture(t, { transcript: [{ start: 1, end: 9, text: '明日の会議では現在の計画について最初から最後まで詳しく説明し質問にも一つずつ順番に答える予定です。' }] });
   const short = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '네.' }], terms: [] } : summary());
-  const rejected = await short.provider.analyzeExtracted(shortFixture.record, { dataDir: shortFixture.dataDir, subtitleLanguage: 'ko' });
-  assert.equal(rejected.subtitleLanguage, undefined);
-  assert.equal(rejected.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
-  assert.equal(rejected.subtitleError, null);
-  assert.equal(rejected.subtitleTranslationProgress.processingComplete, true);
-  assert.equal(short.calls.filter(call => call.schema?.properties.subtitles).length, 2);
+  const retained = await short.provider.analyzeExtracted(shortFixture.record, { dataDir: shortFixture.dataDir, subtitleLanguage: 'ko' });
+  assert.equal(retained.subtitleLanguage, 'ko');
+  assert.equal(retained.subtitleDiagnostic, undefined);
+  assert.equal(retained.subtitleError, null);
+  assert.equal(retained.subtitleTranslationProgress.translationComplete, true);
+  assert.deepEqual(retained.subtitleTranslation.map(cue => [cue.start, cue.end, cue.text]), [[1, 9, '네.']]);
+  assert(retained.warnings.some(warning => warning.includes('길이 차이') && warning.includes('보관')));
+  assert.equal(short.calls.filter(call => call.schema?.properties.subtitles).length, 1, 'length alone never starts another request');
 });
 
 test('LAN transports language options and aligned Korean subtitle text without host paths', async t => {

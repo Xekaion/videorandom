@@ -27,8 +27,9 @@ async function fixture(t, { count = 160, bad = [20], profile = 'accurate', pipel
     const calls = [], commits = [], diagnostics = [], controller = new AbortController();
     let active = 0, peak = 0, fixed = false;
     const badIndexes = new Set(bad);
-    const normalResponse = call => call.review ? { approvedIndexes: call.indexes.slice(), corrections: [], terms: [] }
-        : { subtitles: call.indexes.map(index => ({ index, text: !fixed && badIndexes.has(index) ? '네.' : koreanText })), terms: [] };
+    const normalResponse = call => call.review
+        ? { approvedIndexes: call.indexes.filter(index => fixed || !badIndexes.has(index)), corrections: [], terms: [] }
+        : { subtitles: call.indexes.map(index => ({ index, text: koreanText })), terms: [] };
     const spawnImpl = (binary, args) => {
         assert.equal(binary, 'owned-synthetic-codex'); assert.equal(args[0], 'exec');
         const child = new EventEmitter(), chunks = [], cancelled = deferred();
@@ -84,7 +85,7 @@ function assertSparse(result, source, missing) {
 }
 
 for (const [count, bad] of [[80, [20]], [160, [20]], [1856, [1488, 1489]]]) {
-    test(`${count} accurate cues isolate ${bad.join(',')} after one correction and still translate the final cue`, async t => {
+    test(`${count} accurate cues isolate missing ${bad.join(',')} after bounded correction and still translate the final cue`, async t => {
         const f = await fixture(t, { count, bad });
         const original = structuredClone(f.transcript);
         const result = await f.run();
@@ -100,8 +101,10 @@ for (const [count, bad] of [[80, [20]], [160, [20]], [1856, [1488, 1489]]]) {
         assert.deepEqual(f.transcript, original);
         assert(f.calls.some(call => call.review && call.indexes.includes(count - 1)), 'later review reaches the actual final source cue');
         const corrections = f.calls.filter(call => call.review && call.count <= 20 && call.indexes.some(index => bad.includes(index)));
-        assert.equal(corrections.length, 1); assert.deepEqual(corrections[0].indexes, bad);
-        assert(f.diagnostics.some(event => event.code === 'SUBTITLE_REVIEW_TOO_SHORT' && event.level === 'warning'));
+        assert.equal(corrections.length, bad.length > 1 ? bad.length + 1 : 1);
+        assert.deepEqual(corrections[0].indexes, bad);
+        if (bad.length > 1) assert.deepEqual(corrections.slice(1).map(call => call.indexes), bad.map(index => [index]));
+        assert(f.diagnostics.some(event => event.code === 'SUBTITLE_CUE_COUNT_MISMATCH' && event.level === 'warning'));
         const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
         assert.equal(saved.version, 2); assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION);
         assert.equal(saved.subtitleQuality, 'accurate'); assert.equal(saved.reviewPasses, 2);
@@ -129,8 +132,12 @@ test('a sparse repair requests only the two missing global indexes and keeps sur
     await f.drained();
 });
 
-for (const profile of ['fast', 'turbo']) test(`${profile} single-pass translations isolate a repeatedly short cue after one same-source correction`, async t => {
-    const f = await fixture(t, { profile, count: 160 });
+for (const profile of ['fast', 'turbo']) test(`${profile} single-pass translations isolate a repeatedly foreign cue after one same-source correction`, async t => {
+    const f = await fixture(t, { profile, count: 160, handler: (call, state) => {
+        const result = state.normalResponse(call);
+        for (const cue of result.subtitles) if (cue.index === 20) cue.text = sourceText;
+        return result;
+    } });
     const result = await f.run(); assertSparse(result, f.transcript, [20]);
     assert(f.calls.every(call => !call.review), 'single-pass mode never pretends to have run an independent review');
     assert.deepEqual(f.calls.map(call => call.indexes.length), [80, 1, 80]);
@@ -259,7 +266,7 @@ test('sparse checkpoint identity, ordering and quality remain strict before miss
     }
 });
 
-test('a short final cue keeps the legacy contiguous progress format until it can be repaired', async t => {
+test('a missing final cue keeps the legacy contiguous progress format until it can be repaired', async t => {
     const f = await fixture(t, { count: 80, bad: [79] });
     const result = await f.run();
     assert.equal(result.subtitleTranslationProgress.version, 1);
@@ -301,7 +308,7 @@ async function splitSparseCheckpoints(f, { sharedTextConflict = false, termConfl
     const secondary = branch(sharedTextConflict ? [0, 5] : [1, 5], secondTerms);
     if (sharedTextConflict) secondary.subtitles[0].text = koreanText + ' 합성 안내를 확인합니다.';
     await fs.writeFile(recordFile, JSON.stringify(primary), 'utf8');
-    const indexFile = (await fs.readdir(directory)).find(name => /-translation-ko-v7\.json$/.test(name));
+    const indexFile = (await fs.readdir(directory)).find(name => name.endsWith(`-translation-ko-v${TRANSLATION_PROMPT_VERSION}.json`));
     assert(indexFile);
     await fs.writeFile(path.join(directory, indexFile), JSON.stringify(secondary), 'utf8');
     return { recordFile, indexFile: path.join(directory, indexFile), primary, secondary };

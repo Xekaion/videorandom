@@ -152,7 +152,7 @@ test('an exact reviewed version-five checkpoint migrates without any new generat
     saved.translationVersion = 5;
     await fs.promises.writeFile(filename, JSON.stringify(saved), 'utf8');
     for (const name of await fs.promises.readdir(directory)) {
-        if (/^[a-f0-9]{64}-translation-ko-v7\.json$/.test(name)) await fs.promises.rm(path.join(directory, name));
+        if (new RegExp(`^[a-f0-9]{64}-translation-ko-v${TRANSLATION_PROMPT_VERSION}\\.json$`).test(name)) await fs.promises.rm(path.join(directory, name));
     }
     f.calls.length = 0;
     const result = await f.run();
@@ -332,22 +332,21 @@ test('current review service failure cancels the next draft and preserves the fi
     await f.assertDrained();
 });
 
-test('local review-length correction drains lookahead before bounded source-review repair without repeating drafts', async t => {
-    let firstPrefetch = true;
+test('a reviewed Korean length difference preserves lookahead and does not repeat drafts or review requests', async t => {
     const f = await fixture(t, { handler: async call => {
-        if (call.start === 160 && !call.review && firstPrefetch) {
-            firstPrefetch = false;
-            await call.cancelled;
-        }
         const result = response(call);
         if (call.start === 80 && call.review && call.count === 80) result.subtitles.forEach(cue => { cue.text = '네.'; });
         return result;
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
-    assert.equal(f.calls.filter(call => call.start >= 80 && call.start < 160 && call.count === 20).length, 4);
-    assert.ok(f.calls.filter(call => call.start >= 80 && call.start < 160 && call.count === 20).every(call => call.review));
-    assert.ok(f.calls.length <= 17); assert.equal(f.peakReviews, 1);
+    assert.equal(f.calls.length, Math.ceil(f.transcript.length / 80) * 2, 'length alone adds no repair requests');
+    assert.equal(f.calls.filter(call => call.start === 160 && !call.review).length, 1);
+    assert.equal(f.calls.some(call => call.count === 20 || call.killed), false);
+    assert.equal(f.peakReviews, 1);
+    assert(result.subtitleTranslation.slice(80, 160).every(cue => cue.text === '네.'));
+    assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), f.transcript.map(cue => [cue.id, cue.start, cue.end]));
+    assert(f.events.some(event => event.code === 'SUBTITLE_LENGTH_REVIEW' && event.level === 'warning'));
     assert.equal(f.events.some(event => event.code === 'ANALYSIS_CANCELLED'), false, 'discarded speculative work is not reported as an analysis failure');
     await f.assertDrained();
 });
