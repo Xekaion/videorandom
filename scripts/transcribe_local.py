@@ -472,6 +472,10 @@ def very_quiet_stationary_noise(audio, start, end, sample_rate):
         squares += square
         frame_sum += square
         peak = max(peak, abs(value))
+        # Peak can only increase. One sample above the same final absolute
+        # limit already proves this is not near-silent stationary noise.
+        if peak > 10 ** (-55 / 20):
+            return False
         nonzero_count += value != 0
         if previous is not None:
             crossed += value * previous < 0
