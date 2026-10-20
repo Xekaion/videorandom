@@ -1822,7 +1822,7 @@ test('job progress labels source counters and estimates as the current phase onl
     phaseProgress: { phase: 'transcription', completedSeconds: 180, totalSeconds: 600, remainingSeconds: 210 } } });
   const text = ui.elements.get('catalogJobText').textContent;
   assert(text.includes('인식한 음성 03:00 / 10:00'));
-  assert(text.includes('음성 인식 예상 잔여 약 4분 · 이후 단계 별도'));
+  assert(text.includes('음성 인식 예상 잔여 약 3분 30초 · 이후 단계 별도'));
 });
 
 test('runtime settings remain actual through summary and reset for another file or job instead of using the selector', async () => {

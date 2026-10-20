@@ -45,7 +45,7 @@ function boot(handler = async () => snapshot()) {
     setTimeout: (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; }, clearTimeout: id => timers.delete(id),
     fetch: async (url, options = {}) => { calls.push({ url, ...options }); const result = await handler(url, options, calls.length);
       return { ok: result.status === undefined || result.status < 400, status: result.status || 200, json: async () => result.body || result }; },
-    videoCatalogSort: sort, videoAnalysisProgress: { normalizeSpeechMetadata: () => ({}), formatProgressDetails: () => '',
+    videoCatalogSort: sort, videoAnalysisProgress: { normalizeSpeechMetadata: () => ({}), formatProgressDetails: () => '', formatRemainingSeconds: progress.formatRemainingSeconds,
       progressPresentation: value => value?.presentation || { etaText: '현재 단계 예상 시간 측정 중', detailText: '', measuring: true } } };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
@@ -74,7 +74,7 @@ test('active dashboard separates whole-job percentage, phase ETA, elapsed and sa
   assert.equal(ui.elements.get('catalogJobPercent').textContent, '70%');
   assert.equal(ui.elements.get('catalogJobCount').textContent, '1 / 2개');
   assert.equal(ui.elements.get('catalogJobElapsed').textContent, '00:03:00');
-  assert.equal(ui.elements.get('catalogJobEta').textContent, '약 8분');
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '약 8분 00초');
   assert.match(ui.elements.get('catalogJobPhase').textContent, /160 \/ 1,819/);
   assert.match(ui.elements.get('catalogJobFile').textContent, /합성 기차/);
   assert.equal(ui.elements.get('catalogCancel').disabled, false);
@@ -210,7 +210,7 @@ test('snapshot age removes a numeric ETA and a failed status poll immediately sh
     phaseProgress: { phase: 'translation', completedCues: 160, totalCues: 1819, elapsedSeconds: 100, remainingSeconds: 480, sampleAgeSeconds: 0 } };
   ui.state.job = job; ui.state.jobReceivedAt = ui.now();
   ui.displayJob(job);
-  assert.equal(ui.elements.get('catalogJobEta').textContent, '약 8분');
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '약 8분 00초');
   ui.advance(121000); ui.displayJob(job);
   assert.equal(ui.elements.get('catalogJobEta').textContent, '진행 확인 중');
   assert.equal(ui.elements.get('catalogJobElapsed').textContent, '00:03:41');
@@ -222,7 +222,7 @@ test('snapshot age removes a numeric ETA and a failed status poll immediately sh
   assert.equal(ui.state.job.status, 'running', 'a connection error does not assert the worker has ended');
 });
 
-test('the dashboard shows measured ETA variation and a live delayed review wait', () => {
+test('the dashboard shows one seconds-resolution ETA and preserves a live delayed review wait', () => {
   const ui = boot();
   ui.sandbox.videoAnalysisProgress = progress;
   const job = { id: 'synthetic-request-wait', status: 'running', total: 1, completed: 0, percent: 70,
@@ -231,7 +231,8 @@ test('the dashboard shows measured ETA variation and a live delayed review wait'
       requestStage: 'translation_review', activeRequestCount: 2, requestElapsedSeconds: 5, requestExpectedSeconds: 10 } };
   ui.state.job = job; ui.state.jobReceivedAt = ui.now();
   ui.displayJob(job);
-  assert.equal(ui.elements.get('catalogJobEta').textContent, '약 2분~5분');
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '약 4분 00초');
+  assert.equal(ui.elements.get('catalogJobEta').textContent.includes('~'), false);
   assert.match(ui.elements.get('catalogJobPhase').textContent, /검수 응답 대기 00:05/);
   ui.advance(60000); ui.displayJob(job);
   assert.equal(ui.elements.get('catalogJobEta').textContent, '검수 응답 지연');

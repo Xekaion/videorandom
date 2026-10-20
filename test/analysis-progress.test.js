@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeProgressDetails, ageProgressDetails, formatProgressDetails, normalizeSpeechMetadata, formatSpeechMetadata } = require('../public/js/analysis-progress');
+const { normalizeProgressDetails, ageProgressDetails, formatProgressDetails, formatRemainingSeconds, normalizeSpeechMetadata, formatSpeechMetadata } = require('../public/js/analysis-progress');
 
 test('progress metadata allows only phase clocks and finite audio counters', () => {
   const normalized = normalizeProgressDetails({ phase: 'transcription', completedSeconds: 180, totalSeconds: 600,
@@ -21,7 +21,7 @@ test('phase estimates expire instead of promising an unchanged ETA while a windo
   assert.equal(fresh.sampleAgeSeconds, 110);
   assert.equal(fresh.elapsedSeconds, 100);
   assert.match(formatProgressDetails(fresh), /인식한 음성 03:00 \/ 10:00/);
-  assert.match(formatProgressDetails(fresh), /음성 인식 예상 잔여 약 4분 · 이후 단계 별도/);
+  assert.match(formatProgressDetails(fresh), /음성 인식 예상 잔여 약 3분 30초 · 이후 단계 별도/);
   const stale = ageProgressDetails(fresh, 11);
   assert.equal('remainingSeconds' in stale, false);
   assert.match(formatProgressDetails(stale), /예상 시간 측정 중/);
@@ -31,9 +31,32 @@ test('phase estimates expire instead of promising an unchanged ETA while a windo
 test('recovery is shown as its own audio workload and never as overall completion', () => {
   const text = formatProgressDetails({ phase: 'recovery', completedSeconds: 36, totalSeconds: 72, remainingSeconds: 18 });
   assert.match(text, /재검수 음성 00:36 \/ 01:12/);
-  assert.match(text, /재검수 예상 잔여 약 1분 · 이후 단계 별도/);
+  assert.match(text, /재검수 예상 잔여 약 18초 · 이후 단계 별도/);
   assert.equal(formatProgressDetails({ phase: 'completed', completedSeconds: 60, totalSeconds: 60 }), '');
   assert.equal(formatProgressDetails(undefined), '');
+});
+
+test('remaining time retains seconds across minute and hour boundaries without rounding a minute up', () => {
+  for (const [value, expected] of [[0, '0초'], [0.01, '1초'], [1, '1초'], [59, '59초'],
+    [59.01, '1분 00초'], [60, '1분 00초'], [60.01, '1분 01초'], [754, '12분 34초'],
+    [3599, '59분 59초'], [3599.1, '1시간 00분 00초'], [3600, '1시간 00분 00초'],
+    [3723, '1시간 02분 03초'], [360000, '100시간 00분 00초'],
+    [Number.MAX_SAFE_INTEGER, '2501999792983시간 36분 31초']]) {
+    assert.equal(formatRemainingSeconds(value), expected, `remaining seconds ${value}`);
+  }
+  for (const value of [undefined, null, '60', NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(formatRemainingSeconds(value), '', 'invalid input cannot appear as a usable ETA');
+  }
+});
+
+test('speech recognition and recovery use the same single seconds-resolution estimate and preserve stage scope', () => {
+  for (const phase of ['transcription', 'recovery']) {
+    const text = formatProgressDetails({ phase, completedSeconds: 60, totalSeconds: 7200,
+      remainingSeconds: 3722.2, remainingMinSeconds: 1000, remainingMaxSeconds: 8000 });
+    assert.match(text, /예상 잔여 약 1시간 02분 03초 · 이후 단계 별도/);
+    assert.equal(text.includes('~'), false);
+    assert.equal(text.includes('1000'), false);
+  }
 });
 
 test('actual runtime metadata survives progress normalization and aging without accepting paths or invented hardware', () => {

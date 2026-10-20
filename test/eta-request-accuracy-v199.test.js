@@ -159,11 +159,32 @@ test('request and range normalization forwards only bounded technical metadata',
   assert.equal(progressPresentation(overflow).stale, true);
 });
 
-test('a measured variability range is presented as an estimate for the current stage only', () => {
+test('a single seconds-resolution estimate is presented while variability metadata remains compatible', () => {
   const presentation = progressPresentation({ phase: 'translation', completedCues: 160, totalCues: 480,
     remainingSeconds: 240, remainingMinSeconds: 120, remainingMaxSeconds: 300 });
-  assert.equal(presentation.remainingText, '약 2분~5분');
-  assert.match(presentation.etaText, /현재 번역 단계 예상 잔여 약 2분~5분/);
+  assert.equal(presentation.remainingText, '약 4분 00초');
+  assert.match(presentation.etaText, /현재 번역 단계 예상 잔여 약 4분 00초/);
+  assert.equal(presentation.remainingMinSeconds, 120);
+  assert.equal(presentation.remainingMaxSeconds, 300);
+  assert.equal(presentation.etaText.includes('~'), false);
   assert.match(presentation.detailText, /이후 단계 별도/);
   assert.equal(presentation.currentStageOnly, true);
+});
+
+test('cue and summary estimates show fractional seconds rounded up and never an exact completion promise', () => {
+  for (const [phase, counters, label] of [
+    ['translation', { completedCues: 2, totalCues: 8 }, '번역'],
+    ['summary', { completedChunks: 2, totalChunks: 8 }, '구간 요약']
+  ]) {
+    const presentation = progressPresentation({ phase, ...counters, remainingSeconds: 65.1,
+      remainingMinSeconds: 1, remainingMaxSeconds: 7200 });
+    assert.equal(presentation.remainingText, '약 1분 06초');
+    assert.equal(presentation.etaText, `현재 ${label} 단계 예상 잔여 약 1분 06초`);
+    assert.match(presentation.detailText, /이후 단계 별도/);
+    assert.equal(presentation.measuring, false);
+    assert.equal(presentation.etaText.includes('~'), false);
+    const pending = progressPresentation({ phase, ...counters, remainingSeconds: 0 });
+    assert.equal(pending.remainingText, '약 1초', 'an unfinished stage does not present a zero-second completion');
+    assert.equal(pending.completed, 2, 'formatting never advances durable work');
+  }
 });

@@ -206,19 +206,18 @@
     return `${Math.floor(whole / 3600) ? `${Math.floor(whole / 3600)}:` : ''}${String(Math.floor(whole / 60) % 60).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`;
   }
 
-  function remainingText(value) {
-    if (value < 60) return `${Math.max(1, Math.ceil(value))}초`;
-    const minutes = Math.ceil(value / 60);
-    return minutes < 60 ? `${minutes}분`
-      : `${Math.floor(minutes / 60)}시간${minutes % 60 ? ` ${minutes % 60}분` : ''}`;
+  function formatRemainingSeconds(value) {
+    if (!seconds(value)) return '';
+    const whole = Math.ceil(value);
+    if (whole < 60) return `${whole}초`;
+    const minutes = Math.floor(whole / 60) % 60;
+    const remainder = String(whole % 60).padStart(2, '0');
+    return whole < 3600 ? `${minutes}분 ${remainder}초`
+      : `${Math.floor(whole / 3600)}시간 ${String(minutes).padStart(2, '0')}분 ${remainder}초`;
   }
 
   function estimateText(details) {
-    if (seconds(details.remainingMinSeconds) && seconds(details.remainingMaxSeconds)) {
-      const low = remainingText(details.remainingMinSeconds), high = remainingText(details.remainingMaxSeconds);
-      if (low !== high) return `약 ${low}~${high}`;
-    }
-    return `약 ${remainingText(details.remainingSeconds)}`;
+    return `약 ${formatRemainingSeconds(Math.max(1, details.remainingSeconds))}`;
   }
 
   function formatProgressDetails(value) {
@@ -235,7 +234,7 @@
     if (details.phase === 'transcription' || details.phase === 'recovery') {
       const phase = details.phase === 'recovery' ? '재검수' : '음성 인식';
       if (seconds(details.remainingSeconds) && (details.sampleAgeSeconds || 0) <= 120) {
-        parts.push(`${phase} 예상 잔여 약 ${Math.max(1, Math.ceil(details.remainingSeconds / 60))}분 · 이후 단계 별도`);
+        parts.push(`${phase} 예상 잔여 ${estimateText(details)} · 이후 단계 별도`);
       } else if (!details.totalSeconds || details.completedSeconds < details.totalSeconds) {
         parts.push(`${phase} 예상 시간 측정 중`);
       }
@@ -281,6 +280,6 @@
     return result;
   }
 
-  return { normalizeProgressDetails, ageProgressDetails, formatProgressDetails, normalizeSpeechMetadata, formatSpeechMetadata,
+  return { normalizeProgressDetails, ageProgressDetails, formatProgressDetails, formatRemainingSeconds, normalizeSpeechMetadata, formatSpeechMetadata,
     createUnitProgress, progressPresentation };
 });

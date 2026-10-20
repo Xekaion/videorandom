@@ -1833,10 +1833,8 @@
     $('catalogJobCount').textContent = `${completed.toLocaleString()} / ${total.toLocaleString()}개`;
     $('catalogJobEtaLabel').textContent = active ? '현재 단계 예상 잔여' : '작업 상태';
     const remaining = presentation?.remainingSeconds;
-    const roundedMinutes = Number.isFinite(remaining) ? Math.ceil(remaining / 60) : 0;
-    const remainingLabel = Number.isFinite(remaining) ? remaining >= 3600
-      ? `약 ${Math.floor(roundedMinutes / 60)}시간${roundedMinutes % 60 ? ` ${roundedMinutes % 60}분` : ''}`
-      : remaining >= 60 ? `약 ${Math.ceil(remaining / 60)}분` : `약 ${Math.max(1, Math.ceil(remaining))}초` : '';
+    const remainingLabel = Number.isFinite(remaining) && remaining >= 0
+      ? `약 ${window.videoAnalysisProgress?.formatRemainingSeconds?.(Math.max(1, remaining)) || `${Math.max(1, Math.ceil(remaining))}초`}` : '';
     $('catalogJobEta').textContent = active ? state.jobConnectionError ? '연결 확인 중'
       : presentation?.delayed ? `${presentation.requestLabel || '번역'} 응답 지연`
       : presentation?.stale ? '진행 확인 중' : presentation?.remainingText || remainingLabel || '처리 속도 측정 중'

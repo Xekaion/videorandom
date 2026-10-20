@@ -442,6 +442,10 @@ test('a stalled image times out managed close, reopens the same host, and finish
   const response = await f.request(`/v1/jobs/${accepted.id}/frames/frame_001.jpg`);
   const stalledBody = response.arrayBuffer();
   await entered.promise;
+  // Terminal results can be visible before their diagnostic/final cleanup
+  // settles. Reach the idle handoff boundary so this tests the held image's
+  // close timeout, rather than the separate busy-admission rejection.
+  await until(() => !f.service.getUpdateStatus().busy);
   f.service.prepareUpdate();
   await assert.rejects(f.service.finishUpdate(), error => { assert.equal(error.code, 'UPDATE_LAN_CLOSE_TIMEOUT'); assert.equal(error.status, 409); return true; });
   assert.equal(f.service.getUpdateStatus().busy, false, 'the expired close promise cannot keep restart waiting forever');
