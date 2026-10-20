@@ -128,8 +128,10 @@ test('a still-short targeted review isolates its cue and retains every other str
         return result;
     } });
     const failed = await f.run();
-    assert.equal(failed.subtitleRepairStatus, 'failed');
+    assert.equal(failed.subtitleRepairStatus, 'partial');
     assert.equal(failed.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(failed.subtitleTranslationProgress.processingComplete, true);
+    assert.equal(failed.subtitleTranslationProgress.processedCues, 160);
     assert.equal(f.calls.length, 5);
     assert.equal(failed.subtitleTranslationPartial.length, 159);
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
@@ -226,8 +228,10 @@ test('missing and short corrections use exactly sixty-four requests while later 
         return result;
     } });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(result.subtitleRepairStatus, 'partial');
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+    assert.equal(result.subtitleTranslationProgress.processedCues, 1360);
     const repairs = f.calls.filter(call => call.count <= 20);
     assert.equal(repairs.length, 64, 'one missing draft repair and sixty-three review repairs share one operation budget');
     assert(repairs.every(call => call.count <= 20));

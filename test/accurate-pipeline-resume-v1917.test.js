@@ -152,7 +152,9 @@ test('an unresolved older cue stays sparse while later clean batches safely resu
     } });
     const original = structuredClone(f.transcript), result = await f.run();
     const accepted = indexes(f.transcript.length).filter(index => index !== 20);
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+    assert.equal(result.subtitleTranslationProgress.processedCues, original.length);
     assert.equal(result.subtitleTranslationProgress.version, 2);
     assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, accepted);
     assert.equal(result.subtitleTranslationProgress.complete, false);

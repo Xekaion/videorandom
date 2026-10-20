@@ -47,6 +47,21 @@ test('known validation, provider and storage errors have static safe messages', 
   assert.equal(classifyDiagnosticError({ code: 'PROVIDER_UNAVAILABLE', httpStatus: 503 }).httpStatus, 503);
 });
 
+test('recoverable foreign-text diagnostics keep a safe warning and never replace provider failures', () => {
+  const clean = sanitizeDiagnosticEvent({ code: 'SUBTITLE_FOREIGN_TEXT', level: 'warning', event: 'stage',
+    stage: 'translation_review', totalCues: 2019, completedCues: 864, expectedCues: 1, returnedCues: 0,
+    message: 'PRIVATE_FOREIGN_RESPONSE', text: 'PRIVATE_DIALOGUE', subtitles: ['PRIVATE_DIALOGUE'] });
+  assert.equal(clean.code, 'SUBTITLE_FOREIGN_TEXT');
+  assert.equal(clean.level, 'warning');
+  assert.match(clean.message, /나머지 구간은 계속 처리/);
+  assert.equal(JSON.stringify(clean).includes('PRIVATE_'), false);
+  assert.equal(classifyDiagnosticError('한국어 자막에 번역되지 않은 외국어 대사가 있습니다.').code, 'SUBTITLE_FOREIGN_TEXT');
+  for (const [reason, code] of [['503 ServiceUnavailable', 'PROVIDER_UNAVAILABLE'], ['401 authentication', 'PROVIDER_AUTH'],
+    ['quota usage limit', 'PROVIDER_QUOTA'], ['request refused', 'PROVIDER_REFUSAL']]) {
+    assert.equal(classifyDiagnosticError(reason + ' 번역되지 않은 외국어 대사').code, code);
+  }
+});
+
 test('refusal diagnostics retain only known provenance and distinguish detected subtitle text', () => {
   const sources = ['response-field', 'subtitle-text', 'execution-error'];
   const codes = ['PROVIDER_REFUSAL', 'SUBTITLE_PROVIDER_REFUSAL', 'SUBTITLE_REFUSAL_TEXT_DETECTED'];

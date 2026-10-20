@@ -173,7 +173,7 @@ for (const phase of ['draft', 'review']) test(`a deficient ${phase} supplement p
     if (item.review === (phase === 'review')) return responseFor(item.input.subtitles.slice(0, item.count === 80 ? 40 : item.count - 1));
   } });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, 'failed');
+  assert.equal(result.subtitleRepairStatus, phase === 'draft' ? 'failed' : 'partial');
   assert.equal(f.requests.length, phase === 'draft' ? 3 : 6);
   assert.equal(result.subtitleTranslationPartial?.length || 0, phase === 'review' ? 78 : 0,
     'explicitly reviewed tails survive missing rows; an unreviewed draft is never committed');
@@ -192,7 +192,7 @@ test('a semantically short review supplement stops after three calls instead of 
     if (item.review && item.count === 1) return responseFor(item.input.subtitles, { subtitles: [{ index: item.input.subtitles[0].index, text: '네.' }] });
   } });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, 'failed');
+  assert.equal(result.subtitleRepairStatus, 'partial');
   assert.equal(f.requests.length, 3, 'a failed supplement cannot trigger a whole-batch semantic retry');
   assert.equal(result.subtitleTranslationPartial?.length || 0, 79, 'the valid reviewed prefix survives the failed last-cue correction');
 });
@@ -212,7 +212,7 @@ for (const phase of ['draft', 'review']) test(`a ${phase} subset with a semantic
     assert.deepEqual(f.requests.map(item => [item.start, item.count, item.review]), [[0, 80, false], [79, 1, false], [0, 80, true]]);
     assert.deepEqual(f.requests[2].input.omissionCheckIndexes, [0, 79], 'both short draft cues still require source review');
   } else {
-    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(result.subtitleRepairStatus, 'partial');
     assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_CUES_PENDING');
     assert.deepEqual(f.requests[2].input.subtitles.map(cue => cue.index), [0, 79], 'only the short and missing reviewed cues are requested again');
     assert.equal(result.subtitleTranslationPartial.length, 79, 'the short first cue is excluded while every later strictly reviewed cue survives');
@@ -244,7 +244,7 @@ const invalid = {
   duplicate: entries => responseFor(entries.slice(0, 3), { subtitles: [entries[0], entries[0]].map(cue => ({ index: cue.index, text: KOREAN })) }),
   excess: entries => responseFor([...entries, entries[0]]),
   'out-of-range': entries => responseFor(entries.slice(0, 3), { subtitles: [{ index: 99999, text: KOREAN }] }),
-  'invalid Korean': entries => responseFor(entries.slice(0, 3), { subtitles: [{ index: entries[0].index, text: '翻訳していない日本語です。' }] }),
+  'unsafe subtitle formatting': entries => responseFor(entries.slice(0, 3), { subtitles: [{ index: entries[0].index, text: '```\n합성 열차 안내\n```' }] }),
   'empty text': entries => responseFor(entries.slice(0, 3), { subtitles: [{ index: entries[0].index, text: '' }] }),
   'term conflict': entries => responseFor(entries.slice(0, 3), { terms: [{ source: '合成駅', translation: '합성역' }, { source: '合成駅', translation: '다른 역' }] }),
   'empty array': () => ({ subtitles: [], terms: [] }),
@@ -253,7 +253,7 @@ const invalid = {
 for (const phase of ['draft', 'review']) for (const [name, makeInvalid] of Object.entries(invalid)) test(`a ${phase} ${name} ${phase === 'review' && name === 'empty array' ? 'stays uncertified after bounded corrections' : 'fails without any missing-cue requests'}`, async t => {
   const f = await fixture(t, { respond: item => item.review === (phase === 'review') ? makeInvalid(item.input.subtitles) : undefined });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, 'failed');
+  assert.equal(result.subtitleRepairStatus, phase === 'review' && name === 'empty array' ? 'partial' : 'failed');
   assert.equal(f.requests.length, phase === 'review' && name === 'empty array' ? 66 : phase === 'draft' ? 1 : 2);
   if (phase === 'review' && name === 'empty array') {
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
@@ -358,7 +358,7 @@ for (const phase of ['draft', 'review']) test(`cancellation after a ${phase} res
 test('the operation-wide supplementary budget stays at 64 while later explicitly reviewed source cues are still preserved', async t => {
   const f = await fixture(t, { count: 721, respond: item => item.count === 80 ? responseFor(item.input.subtitles.slice(0, 1)) : undefined });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, 'failed');
+  assert.equal(result.subtitleRepairStatus, 'partial');
   assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_CUES_PENDING');
   assert.equal(f.requests.filter(item => item.start < 640 && item.count <= 20).length, 64);
   assert.deepEqual(f.requests.filter(item => item.start >= 640).map(item => [item.start, item.count, item.review]),

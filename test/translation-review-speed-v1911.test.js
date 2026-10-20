@@ -146,7 +146,7 @@ test('a repeatedly unapproved sparse cue remains pending while every explicitly 
         return result;
     } });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(result.subtitleRepairStatus, 'partial');
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(f.calls.length, 3, 'an absent approval is not silently accepted or recursively retried');
     const confirmed = Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 20);
@@ -166,7 +166,7 @@ test('a repeatedly unapproved sparse cue remains pending while every explicitly 
 test('empty sparse approval and correction arrays cannot certify an unchecked batch', async t => {
     const f = await fixture(t, { handler: call => call.review ? { approvedIndexes: [], corrections: [], terms: [] } : fullAnswer(call) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(result.subtitleRepairStatus, 'partial');
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     const corrections = f.calls.slice(2);
     assert.equal(corrections.length, 64, 'valid empty reviews use only the shared bounded correction budget');
@@ -190,7 +190,7 @@ test('explicit sparse approval cannot bypass the existing short-text check or re
         return result;
     } });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(result.subtitleRepairStatus, 'partial');
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(f.calls.length, 3);
     assert.deepEqual(f.calls.at(-1).indexes, [20]);

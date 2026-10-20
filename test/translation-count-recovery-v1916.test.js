@@ -92,8 +92,10 @@ function assertComplete(result, source) {
 }
 function assertPending(result, source, missing) {
     const accepted = indexes(source.length).filter(index => !missing.includes(index));
-    assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(result.subtitleRepairStatus, 'partial');
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+    assert.equal(result.subtitleTranslationProgress.processedCues, source.length);
     assert.equal(result.subtitleTranslation, undefined);
     assert.equal(result.subtitleTranslationProgress.completedCues, accepted.length);
     assert.equal(result.subtitleTranslationProgress.complete, false);
@@ -219,7 +221,7 @@ const invalid = {
     excess: entries => responseFor([...entries, entries[0]]),
     'out-of-range': () => ({ subtitles: [{ index: 99999, text: koreanText }], terms: [] }),
     'empty text': entries => ({ subtitles: [{ index: entries[0].index, text: '' }], terms: [] }),
-    'non-Korean text': entries => ({ subtitles: [{ index: entries[0].index, text: sourceText }], terms: [] }),
+    'unsafe subtitle formatting': entries => ({ subtitles: [{ index: entries[0].index, text: '```\n합성 안내\n```' }], terms: [] }),
     'missing array': () => ({ terms: [] }),
     'null array': () => ({ subtitles: null, terms: [] }),
     'empty array without schema terms': () => ({ subtitles: [] }),

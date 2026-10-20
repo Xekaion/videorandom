@@ -8,6 +8,7 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const crypto = require('node:crypto');
 const { createNoKeyProvider } = require('../lib/no-key-provider');
+const { processedSubtitleGaps } = require('../lib/subtitle-processing');
 const { normalizeLanguageHint, normalizeSubtitleLanguage, subtitleText, validateTranslation } = require('../lib/subtitle-utils');
 const { createLanAnalysis, sendRemoteAnalysis, validateMetadata } = require('../lib/lan-analysis');
 
@@ -320,8 +321,27 @@ test('cancelling a fully cached translation never returns completed Korean outpu
   assert.equal(second.calls.length, 1, 'cached text does not trigger another translation inference');
 });
 
-test('translation rejects foreign-language copies and subtitle formatting without retry', async t => {
-  for (const text of ['これは翻訳されていない日本語です。', 'This is not a Korean subtitle.', '00:00:01 --> 00:00:02\n한국어', '```\n한국어\n```']) {
+test('translation isolates foreign-language copies after one correction while retaining the valid later cue', async t => {
+  for (const text of ['これは翻訳されていない日本語です。', 'This is not a Korean subtitle.']) {
+    const { dataDir, record } = await fixture(t);
+    const mocked = mockedProvider(call => {
+      if (!(call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) return summary();
+      const input = JSON.parse(call.input.split('자료 JSON:\n').at(-1));
+      return { subtitles: input.subtitles.map(cue => ({ index: cue.index, text: cue.index === 0 ? text : '역은 어디인가요?' })), terms: [] };
+    });
+    const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
+    assert.equal(result.status, 'partial'); assert.equal(result.subtitleError, null);
+    assert.equal(result.subtitleLanguage, undefined); assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true); assert.equal(result.subtitleTranslationProgress.processedCues, 2);
+    assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, 2);
+    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, [1]);
+    assert.deepEqual(result.subtitleTranslationPartial, [{ ...source()[1], text: '역은 어디인가요?' }]);
+    assert.deepEqual(result.transcript, source());
+  }
+});
+
+test('translation rejects unsafe subtitle formatting without retry', async t => {
+  for (const text of ['00:00:01 --> 00:00:02\n한국어', '```\n한국어\n```']) {
     const { dataDir, record } = await fixture(t);
     const mocked = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes)
       ? { subtitles: [{ index: 0, text }, { index: 1, text: '역은 어디인가요?' }], terms: [] } : summary());
@@ -331,6 +351,27 @@ test('translation rejects foreign-language copies and subtitle formatting withou
     assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, 1);
     assert.deepEqual(result.transcript, source());
   }
+});
+
+test('a full analysis clears an older failed repair marker before returning a newly processed partial translation', async t => {
+  const { dataDir, record } = await fixture(t, { duration: 15, transcriptSource: 'audio:faster-whisper large-v3',
+    subtitleRepairStatus: 'failed', subtitleError: 'owned previous attempt failure',
+    subtitleDiagnostic: { code: 'PROVIDER_UNAVAILABLE', event: 'error', level: 'error' },
+    transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+      complete: true, duration: 15, processedUntil: 15, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
+      audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } });
+  const mocked = mockedProvider(call => {
+    if (!(call.schema.properties.subtitles || call.schema.properties.approvedIndexes)) return summary();
+    const input = JSON.parse(call.input.split('자료 JSON:\n').at(-1));
+    return { subtitles: input.subtitles.map(cue => ({ index: cue.index,
+      text: cue.index === 0 ? 'これは翻訳されていない日本語です。' : '역은 어디인가요?' })), terms: [] };
+  });
+  const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
+  assert.equal(result.status, 'partial'); assert.equal(result.subtitleError, null);
+  assert.equal(result.subtitleRepairStatus, undefined, 'an older failed text-only attempt cannot override this full-analysis result');
+  assert.deepEqual(processedSubtitleGaps(result), { processingComplete: true, processedCues: 2, totalCues: 2, completedCues: 1, pendingCues: 1 });
+  assert.deepEqual(result.subtitleTranslationPartial, [{ ...source()[1], text: '역은 어디인가요?' }]);
+  assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, 2);
 });
 
 test('new chunk name drift keeps the previous validated prefix and excessively compressed cues are rejected', async t => {
@@ -352,7 +393,8 @@ test('new chunk name drift keeps the previous validated prefix and excessively c
   const rejected = await short.provider.analyzeExtracted(shortFixture.record, { dataDir: shortFixture.dataDir, subtitleLanguage: 'ko' });
   assert.equal(rejected.subtitleLanguage, undefined);
   assert.equal(rejected.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
-  assert.match(rejected.subtitleError, /미완료.*나머지 검증된 번역/);
+  assert.equal(rejected.subtitleError, null);
+  assert.equal(rejected.subtitleTranslationProgress.processingComplete, true);
   assert.equal(short.calls.filter(call => call.schema?.properties.subtitles).length, 2);
 });
 

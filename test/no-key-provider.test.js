@@ -1170,8 +1170,12 @@ for (const phase of ['draft', 'review']) test(`a ${phase} count omission retains
     } });
     const result = await f.run({ onDiagnostic: event => { events.push(event); event.privateInjection = 'must not enter the saved diagnostic'; } });
     if (phase === 'draft') assert.equal(result.subtitleError, '한국어 자막 번역 응답의 대사 개수가 올바르지 않습니다. 요청 20구간 · 응답 0구간. 검증된 기존 자막은 보관했습니다.');
-    else assert.match(result.subtitleError, /한국어 자막 1구간은 번역 응답 누락 또는 길이 검증 문제/);
-    assert.equal(result.subtitleRepairStatus, 'failed');
+    else assert.equal(result.subtitleError, null);
+    assert.equal(result.subtitleRepairStatus, phase === 'draft' ? 'failed' : 'partial');
+    if (phase === 'review') {
+        assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+        assert.equal(result.subtitleTranslationProgress.processedCues, 241);
+    }
     assert.equal(f.requests.length, phase === 'draft' ? 6 : 31, 'empty drafts stop; empty successful reviews get bounded missing-index corrections and later batches');
     const retained = phase === 'review' ? 240 : 160;
     assert.equal(result.subtitleTranslationPartial.length, retained);
@@ -1184,11 +1188,11 @@ for (const phase of ['draft', 'review']) test(`a ${phase} count omission retains
     assert.deepEqual({ stage: diagnostic.stage, event: diagnostic.event, code: diagnostic.code,
         totalCues: diagnostic.totalCues, completedCues: diagnostic.completedCues, startCue: diagnostic.startCue,
         endCue: diagnostic.endCue, expectedCues: diagnostic.expectedCues, returnedCues: diagnostic.returnedCues }, {
-        stage: `translation_${phase}`, event: 'error', code: phase === 'draft' ? 'SUBTITLE_CUE_COUNT_MISMATCH' : 'SUBTITLE_CUES_PENDING',
+        stage: `translation_${phase}`, event: phase === 'draft' ? 'error' : 'partial', code: phase === 'draft' ? 'SUBTITLE_CUE_COUNT_MISMATCH' : 'SUBTITLE_CUES_PENDING',
         totalCues: 241, completedCues: retained, startCue: 198, endCue: phase === 'draft' ? 217 : 198, expectedCues: phase === 'draft' ? 20 : 1, returnedCues: 0
     });
     assert.equal(diagnostic.privateInjection, undefined);
-    assert.equal(events.filter(event => event.event === 'error').length, 1);
+    assert.equal(events.filter(event => event.event === 'error').length, phase === 'draft' ? 1 : 0);
     assert.ok(events.some(event => event.level === 'warning' && event.expectedCues === 80 && event.returnedCues === 37));
     const commits = events.filter(event => event.event === 'committed');
     assert.deepEqual(commits.slice(0, 2).map(event => [event.stage, event.completedCues]), [['translation_review', 80], ['translation_review', 160]]);
@@ -1369,7 +1373,7 @@ test('a short accurate draft reaches source review and only its corrected final 
 test('fast translation isolates a still-short result after one correction without claiming an independent review', async t => {
     const f = await translationGuardFixture(t, { respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index, text: '네.' })), terms: [] }) });
     const result = await f.run({ subtitleQuality: 'fast' });
-    assert.equal(f.requests.length, 2); assert.equal(result.subtitleRepairStatus, 'failed');
+    assert.equal(f.requests.length, 2); assert.equal(result.subtitleRepairStatus, 'partial');
     assert(f.requests.every(item => !item.review));
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(result.subtitleTranslationProgress.completedCues, 0);
@@ -1423,7 +1427,7 @@ test('one final-review length failure corrects at most four reviewed groups with
     assert.deepEqual(f.requests.map(item => [item.start, item.count]), [[0, 80], [0, 80], [0, 20], [20, 20], [40, 20], [60, 20]]);
     assert.ok(f.requests.slice(2).every(item => item.review));
     assert.ok(result.subtitleTranslation.every(cue => cue.text.replace(/\n/g, ' ') === faithfulKorean));
-    assert.ok(progress.some(stage => /누락·길이 보완 · 0\/80구간/.test(stage)));
+    assert.ok(progress.some(stage => /한국어 자막 검수.*보완 · 0\/80구간/.test(stage)));
     assert.deepEqual(result.transcript, f.source);
 });
 
@@ -1441,7 +1445,7 @@ test('a still-short correction group stays unapproved while subsequent reviewed 
     const f = await translationGuardFixture(t, { count: 80, respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
         text: item.review && (item.count > 20 || item.start === 20) ? '네.' : faithfulKorean })), terms: [] }) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 6);
+    assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(f.requests.length, 6);
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.deepEqual(f.requests.slice(2).map(item => [item.start, item.count]), [[0, 20], [20, 20], [40, 20], [60, 20]]);
     assert.equal(result.subtitleTranslationPartial.length, 60);
@@ -1466,13 +1470,12 @@ for (const failure of ['safety refusal', 'quota usage limit', '401 authenticatio
     });
 }
 
-for (const failure of ['wrong-index', 'foreign-text', 'unconfirmed-term']) {
+for (const failure of ['wrong-index', 'unconfirmed-term']) {
     test(`a ${failure} error takes precedence over a short review and never starts correction`, async t => {
         const f = await translationGuardFixture(t, { count: 80, respond: item => {
             const subtitles = item.input.subtitles.map(cue => ({ index: cue.index, text: item.review ? '네.' : faithfulKorean }));
             const terms = item.review ? [] : [{ source: '太郎', translation: '타로' }];
             if (item.review && failure === 'wrong-index') subtitles[0].index++;
-            if (item.review && failure === 'foreign-text') subtitles[0].text = 'これは翻訳されていません。';
             if (item.review && failure !== 'unconfirmed-term') terms.push({ source: '太郎', translation: '타로' });
             return { subtitles, terms };
         } });

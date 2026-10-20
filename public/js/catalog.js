@@ -107,6 +107,9 @@
   const healthLabel = record => {
     const completion = healthFor(record).completion;
     if (completion?.subtitleSaveFailed) return completion.translationComplete ? '번역 완료 · 자막 파일 저장 실패' : '자막 파일 저장 실패';
+    if (processedSubtitleGaps(record)) return subtitleCounts(record).pending > 0
+      ? `전체 처리 완료 · 자막 ${subtitleCounts(record).completed.toLocaleString()}/${subtitleCounts(record).total.toLocaleString()} · 확인 필요`
+      : '전체 처리 완료 · 최종 번역 검수 확인 필요';
     if (record?.subtitleRepairStatus === 'failed' && subtitleCounts(record)?.complete) return '기존 한국어 자막 완료 · 최근 재번역 실패';
     if (translationNeedsRecovery(record)) return completion?.totalCues > 0
       ? `한국어 번역 ${completion.completedCues.toLocaleString()}/${completion.totalCues.toLocaleString()} · 확인 필요` : '한국어 자막 미번역 · 복구 필요';
@@ -180,6 +183,20 @@
     if (counts?.incomplete) return true;
     return record.subtitleRepairStatus === 'failed' || record.subtitleRepairStatus === 'partial'
       || total > 0 && (!!record.subtitleError || validProgress && progress.completedCues < total);
+  }
+
+  function processedSubtitleGaps(record) {
+    if (!record || record.status !== 'partial' || record.error || record.summaryError || record.subtitleError
+        || record.subtitleRepairStatus === 'failed' || record.subtitleAutoSave?.status === 'failed'
+        || record.analysisDiagnostic?.event === 'error' || record.analysisDiagnostic?.level === 'error'
+        || record.subtitleDiagnostic?.code !== 'SUBTITLE_CUES_PENDING'
+        || record.subtitleDiagnostic.event !== 'partial' || record.subtitleDiagnostic.level !== 'warning') return false;
+    const counts = subtitleCounts(record), progress = record.subtitleTranslationProgress;
+    if (!counts?.incomplete || counts.pending === null || counts.pending < 0 || counts.subtitleSaveFailed) return false;
+    return record.catalogView === 'summary'
+      ? record.subtitleProcessingComplete === true && record.subtitleProcessedCues === counts.total
+      : progress?.processingComplete === true && progress.processedCues === counts.total
+        && progress.totalCues === counts.total && progress.complete === false && progress.translationComplete === false;
   }
 
   function translationRepairLabel(record, showCount = false) {
@@ -1022,6 +1039,9 @@
         label: healthLabel(attempt), detail: healthFor(attempt).reason };
       if (attempt?.subtitleRepairStatus === 'failed' && subtitleCounts(attempt)?.complete) return { active: false, tone: 'partial',
         label: '기존 한국어 자막 완료 · 최근 재번역 실패', detail: attempt.subtitleError || '기존 완성 자막은 보관되어 있습니다. 최근 재번역 요청은 실패했습니다.' };
+      if (processedSubtitleGaps(attempt)) return { active: false, tone: 'partial',
+        label: subtitleCounts(attempt).pending > 0 ? `전체 구간 처리 완료 · ${subtitleCounts(attempt).pending.toLocaleString()}구간 확인 필요`
+          : '전체 구간 처리 완료 · 최종 번역 검수 확인 필요', detail: healthFor(attempt).reason };
       if (attempt && (translationNeedsRecovery(attempt) || attempt.subtitleRepairStatus === 'failed')) return { active: false, tone: 'partial',
         label: attempt.subtitleError || job.status === 'cancelled' ? '한국어 자막 번역 중단 · 복구 필요' : '한국어 자막 미번역 · 복구 필요',
         detail: attempt.subtitleError || detailRepairNote(attempt) };
@@ -1804,6 +1824,9 @@
     const retainedTranslation = !active && job.results?.length > 0 && job.results.every(record => subtitleCounts(record)?.complete)
       && job.results.some(record => record.subtitleRepairStatus === 'failed');
     const partialResults = !active && job.results?.some(record => record.status === 'partial' || record.status === 'failed');
+    const processedGapsOnly = !active && job.results?.some(processedSubtitleGaps)
+      && job.results.every(record => processedSubtitleGaps(record) || subtitleCounts(record)?.complete
+        && !record.error && !record.summaryError && !record.subtitleError && !subtitleCounts(record).subtitleSaveFailed);
     const saveFailed = !active && job.results?.some(record => healthFor(record).completion?.subtitleSaveFailed);
     const sourceReviewOnly = !active && job.results?.length > 0 && job.results.every(record => healthFor(record).completion?.translationComplete
       && !healthFor(record).completion?.subtitleSaveFailed && !record.error && !record.summaryError)
@@ -1811,6 +1834,7 @@
     const jobTitle = job.status === 'completed' && saveFailed ? '처리 결과 보관 · 자막 파일 저장 실패'
       : job.status === 'completed' && retainedTranslation ? '기존 한국어 자막 보관 · 재번역 요청 실패'
       : job.status === 'completed' && sourceReviewOnly ? '한국어 번역 완료 · 원어 확인 필요'
+      : job.status === 'completed' && processedGapsOnly ? '전체 구간 처리 완료 · 일부 자막 확인 필요'
       : job.status === 'completed' && translationIncomplete ? '한국어 번역 미완료 · 복구 필요'
       : job.status === 'completed' && partialResults && job.operation !== 'translation-only' ? '분석 일부 완료 · 확인 필요'
       : job.operation === 'translation-only'
@@ -1819,7 +1843,7 @@
     $('catalogJobTitle').textContent = job.operation === 'translation-only' ? `한국어 자막 번역 복구 · ${jobTitle.replace(/^영상 /, '')}` : job.source === 'auto-pick' ? `${job.queueSource === 'manual' ? '대기열' : '뽑은 영상 자동'} ${jobTitle.replace(/^영상 /, '')}` : job.source === 'repair' ? `복구 · ${jobTitle}` : jobTitle;
     $('catalogJobProgress').value = overall;
     const terminalLabel = !active ? job.status === 'cancelled' ? '중지' : job.status === 'failed' ? '실패'
-      : saveFailed ? '저장 확인' : retainedTranslation ? '기존 자막 보관' : sourceReviewOnly ? '번역 완료' : translationIncomplete || partialResults ? '일부 완료' : '' : '';
+      : saveFailed ? '저장 확인' : retainedTranslation ? '기존 자막 보관' : sourceReviewOnly ? '번역 완료' : processedGapsOnly ? '처리 완료' : translationIncomplete || partialResults ? '일부 완료' : '' : '';
     $('catalogJobPercent').textContent = terminalLabel || `${Math.round(overall)}%`;
     $('catalogJobPercent').classList.toggle('catalog-job-terminal', !!terminalLabel);
     $('catalogJobProgress').classList.toggle('hidden', !!terminalLabel);
@@ -1838,7 +1862,7 @@
     $('catalogJobEta').textContent = active ? state.jobConnectionError ? '연결 확인 중'
       : presentation?.delayed ? `${presentation.requestLabel || '번역'} 응답 지연`
       : presentation?.stale ? '진행 확인 중' : presentation?.remainingText || remainingLabel || '처리 속도 측정 중'
-      : saveFailed ? '자막 저장 확인 필요' : retainedTranslation ? '기존 자막 보관 · 최근 요청 실패' : sourceReviewOnly ? '번역 완료 · 원어 확인 필요'
+      : saveFailed ? '자막 저장 확인 필요' : retainedTranslation ? '기존 자막 보관 · 최근 요청 실패' : sourceReviewOnly ? '번역 완료 · 원어 확인 필요' : processedGapsOnly ? '처리 완료 · 일부 자막 확인 필요'
       : translationIncomplete || partialResults || job.status === 'failed' ? '중단 · 확인 필요' : job.status === 'cancelled' ? '중지됨' : '완료';
     $('catalogJobEta').classList.toggle('catalog-eta-stale', presentation?.stale === true || presentation?.delayed === true);
     const phaseCount = presentation && Number.isFinite(presentation.completed) && Number.isFinite(presentation.total)
@@ -1850,11 +1874,11 @@
     $('catalogJobEtaNote').classList.toggle('hidden', !active);
     const problem = !active && job.results?.find(record => translationNeedsRecovery(record) || record.subtitleRepairStatus === 'failed' || ['partial', 'failed'].includes(record.status));
     const failure = conciseFailure(active && state.jobConnectionError ? `작업 상태 연결 확인 중 · ${state.jobConnectionError}` : job.error || problem?.subtitleError || problem?.error || (problem ? healthFor(problem).reason : ''));
-    $('catalogJobError').textContent = failure ? `${active ? '현재 작업 안내' : retainedTranslation ? '최근 요청 안내' : sourceReviewOnly ? '원어 확인 안내' : saveFailed ? '파일 저장 안내' : '완료되지 않은 이유'}: ${failure}` : '';
+    $('catalogJobError').textContent = failure ? `${active ? '현재 작업 안내' : retainedTranslation ? '최근 요청 안내' : sourceReviewOnly ? '원어 확인 안내' : saveFailed ? '파일 저장 안내' : processedGapsOnly ? '확인 구간 안내' : '완료되지 않은 이유'}: ${failure}` : '';
     $('catalogJobError').classList.toggle('hidden', !failure);
     const failurePanel = $('catalogJobFailures'), failureItems = $('catalogJobFailureItems');
     failurePanel.classList.toggle('hidden', !failures.length);
-    $('catalogJobFailuresTitle').textContent = failures.length ? `이번 작업 실패·미완료 ${failures.length.toLocaleString()}개 영상` : '';
+    $('catalogJobFailuresTitle').textContent = failures.length ? `이번 작업 ${processedGapsOnly ? '확인 필요' : '실패·미완료'} ${failures.length.toLocaleString()}개 영상` : '';
     if (failurePanel.dataset.jobId !== job.id) { failurePanel.dataset.jobId = job.id || ''; failurePanel.dataset.expanded = ''; }
     const storedFailureResult = entry => (entry.record?.id ? findRecord(entry.record.id) : null)
       || (entry.path ? state.records.get(pathKey(entry.path)) : null);
@@ -1930,7 +1954,9 @@
         || ['failed', 'partial', 'summary-missing'].includes(healthFor(record).code)) : [];
       const translationIncomplete = Array.isArray(job.results) && job.results.some(record => translationNeedsRecovery(record));
       const translationFailed = Array.isArray(job.results) && job.results.some(record => record.subtitleRepairStatus === 'failed');
+      const processedGapsOnly = job.status === 'completed' && problems.length > 0 && problems.every(processedSubtitleGaps);
       const completedMessage = job.status === 'failed' ? job.error || '분석 작업에 실패했습니다.'
+        : processedGapsOnly ? '전체 구간 처리를 마쳤습니다. 저장된 자막과 확인이 필요한 구간 정보를 보관했습니다.'
         : job.status === 'completed' && translationFailed ? `한국어 자막 번역 복구에 실패했습니다. 기존 원문과 저장된 번역은 보관합니다. ${resultCount}개 결과의 오류 안내를 확인해 주세요.`
           : job.status === 'completed' && translationIncomplete
           ? `한국어 번역은 완료되지 않았습니다. 확인된 결과 ${resultCount}개를 이 PC에 저장했습니다. 저장된 원문과 시간으로 ‘남은 한국어 자막 번역 계속’을 실행해 주세요.`
@@ -1940,8 +1966,8 @@
       const problemReason = problems[0] && (problems[0].subtitleError || problems[0].error || healthFor(problems[0]).reason || problems[0].warnings?.[0]);
       const needsRecovery = problems.some(record => primaryRecoveryAction(record));
       const message = `${completedMessage}${problems.length ? ` ${needsRecovery ? '복구가 필요한 결과' : '최근 요청·확인 안내'} ${problems.length}개 · ${problemReason}` : ''}${retainedCount ? ` 재분석이 완료되지 않은 영상 ${retainedCount}개는 이전에 완료된 결과와 이미지를 계속 표시합니다.` : ''}`;
-      if (job.source === 'auto-pick') autoNotice(message, job.status === 'failed' || problems.length > 0);
-      else notice(message, job.status === 'failed' || problems.length > 0);
+      if (job.source === 'auto-pick') autoNotice(message, job.status === 'failed' || problems.length > 0 && !processedGapsOnly);
+      else notice(message, job.status === 'failed' || problems.length > 0 && !processedGapsOnly);
       if (job.source === 'repair' && job.repairOf === state.detailId && $('catalogDetail').open && job.results?.[0]) {
         const attempt = job.results[0];
         const retained = recordFor(attempt);
@@ -2218,7 +2244,9 @@
     const status = translating ? '이 영상의 한국어 번역이 진행 중입니다. 아직 처리되지 않은 구간은 미번역 상태로 표시합니다.'
       : allSourceCuesTranslated ? partial ? '저장된 원문 대사의 한국어 번역은 모두 끝났습니다. 원어 인식 확인이 남아 부분 자막으로 보관합니다.'
         : '한국어 번역은 원문 자막의 시작·종료 시각을 그대로 사용합니다. SRT / VTT를 영상과 함께 사용할 수 있습니다.'
-        : pendingOnly ? `검수 확인이 필요한 ${Math.max(0, transcript.length - translations.length).toLocaleString()}구간을 제외하고 뒤쪽 번역도 보관했습니다. 남은 한국어 자막 번역 계속은 확인이 필요한 구간만 처리합니다.`
+        : pendingOnly ? translations.length === transcript.length
+          ? '전체 구간 처리를 마쳤습니다. 모든 대사의 저장본은 있지만 이번 시도의 최종 번역 검수 확인은 남아 있습니다.'
+          : `${processedSubtitleGaps(record) ? '전체 구간 처리를 마쳤습니다. ' : ''}검수 확인이 필요한 ${Math.max(0, transcript.length - translations.length).toLocaleString()}구간을 빈 구간으로 남기고 뒤쪽 번역도 보관했습니다. 남은 한국어 자막 번역 계속은 확인이 필요한 구간만 처리합니다.`
         : refusal ? '한국어 번역이 중단되었습니다. 저장된 원문과 검수된 번역은 보관합니다.'
         : record.subtitleError ? '한국어 번역이 중단되었습니다. ‘남은 한국어 자막 번역 계속’으로 저장된 원문과 시간을 사용해 이어서 번역할 수 있습니다.'
           : '한국어 미번역 구간이 남아 있습니다. 번역 복구가 필요합니다. 저장된 원문과 시간으로 한국어 번역만 복구할 수 있습니다.';

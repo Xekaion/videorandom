@@ -88,8 +88,10 @@ for (const [count, bad] of [[80, [20]], [160, [20]], [1856, [1488, 1489]]]) {
         const f = await fixture(t, { count, bad });
         const original = structuredClone(f.transcript);
         const result = await f.run();
-        assert.equal(result.subtitleRepairStatus, 'failed');
-        assert.match(result.subtitleError, /미완료/);
+        assert.equal(result.subtitleRepairStatus, 'partial');
+        assert.equal(result.subtitleError, null);
+        assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+        assert.equal(result.subtitleTranslationProgress.processedCues, count);
         assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
         assert.equal(result.subtitleDiagnostic.totalCues, count);
         assert.equal(result.subtitleDiagnostic.completedCues, count - bad.length);
@@ -190,7 +192,7 @@ test('a missing correction remains unapproved while its strict neighbors and the
     const f = await fixture(t, { count: 160, handler: (call, state) => call.review && call.count === 1
         ? { approvedIndexes: [], corrections: [], terms: [] } : state.normalResponse(call) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.calls.length, 5);
+    assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(f.calls.length, 5);
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assertSparse(result, f.transcript, [20]);
     assert.deepEqual(f.calls.map(call => [call.review, call.indexes]), [
