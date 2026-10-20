@@ -186,13 +186,22 @@ test('parent cancellation after quarantining keeps sparse checkpoints and drains
     assert(f.calls.at(-1).killed); await f.drained();
 });
 
-test('a missing correction is still a hard stop rather than being quarantined or automatically approved', async t => {
+test('a missing correction remains unapproved while its strict neighbors and the later batch become durable', async t => {
     const f = await fixture(t, { count: 160, handler: (call, state) => call.review && call.count === 1
         ? { approvedIndexes: [], corrections: [], terms: [] } : state.normalResponse(call) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.calls.length, 3);
-    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUE_COUNT_MISMATCH');
-    assert.equal(result.subtitleTranslationProgress.version, 1); assert.equal(result.subtitleTranslationProgress.completedCues, 20);
+    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.calls.length, 5);
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assertSparse(result, f.transcript, [20]);
+    assert.deepEqual(f.calls.map(call => [call.review, call.indexes]), [
+        [false, Array.from({ length: 80 }, (_, index) => index)],
+        [true, Array.from({ length: 80 }, (_, index) => index)], [true, [20]],
+        [false, Array.from({ length: 80 }, (_, index) => index + 80)],
+        [true, Array.from({ length: 80 }, (_, index) => index + 80)]
+    ], 'an empty singleton approval never certifies its cue or triggers a repeated request');
+    assert(f.commits.some(progress => progress.version === 2
+        && JSON.stringify(progress.cueIndexes) === JSON.stringify(Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 20))),
+    'all explicitly approved neighbors are durable before later source work starts');
     await f.drained();
 });
 

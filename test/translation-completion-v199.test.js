@@ -22,7 +22,7 @@ async function fixture(t, { count = 80, handler, environment = {} } = {}) {
         transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
             complete: true, duration, processedUntil: duration, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
-    const calls = [], commits = [], diagnostics = [], progress = [], controller = new AbortController();
+    const calls = [], commits = [], checkpoints = [], diagnostics = [], progress = [], controller = new AbortController();
     let active = 0;
     const spawnImpl = (binary, args) => {
         assert.equal(binary, 'owned-synthetic-codex');
@@ -52,14 +52,18 @@ async function fixture(t, { count = 80, handler, environment = {} } = {}) {
     const provider = createNoKeyProvider({ spawnImpl, platform: 'win32', environment: { VIDEORANDOM_CODEX: 'owned-synthetic-codex',
         VIDEORANDOM_TRANSLATION_PIPELINE: 'off', ...environment } });
     const run = settings => provider.translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate', signal: controller.signal,
-        onCheckpoint: value => commits.push(value.subtitleTranslationProgress?.completedCues || 0),
+        onCheckpoint: value => {
+            commits.push(value.subtitleTranslationProgress?.completedCues || 0);
+            checkpoints.push(structuredClone({ progress: value.subtitleTranslationProgress,
+                cues: value.subtitleTranslationPartial || value.subtitleTranslation || [] }));
+        },
         onDiagnostic: value => diagnostics.push(value), onProgress: (stage, percent, details) => progress.push({ stage, percent, details }), ...settings });
     const drained = async () => {
         assert.equal(active, 0);
         assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
         assert.deepEqual(await fs.readdir(path.join(dataDir, 'tmp')).catch(() => []), []);
     };
-    return { dataDir, transcript, record, calls, commits, diagnostics, progress, controller, run, drained };
+    return { dataDir, transcript, record, calls, commits, checkpoints, diagnostics, progress, controller, run, drained };
 }
 
 test('separate batches and a final seventeen-cue batch correct only their short reviewed cue once', async t => {
@@ -95,7 +99,12 @@ test('mixed missing and short cues repair only the defective indexes while accur
         [false, [70]], [true, Array.from({ length: 80 }, (_, i) => i)], [true, [20, 72]]]);
     assert.deepEqual(f.calls[2].input.omissionCheckIndexes, [10], 'the short draft goes through normal source review');
     assert.equal(result.subtitleTranslation.length, 80);
-    assert(f.commits.includes(20), 'the fully checked contiguous prefix is durable before correction');
+    const confirmed = Array.from({ length: 80 }, (_, index) => index).filter(index => ![20, 72].includes(index));
+    const beforeCorrection = f.checkpoints.find(value => value.progress?.completedCues === 78);
+    assert.deepEqual(beforeCorrection?.progress.cueIndexes, confirmed, 'the exact reviewed set is durable before correction without accepting either defective cue');
+    assert.deepEqual(beforeCorrection.cues.map(cue => [cue.id, cue.start, cue.end]),
+        confirmed.map(index => f.transcript[index]).map(cue => [cue.id, cue.start, cue.end]));
+    assert(beforeCorrection.cues.every(cue => cue.text.replace(/\n/g, ' ') === translatedText));
     await f.drained();
 });
 
@@ -209,21 +218,33 @@ for (const failure of ['response refusal', 'quota usage limit', '401 authenticat
     });
 }
 
-test('missing and short corrections share one operation budget of at most sixty-four requests', async t => {
+test('missing and short corrections use exactly sixty-four requests while later strict tail cues remain durable', async t => {
     const f = await fixture(t, { count: 1360, handler: call => {
         const result = answer(call);
         if (!call.review && call.start === 0 && call.count === 80) result.subtitles.pop();
-        if (call.review && call.count === 80) for (const cue of result.subtitles) cue.text = '네.';
+        if (call.review && call.count === 80) for (const cue of result.subtitles) if (cue.index !== 1359) cue.text = '네.';
         return result;
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_REPAIR_LIMIT');
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     const repairs = f.calls.filter(call => call.count <= 20);
-    assert.equal(repairs.length, 61, 'one missing draft repair and sixty review repairs; next four groups do not fit');
+    assert.equal(repairs.length, 64, 'one missing draft repair and sixty-three review repairs share one operation budget');
     assert(repairs.every(call => call.count <= 20));
-    assert.equal(f.calls.length, 93);
-    assert.equal(result.subtitleTranslationPartial.length, 1200);
+    assert.equal(f.calls.length, 98, 'all seventeen source batches still receive a draft and independent review');
+    assert(f.calls.some(call => call.review && call.indexes.includes(1359)), 'budget exhaustion does not stop later source review');
+    assert(f.diagnostics.some(event => event.code === 'SUBTITLE_REPAIR_LIMIT' && event.level === 'warning'));
+    const confirmed = [...Array.from({ length: 1260 }, (_, index) => index), 1359];
+    assert.equal(result.subtitleTranslationPartial.length, 1261);
+    assert.equal(result.subtitleTranslationProgress.version, 2);
+    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, confirmed);
+    assert.equal(result.subtitleTranslationProgress.complete, false);
+    assert.equal(result.subtitleTranslationProgress.translationComplete, false);
+    assert.equal(result.subtitleDiagnostic.expectedCues, 99);
+    assert.equal(result.subtitleTranslation, undefined);
+    assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]),
+        confirmed.map(index => f.transcript[index]).map(cue => [cue.id, cue.start, cue.end]));
+    assert(result.subtitleTranslationPartial.every(cue => cue.text.replace(/\n/g, ' ') === translatedText));
     await f.drained();
 });
 

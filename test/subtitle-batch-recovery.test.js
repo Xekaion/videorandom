@@ -168,15 +168,22 @@ for (const phase of ['draft', 'review']) test(`a ${phase} subset with only one v
   assert.deepEqual(requests.slice(1).flatMap(item => item.input.subtitles.map(cue => cue.index)), Array.from({ length: 79 }, (_, index) => index + 1));
 });
 
-for (const phase of ['draft', 'review']) test(`a deficient ${phase} supplement stops immediately without recursively repairing it or asking the remaining groups`, async t => {
+for (const phase of ['draft', 'review']) test(`a deficient ${phase} supplement preserves exact reviewed indexes and respects empty-draft versus missing-review boundaries`, async t => {
   const f = await fixture(t, { respond: item => {
     if (item.review === (phase === 'review')) return responseFor(item.input.subtitles.slice(0, item.count === 80 ? 40 : item.count - 1));
   } });
   const result = await f.run();
   assert.equal(result.subtitleRepairStatus, 'failed');
-  assert.equal(f.requests.length, phase === 'draft' ? 2 : 3);
-  assert.equal(result.subtitleTranslationPartial?.length || 0, phase === 'review' ? 40 : 0,
-    'only the strict contiguous reviewed prefix is committed; an unreviewed draft is never committed');
+  assert.equal(f.requests.length, phase === 'draft' ? 3 : 6);
+  assert.equal(result.subtitleTranslationPartial?.length || 0, phase === 'review' ? 78 : 0,
+    'explicitly reviewed tails survive missing rows; an unreviewed draft is never committed');
+  assert.equal(result.subtitleDiagnostic.code, phase === 'draft' ? 'SUBTITLE_CUE_COUNT_MISMATCH' : 'SUBTITLE_CUES_PENDING');
+  if (phase === 'review') {
+    const indexes = Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 59 && index !== 79);
+    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, indexes);
+    assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), indexes.map(index =>
+      [f.source[index].id, f.source[index].start, f.source[index].end]));
+  }
 });
 
 test('a semantically short review supplement stops after three calls instead of entering the old length-repair path', async t => {
@@ -243,11 +250,17 @@ const invalid = {
   'empty array': () => ({ subtitles: [], terms: [] }),
   'absent array': () => ({ terms: [] })
 };
-for (const phase of ['draft', 'review']) for (const [name, makeInvalid] of Object.entries(invalid)) test(`a ${phase} ${name} fails without any missing-cue requests`, async t => {
+for (const phase of ['draft', 'review']) for (const [name, makeInvalid] of Object.entries(invalid)) test(`a ${phase} ${name} ${phase === 'review' && name === 'empty array' ? 'stays uncertified after bounded corrections' : 'fails without any missing-cue requests'}`, async t => {
   const f = await fixture(t, { respond: item => item.review === (phase === 'review') ? makeInvalid(item.input.subtitles) : undefined });
   const result = await f.run();
   assert.equal(result.subtitleRepairStatus, 'failed');
-  assert.equal(f.requests.length, phase === 'draft' ? 1 : 2);
+  assert.equal(f.requests.length, phase === 'review' && name === 'empty array' ? 66 : phase === 'draft' ? 1 : 2);
+  if (phase === 'review' && name === 'empty array') {
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationProgress.complete, false);
+    assert.equal(result.subtitleTranslation, undefined);
+    assert(f.requests.slice(2).every(item => item.review && item.count <= 20));
+  }
   assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
   assert.deepEqual(result.transcript, f.source);
 });
@@ -342,17 +355,22 @@ for (const phase of ['draft', 'review']) test(`cancellation after a ${phase} res
   assert.equal(await fs.readFile(old.filename, 'utf8'), old.bytes);
 });
 
-test('the operation-wide supplementary budget is 64 calls and a ninth deficient batch leaves the first 640 reviewed cues intact', async t => {
+test('the operation-wide supplementary budget stays at 64 while later explicitly reviewed source cues are still preserved', async t => {
   const f = await fixture(t, { count: 721, respond: item => item.count === 80 ? responseFor(item.input.subtitles.slice(0, 1)) : undefined });
   const result = await f.run();
   assert.equal(result.subtitleRepairStatus, 'failed');
-  assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_REPAIR_LIMIT');
-  assert.equal(f.requests.filter(item => item.count <= 20).length, 64);
-  assert.equal(f.requests.length, 81);
-  assert.equal(result.subtitleTranslationPartial.length, 640);
+  assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_CUES_PENDING');
+  assert.equal(f.requests.filter(item => item.start < 640 && item.count <= 20).length, 64);
+  assert.deepEqual(f.requests.filter(item => item.start >= 640).map(item => [item.start, item.count, item.review]),
+    [[640, 80, false], [640, 1, true], [720, 1, false], [720, 1, true]]);
+  assert.equal(f.requests.length, 84);
+  assert.equal(result.subtitleTranslationPartial.length, 642);
   const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', `${f.record.id}-ko.json`), 'utf8'));
-  assert.equal(saved.completedCues, 640); assert.equal(saved.reviewPasses, 2); assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION);
-  assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), f.source.slice(0, 640).map(cue => [cue.id, cue.start, cue.end]));
+  assert.equal(saved.completedCues, 642); assert.equal(saved.reviewPasses, 2); assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION);
+  const indexes = [...Array.from({ length: 641 }, (_, index) => index), 720];
+  assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, indexes);
+  assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), indexes.map(index =>
+    [f.source[index].id, f.source[index].start, f.source[index].end]));
 });
 
 test('conflicting terminology from an otherwise valid supplement cannot replace the batch or committed prefix', async t => {

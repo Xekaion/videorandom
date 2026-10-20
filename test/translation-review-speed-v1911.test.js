@@ -28,7 +28,7 @@ async function fixture(t, { count = 80, handler, pipeline = false } = {}) {
         transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
             complete: true, duration, processedUntil: duration, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
-    const calls = [], commits = [], diagnostics = [], controller = new AbortController();
+    const calls = [], commits = [], checkpoints = [], diagnostics = [], controller = new AbortController();
     let active = 0, peak = 0;
     const spawnImpl = (binary, args) => {
         assert.equal(binary, 'owned-synthetic-codex');
@@ -61,14 +61,18 @@ async function fixture(t, { count = 80, handler, pipeline = false } = {}) {
     const provider = createNoKeyProvider({ spawnImpl, platform: 'win32', environment: {
         VIDEORANDOM_CODEX: 'owned-synthetic-codex', ...(pipeline ? {} : { VIDEORANDOM_TRANSLATION_PIPELINE: 'off' }) } });
     const run = settings => provider.translateKoreanOnly(record, { dataDir, subtitleQuality: 'accurate', signal: controller.signal,
-        onCheckpoint: value => commits.push(value.subtitleTranslationProgress?.completedCues || 0),
+        onCheckpoint: value => {
+            commits.push(value.subtitleTranslationProgress?.completedCues || 0);
+            checkpoints.push(structuredClone({ progress: value.subtitleTranslationProgress,
+                cues: value.subtitleTranslationPartial || value.subtitleTranslation || [] }));
+        },
         onDiagnostic: value => diagnostics.push(value), ...settings });
     const drained = async () => {
         assert.equal(active, 0, 'all started children have closed before completion or failure is exposed');
         assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
         assert.deepEqual(await fs.readdir(path.join(dataDir, 'tmp')).catch(() => []), []);
     };
-    return { dataDir, transcript, record, calls, commits, diagnostics, controller, run, drained, get peak() { return peak; } };
+    return { dataDir, transcript, record, calls, commits, checkpoints, diagnostics, controller, run, drained, get peak() { return peak; } };
 }
 
 for (const count of [80, 160, 320]) test(`sparse review explicitly approves every one of ${count} accurate cues without regenerating approved text`, async t => {
@@ -125,12 +129,17 @@ test('partially missing sparse approvals use one existing targeted review and ne
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.deepEqual(f.calls.map(call => [call.review, call.indexes]), [[false, Array.from({ length: 80 }, (_, index) => index)],
         [true, Array.from({ length: 80 }, (_, index) => index)], [true, [20, 72]]]);
-    assert(f.commits.includes(20), 'only the confirmed contiguous prefix may become durable before correction');
+    const confirmed = Array.from({ length: 80 }, (_, index) => index).filter(index => ![20, 72].includes(index));
+    const beforeCorrection = f.checkpoints.find(value => value.progress?.completedCues === 78);
+    assert.deepEqual(beforeCorrection?.progress.cueIndexes, confirmed, 'only the exact explicitly approved indexes become durable before correction');
+    assert.deepEqual(beforeCorrection.cues.map(cue => [cue.id, cue.start, cue.end]),
+        confirmed.map(index => f.transcript[index]).map(cue => [cue.id, cue.start, cue.end]));
+    assert(beforeCorrection.cues.every(cue => unwrapped(cue.text) === koreanText));
     assert.equal(result.subtitleTranslation.length, 80);
     await f.drained();
 });
 
-test('a repeatedly unapproved sparse cue fails once and retains only the strictly approved prefix', async t => {
+test('a repeatedly unapproved sparse cue remains pending while every explicitly approved neighbor is retained', async t => {
     const f = await fixture(t, { handler: call => {
         const result = answer(call);
         if (call.review) result.approvedIndexes = result.approvedIndexes.filter(index => index !== 20);
@@ -138,9 +147,18 @@ test('a repeatedly unapproved sparse cue fails once and retains only the strictl
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUE_COUNT_MISMATCH');
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(f.calls.length, 3, 'an absent approval is not silently accepted or recursively retried');
-    assert.equal(result.subtitleTranslationPartial.length, 20);
+    const confirmed = Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 20);
+    assert.equal(result.subtitleTranslationPartial.length, 79);
+    assert.equal(result.subtitleTranslationProgress.version, 2);
+    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, confirmed);
+    assert.equal(result.subtitleTranslationProgress.complete, false);
+    assert.equal(result.subtitleTranslationProgress.translationComplete, false);
+    assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]),
+        confirmed.map(index => f.transcript[index]).map(cue => [cue.id, cue.start, cue.end]));
+    assert(result.subtitleTranslationPartial.every(cue => unwrapped(cue.text) === koreanText));
+    assert.deepEqual(f.calls.at(-1).indexes, [20]);
     assert.equal(result.subtitleTranslation, undefined);
     await f.drained();
 });
@@ -149,8 +167,18 @@ test('empty sparse approval and correction arrays cannot certify an unchecked ba
     const f = await fixture(t, { handler: call => call.review ? { approvedIndexes: [], corrections: [], terms: [] } : fullAnswer(call) });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUE_COUNT_MISMATCH');
-    assert.equal(f.calls.length, 2);
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    const corrections = f.calls.slice(2);
+    assert.equal(corrections.length, 64, 'valid empty reviews use only the shared bounded correction budget');
+    assert(corrections.every(call => call.review && call.count <= 20));
+    assert.deepEqual(corrections.filter(call => call.count === 20).map(call => call.indexes),
+        Array.from({ length: 4 }, (_, group) => Array.from({ length: 20 }, (_, index) => group * 20 + index)));
+    assert.deepEqual(corrections.filter(call => call.count === 1).map(call => call.indexes[0]),
+        Array.from({ length: 60 }, (_, index) => index), 'only missing rows receive one singleton correction and the remaining rows are not retried beyond budget');
+    assert(f.diagnostics.some(event => event.code === 'SUBTITLE_REPAIR_LIMIT' && event.level === 'warning'));
+    assert.equal(result.subtitleTranslationProgress.complete, false);
+    assert.equal(result.subtitleTranslationProgress.translationComplete, false);
+    assert.equal(result.subtitleTranslation, undefined);
     assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
     await f.drained();
 });
