@@ -1860,3 +1860,16 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
   .catalog-queue-item { flex-wrap: wrap; }
   .catalog-queue-item-actions { margin-left: 32px; }
 }
+.catalog-job-failures { margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(251,191,36,.3); min-width: 0; }
+.catalog-job-failures > strong { display: block; color: #fcd486; font-size: 14px; margin-bottom: 10px; }
+.catalog-job-failure-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.catalog-job-failure-item { min-width: 0; padding: 12px; border: 1px solid rgba(251,191,36,.25); border-radius: 8px; background: rgba(88,60,18,.15); }
+.catalog-job-failure-name, .catalog-job-failure-path, .catalog-job-failure-stage, .catalog-job-failure-count, .catalog-job-failure-retained { display: block; overflow-wrap: anywhere; }
+.catalog-job-failure-name { color: #f2f5fa; font-size: 14px; }
+.catalog-job-failure-path { color: #aebbd0; font-size: 11px; margin-top: 4px; }
+.catalog-job-failure-stage, .catalog-job-failure-count { font-size: 12px; color: #d7e1ef; margin-top: 7px; }
+.catalog-job-failure-retained { color: #9ee5c2; font-size: 12px; margin-top: 7px; }
+.catalog-job-failure-reason { font-size: 13px; color: #f5c99a; overflow-wrap: anywhere; margin: 7px 0 10px; white-space: normal; }
+.catalog-job-failure-more { margin-top: 10px; }
+.catalog-job-failure-more > summary { cursor: pointer; color: #baddff; padding: 9px 0; font-size: 13px; }
+.catalog-job-failure-more > summary:focus-visible, .catalog-job-failure-item button:focus-visible { outline: 3px solid #67e8f9; outline-offset: 3px; }

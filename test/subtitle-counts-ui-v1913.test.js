@@ -220,14 +220,14 @@ test('the visible count-block repair posts only the clicked record ID to transla
   assert.equal(requests().length, 1);
 });
 
-test('a visible count-block action stays disabled when the selected local provider is unavailable or another analysis is active', async () => {
+test('a visible count-block action stays disabled when the provider is unavailable or the same video is active', async () => {
   const record = compact('owned-repair-unavailable');
   for (const active of [false, true]) {
     const ui = await boot({ records: [record], savedSettings: settings,
       ...(active ? { initialActiveJob: { id: 'owned-other-active-job', status: 'running', total: 1, completed: 0,
-        currentFile: '합성 다른 영상.mp4', currentFilePath: 'Z:\\OWNED_UI_ONLY\\other.mp4', results: [], stage: '합성 처리 중' } }
+        currentFile: record.name, currentFilePath: record.path, results: [], stage: '합성 처리 중' } }
         : { providerStatus: { codex: { available: false, loggedIn: false }, speech: { available: false } } }) });
-    const button = repairFor(ui, record.id); assert(button);
+    const button = allNodes(rowFor(ui, record.id)).find(node => node.tag === 'button' && node.dataset.translationRepairId === record.id); assert(button);
     assert.equal(button.disabled, true);
     await button.dispatch('click');
     assert.equal(ui.calls.filter(call => call.method === 'POST').length, 0, 'even a direct stale click cannot bypass the readiness or busy guard');
