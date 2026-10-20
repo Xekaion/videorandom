@@ -217,17 +217,14 @@ test('a failed automatic attempt pauses other files and can be retried on a futu
   assert.deepEqual(f.calls.map(call => call.path), [f.files[0], f.files[1], f.files[0]]);
 });
 
-test('a missing queued file is removed and pauses the queue without blocking recovery', async t => {
+test('a missing queued file is removed and the next independent queued video runs', async t => {
   const f = await fixture(t, undefined, false);
   await f.request('/auto-pick', { filePath: f.files[0], options: localOptions });
   await f.request('/auto-pick', { filePath: f.files[1] });
   await fs.unlink(f.files[0]);
   f.engine.getToolsStatus = async () => ({ available: true });
-  const paused = await until(async () => { const queue = (await f.request('/auto-pick')).data; return queue.paused ? queue : null; });
-  assert.equal(paused.pendingCount, 1);
-  assert.equal(f.calls.length, 0);
-  await f.request('/auto-pick', { resume: true }, 'PUT');
-  await quiet(f.request);
+  const settled = await quiet(f.request);
+  assert.equal(settled.paused, false);
   assert.deepEqual(f.calls.map(call => call.path), [f.files[1]]);
 });
 
@@ -337,6 +334,10 @@ test('an interrupted process keeps its current automatic file recoverable after 
   await f.close();
   assert.equal(JSON.parse(await fs.readFile(path.join(f.dataDir, 'auto-pick.json'), 'utf8')).entries.length, 1);
   const reopened = await f.open(false);
+  const interrupted = (await reopened.request('/auto-pick')).data;
+  assert.equal(interrupted.paused, true); assert.equal(interrupted.pendingCount, 1);
+  await delay(30); assert.equal(attempts, 1);
+  await reopened.request('/auto-pick', { resume: true }, 'PUT');
   await quiet(reopened.request);
   assert.equal(attempts, 2);
   assert.equal((await reopened.request('/results')).data.results.some(result => result.status === 'completed'), true);

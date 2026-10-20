@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
   <!-- Custom Styling -->
-  <link rel="stylesheet" href="css/style.css?v=1.9.19">
+  <link rel="stylesheet" href="css/style.css?v=1.9.20">
 </head>
 <body>
 
@@ -40,7 +40,7 @@
       <div class="settings-bar">
         <a class="header-link" href="#historyCard">전체 기록</a>
         <a class="header-link header-analysis-link" href="#videoCatalog">분석 현황 · 대기열</a>
-        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.19</span>
+        <span id="appVersion" class="app-version" aria-label="실행 중인 프로그램 버전">v1.9.20</span>
         <button id="appUpdateToggle" class="header-link app-update-toggle" type="button" aria-expanded="false" aria-controls="appUpdatePanel">업데이트</button>
         <button id="soundToggle" class="btn-icon" title="효과음 켜기/끄기">
           <i class="fa-solid fa-volume-high"></i>
@@ -376,6 +376,11 @@
             <p id="catalogQueueReason" class="catalog-work-error hidden" role="status"></p>
             <ol id="catalogQueueItems" class="catalog-queue-items" aria-label="현재 작업의 남은 영상과 다음 분석 대기 영상"></ol>
             <p id="catalogQueueNotice" class="catalog-queue-notice hidden" role="status"></p>
+            <section id="catalogQueueIssues" class="catalog-job-failures hidden" aria-labelledby="catalogQueueIssuesTitle">
+              <strong id="catalogQueueIssuesTitle"></strong>
+              <p id="catalogQueueIssuesNote" class="catalog-queue-scope"></p>
+              <div id="catalogQueueIssueItems" class="catalog-job-failure-items"></div>
+            </section>
             <p class="catalog-queue-scope">이 PC에서 등록한 영상만 표시합니다. 다른 PC가 서버에 보낸 전체 대기열은 포함하지 않습니다.</p>
           </div>
         </div>
@@ -623,9 +628,9 @@
   <script src="js/app.js?v=1.6.0" defer></script>
   <script src="js/history.js?v=1.6.0" defer></script>
   <script src="js/catalog-sort.js?v=1.6.0" defer></script>
-  <script src="js/analysis-progress.js?v=1.9.19" defer></script>
-  <script src="js/catalog.js?v=1.9.19" defer></script>
-  <script src="js/diagnostics.js?v=1.9.19" defer></script>
-  <script src="js/app-update.js?v=1.9.19" defer></script>
+  <script src="js/analysis-progress.js?v=1.9.20" defer></script>
+  <script src="js/catalog.js?v=1.9.20" defer></script>
+  <script src="js/diagnostics.js?v=1.9.20" defer></script>
+  <script src="js/app-update.js?v=1.9.20" defer></script>
 </body>
 </html>

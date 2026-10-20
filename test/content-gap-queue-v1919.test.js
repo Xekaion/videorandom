@@ -111,14 +111,24 @@ test('zero accepted but fully attempted source cues do not block later videos or
   assert.equal(record.subtitleAutoSave, undefined); assert.equal(record.subtitleTranslationProgress.completedCues, 0);
 });
 
-for (const [label, change, writeFailure] of [
+for (const [label, change] of [
   ['legacy content failure without terminal proof', r => { delete r.subtitleTranslationProgress.processingComplete; }],
+  ['incomplete source processing', r => { r.subtitleTranslationProgress.sourceComplete = false; r.subtitleTranslationProgress.sourceProcessed = false; }],
+  ['claimed but unproved source processing', r => { r.subtitleTranslationProgress.sourceComplete = false; r.subtitleTranslationProgress.sourceProcessed = true;
+    r.transcriptionQuality = { version: 1, source: 'audio', profile: 'accurate', complete: false, processingComplete: false, duration: 12, processedUntil: 3 }; }]
+]) test(`file-specific incomplete result stays partial without blocking the next video: ${label}`, async t => {
+  const f = await fixture(t, { change }); await enqueuePair(f);
+  const queue = await until(async () => { const q = await f.queue(); return !q.activeJob && !q.pendingCount ? q : null; });
+  assert.equal(queue.paused, false); assert.deepEqual(f.calls, f.files);
+  const record = (await f.request('/results')).data.results.find(record => record.path === f.files[0] && record.id !== f.first.id);
+  assert.equal(record.status, 'partial'); assert.equal(record.subtitleTranslationProgress.completedCues, 2);
+  assert.equal(record.subtitleTranslationProgress.translationComplete, false);
+});
+
+for (const [label, change, writeFailure] of [
   ['provider refusal', r => { r.subtitleDiagnostic = { code: 'PROVIDER_REFUSAL', event: 'error', level: 'error' }; r.subtitleError = 'Synthetic refused'; }],
   ['network timeout', r => { r.subtitleDiagnostic = { code: 'NETWORK_UNREACHABLE', event: 'error', level: 'error' }; r.subtitleError = 'Synthetic network failed'; }],
   ['summary failure', r => { r.summaryError = 'Synthetic summary failed'; }],
-  ['incomplete source processing', r => { r.subtitleTranslationProgress.sourceComplete = false; r.subtitleTranslationProgress.sourceProcessed = false; }],
-  ['claimed but unproved source processing', r => { r.subtitleTranslationProgress.sourceComplete = false; r.subtitleTranslationProgress.sourceProcessed = true;
-    r.transcriptionQuality = { version: 1, source: 'audio', profile: 'accurate', complete: false, processingComplete: false, duration: 12, processedUntil: 3 }; }],
   ['subtitle save failure', () => {}, true]
 ]) test(`nonblocking gaps never relax ${label}`, async t => {
   const f = await fixture(t, { change, writeFailure }); await enqueuePair(f);
@@ -137,7 +147,7 @@ test('processed gaps cannot clear a user pause set while the video was running',
   assert.equal((await f.journal()).pauseCause.kind, 'user-pause');
 });
 
-for (const pause of ['user-pause', 'interrupted', 'attempt-failed']) test(`a partial translation repair cannot release existing ${pause} pause`, async t => {
+for (const pause of ['user-pause', 'interrupted']) test(`a partial translation repair cannot release existing ${pause} pause`, async t => {
   const f = await fixture(t, { pause });
   await f.request('/auto-pick', { filePath: f.files[1], options });
   const repair = await f.request(`/results/${f.first.id}/subtitles/repair`, { options });

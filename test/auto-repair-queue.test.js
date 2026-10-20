@@ -164,11 +164,24 @@ for (const [label, change] of [
   ['translation not complete', value => { value.subtitleTranslationProgress.translationComplete = false; }],
   ['translation timing mismatch', value => { value.subtitleTranslationPartial[0].end = 4; }],
   ['translation fingerprint mismatch', value => { value.subtitleTranslationProgress.sourceFingerprint = '0'.repeat(64); }],
+  ['missing summary', value => { value.summary = ''; }]
+]) test(`a saved incomplete partial does not stop another independent video: ${label}`, async t => {
+  const f = await fixture(t, { analyze: file => {
+    if (!file.name.startsWith('A')) return result(file);
+    const value = qualityWarning(result(file)); change(value); return value;
+  } });
+  await f.request('/auto-pick', { filePath: f.files[0], options });
+  await f.request('/auto-pick', { filePath: f.files[1], options });
+  assert.equal((await quiet(f)).paused, false); assert.equal(f.calls.length, 2);
+  const stored = (await f.request('/results')).data.results.find(record => record.path === f.files[0]);
+  assert.equal(stored.status, 'partial');
+});
+
+for (const [label, change] of [
   ['source error', value => { value.error = 'Synthetic source error'; }],
   ['summary error', value => { value.summaryError = 'Synthetic summary error'; }],
-  ['subtitle error', value => { value.subtitleError = 'Synthetic subtitle error'; }],
-  ['missing summary', value => { value.summary = ''; }]
-]) test(`an incomplete partial still pauses the queue: ${label}`, async t => {
+  ['subtitle error', value => { value.subtitleError = 'Synthetic subtitle error'; }]
+]) test(`an unknown failure still pauses the queue: ${label}`, async t => {
   const f = await fixture(t, { analyze: file => { const value = qualityWarning(result(file)); change(value); return value; } });
   const failed = await firstFailure(f);
   await f.request('/auto-pick', { filePath: f.files[1], options });
@@ -286,17 +299,18 @@ test('explicit cancellation is persisted and is not undone by a successful repai
   await quiet(f); assert.equal((await f.queueFile()).pauseCause, undefined);
 });
 
-test('a missing queued file records its pause cause and explicit resume clears it', async t => {
+test('a missing queued file stays visible as a saved issue while the following video runs', async t => {
   const held = gate();
   const f = await fixture(t, { seedRecord: {}, translate: async (record, settings, context) => { await held.wait(context.signal); return repaired(record); } });
   const repair = await f.request(`/results/${'a'.repeat(32)}/subtitles/repair`, { options });
   await f.request('/auto-pick', { filePath: f.files[1], options });
   await f.request('/auto-pick', { filePath: f.files[2], options });
-  await fs.unlink(f.files[1]); held.release(); await finished(f, repair.data.id); await paused(f);
-  assert.deepEqual((await f.queueFile()).pauseCause, { kind: 'missing-file', path: f.files[1] });
-  await f.request('/auto-pick', { resume: true }, 'PUT'); await quiet(f);
+  await fs.unlink(f.files[1]); held.release(); await finished(f, repair.data.id); await quiet(f);
+  assert.equal((await queue(f)).paused, false);
   assert.equal((await f.queueFile()).pauseCause, undefined);
   assert.deepEqual(f.calls.map(call => call.path), [f.files[0], f.files[2]]);
+  const missing = (await f.request('/results')).data.results.find(record => record.path === f.files[1]);
+  assert.equal(missing.status, 'failed');
 });
 
 test('a result persistence failure records storage-error instead of an unverified failed-result scope', async t => {

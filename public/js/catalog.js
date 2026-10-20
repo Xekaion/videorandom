@@ -14,7 +14,7 @@
     pendingRequest: null, requestFailure: null, jobTargets: { id: '', keys: new Set() }, detailActivityPath: '',
     refreshing: false, detailId: null, detailPath: '', detailRequest: 0, saving: false, subtitleDownloading: false, subtitleFolderSaving: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
-    autoPick: null, queue: null, queueBusy: false, queuePolling: false, queueLoadError: false, queueUnsupported: false, queueRenderKey: '', queueRevision: 0, autoTimer: null, autoSettingsTimer: null, settingsRevision: 0, noticeRevision: 0, fastSave: null, fastNoticeRevision: null,
+    autoPick: null, queue: null, queueBusy: false, queuePolling: false, queueLoadError: false, queueUnsupported: false, queueRenderKey: '', queueIssueDetails: new Map(), queueRevision: 0, autoTimer: null, autoSettingsTimer: null, settingsRevision: 0, noticeRevision: 0, fastSave: null, fastNoticeRevision: null,
     autoPolling: false, autoBusy: false, autoResuming: false, autoResumeError: '', autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
     resultsReady: false, autoSavedCount: null, autoResultsLoading: false, autoResultsWanted: null,
     winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: '', speechInfo: { jobId: '', fileKey: '', metadata: null }
@@ -523,6 +523,7 @@
   function renderQueue() {
     const queue = state.queue;
     if (!queue) return;
+    renderQueueIssues(queue.fileIssues);
     const pending = queue.pending || [];
     const batch = Array.isArray(queue.currentBatch) ? queue.currentBatch : [];
     const nextBatch = batch.filter(file => file.status === 'scheduled');
@@ -584,6 +585,49 @@
     }
     $('catalogQueueItems').replaceChildren(fragment);
     if (focusedPath) newButtons.find(button => !button.disabled && button.dataset.queuePath === focusedPath && button.dataset.queueAction === focusedAction)?.focus();
+  }
+
+  function renderQueueIssues(value) {
+    const panel = $('catalogQueueIssues');
+    const issues = value && Number.isSafeInteger(value.total) && value.total > 0 && Array.isArray(value.items)
+      ? value.items.slice(0, 20).filter(item => item && typeof item.recordId === 'string' && /^[a-f0-9]{16,64}$/.test(item.recordId)
+        && typeof item.name === 'string' && typeof item.path === 'string' && typeof item.reason === 'string') : [];
+    panel.classList.toggle('hidden', !issues.length);
+    $('catalogQueueIssuesTitle').textContent = issues.length ? `다음 분석으로 넘긴 영상 · 저장 기록 ${value.total.toLocaleString()}건` : '';
+    $('catalogQueueIssuesNote').textContent = issues.length
+      ? `미완료 결과와 원인을 보관했습니다. 필요할 때 개별 복구할 수 있습니다.${value.total > issues.length ? ` 최근 ${issues.length}건을 표시합니다.` : ''}` : '';
+    const renderKey = JSON.stringify(issues);
+    if (panel.dataset.renderKey === renderKey) return;
+    panel.dataset.renderKey = renderKey;
+    const list = make('ul', 'catalog-job-failure-list');
+    for (const issue of issues) {
+      const item = make('li', 'catalog-job-failure-item');
+      item.append(make('strong', 'catalog-job-failure-name', issue.name), make('span', 'catalog-job-failure-path', issue.path));
+      if (Number.isSafeInteger(issue.totalCues) && issue.totalCues >= 0 && Number.isSafeInteger(issue.completedCues)
+        && issue.completedCues >= 0 && issue.completedCues <= issue.totalCues) {
+        item.append(make('span', 'catalog-job-failure-count', `저장된 한국어 자막 ${issue.completedCues.toLocaleString()} / ${issue.totalCues.toLocaleString()}구간`));
+      }
+      const recordedAt = Date.parse(issue.recordedAt);
+      if (Number.isFinite(recordedAt)) item.append(make('span', 'catalog-job-failure-stage',
+        new Date(recordedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })));
+      item.append(make('p', 'catalog-job-failure-reason', issue.reason));
+      const detail = make('button', 'btn-mini', '저장된 결과·오류 보기');
+      detail.type = 'button'; detail.dataset.queueIssueId = issue.recordId;
+      detail.addEventListener('click', async () => {
+        if (detail.disabled) return;
+        detail.disabled = true;
+        try {
+          if (!findRecord(issue.recordId)) {
+            while (state.queueIssueDetails.size >= 20) state.queueIssueDetails.delete(state.queueIssueDetails.keys().next().value);
+            state.queueIssueDetails.set(issue.recordId, { id: issue.recordId, name: issue.name, path: issue.path,
+              status: 'failed', catalogView: 'summary' });
+          }
+          await openDetail(issue.recordId);
+        } finally { detail.disabled = false; }
+      });
+      item.append(detail); list.append(item);
+    }
+    $('catalogQueueIssueItems').replaceChildren(list);
   }
 
   async function refreshQueue() {
@@ -2057,7 +2101,7 @@
     finally { state.exporting = false; updateSelectionUI(); }
   }
 
-  function findRecord(id) { return [...state.records.values()].find(record => record.id === id); }
+  function findRecord(id) { return [...state.records.values()].find(record => record.id === id) || state.queueIssueDetails.get(id); }
 
   async function openDetail(id) {
     const record = findRecord(id);
@@ -2089,11 +2133,13 @@
         const full = await request(`/api/analysis/results/${encodeURIComponent(id)}`);
         if (state.detailRequest !== token || state.detailId !== id || !$('catalogDetail').open) return;
         if (full.id !== id || full.path !== record.path || full.catalogView === 'summary') throw new Error('상세 결과가 일치하지 않습니다. 결과를 다시 불러와 주세요.');
+        const historicalAttempt = state.queueIssueDetails.has(id);
+        if (historicalAttempt) state.queueIssueDetails.set(id, full);
         mergeRecords([full]);
         const latest = recordFor(full);
         if (latest?.id === id && latest.catalogView === 'summary') throw new Error('상세 내용을 읽는 동안 결과가 갱신됐습니다. 상세 보기를 다시 열어 주세요.');
         state.detailLoading = false;
-        return openDetail(latest?.id || id);
+        return openDetail(historicalAttempt ? id : latest?.id || id);
       } catch (error) {
         if (state.detailRequest !== token || state.detailId !== id || !$('catalogDetail').open) return;
         $('catalogDetailMeta').textContent = '상세 내용을 불러오지 못했습니다.';

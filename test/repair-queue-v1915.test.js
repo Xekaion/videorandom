@@ -160,22 +160,24 @@ test('enqueue validates stored source, original file identity and request type w
   assert.equal((await f.request('/queue')).data.pendingCount, 0); assert.equal(f.calls.length, 0);
 });
 
-test('a source changed while waiting pauses the queue and cannot silently become a different analysis', async t => {
+test('a source changed while waiting is skipped and cannot silently become a different analysis', async t => {
   const f = await fixture(t, { deferAutoStart: true });
   await enqueue(f, 1); await enqueue(f, 2);
   await fs.appendFile(f.files[1], 'Changed while queued'); await f.service.activateAutoAnalysis();
-  const queue = await until(async () => { const state = (await f.request('/queue')).data; return state.paused ? state : null; });
-  assert.equal(queue.pendingCount, 1); assert.equal(queue.pending[0].name, 'C.mp4'); assert.equal(f.calls.length, 0);
-  assert.match(queue.waitingReason, /B\.mp4.*변경/);
+  const queue = await until(async () => { const state = (await f.request('/queue')).data; return !state.activeJob && !state.pendingCount ? state : null; });
+  assert.equal(queue.paused, false); assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].path, f.files[2]);
+  assert(queue.fileIssues.items.some(issue => issue.path === f.files[1] && issue.code === 'SOURCE_CHANGED'));
 });
 
-test('missing stored record or source at dequeue pauses instead of substituting media analysis', async t => {
+test('missing stored catalog record at dequeue preserves pending work and pauses instead of substituting media analysis', async t => {
   const f = await fixture(t, { deferAutoStart: true });
   await enqueue(f, 1, 'translation-only'); await enqueue(f, 2);
   await f.close(); await fs.unlink(path.join(f.dataDir, 'results', f.records[1].id + '.json'));
   const reopened = await f.open(); await reopened.service.activateAutoAnalysis();
   const queue = await until(async () => { const state = (await reopened.request('/queue')).data; return state.paused ? state : null; });
-  assert.equal(queue.pendingCount, 1); assert.match(queue.waitingReason, /B\.mp4.*저장 결과/); assert.equal(f.calls.length, 0);
+  assert.equal(queue.pendingCount, 2); assert.deepEqual(queue.pending.map(item => item.name), ['B.mp4', 'C.mp4']);
+  assert.equal(queue.pauseCause.kind, 'storage-error'); assert.match(queue.waitingReason, /B\.mp4.*저장 결과/); assert.equal(f.calls.length, 0);
 });
 
 test('provider refusal in queued translation repair stops subsequent work and enqueue does not bypass the pause', async t => {

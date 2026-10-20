@@ -6,6 +6,7 @@ const os = require('node:os');
 const express = require('express');
 const { createAnalysisService, validateOptions } = require('../lib/analysis-service');
 const { recordHealth } = require('../lib/record-health');
+const { httpJsonFixture, httpFixtureResponse } = require('./http-json-fixture');
 
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const seedId = 'abcde01234567890abcde01234567890';
@@ -50,8 +51,7 @@ async function fixture(t, { seed = {}, analyze, tools = true, journal } = {}) {
   const server = await new Promise(resolve => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
   const base = `http://127.0.0.1:${server.address().port}/api/analysis`;
   async function request(endpoint, body, method = body === undefined ? 'GET' : 'POST') {
-    const response = await fetch(base + endpoint, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
-    return { status: response.status, data: await response.json() };
+    return httpJsonFixture(base, endpoint, body, method);
   }
   async function finish(id) {
     return until(async () => { const job = (await request('/jobs/' + id)).data; return ['running', 'cancelling'].includes(job.status) ? null : job; });
@@ -153,8 +153,8 @@ test('blank AI completion is partial, and automatic picks do not skip its old bl
   const started = await f.request('/auto-pick', { filePath: f.filePath, options: { mode: 'codex' } });
   assert.equal(started.status, 202);
   assert.equal(started.data.status, 'queued');
-  const quiet = await until(async () => { const state = (await f.request('/auto-pick')).data; return !state.activeJob && state.paused ? state : null; });
-  assert.equal(quiet.paused, true);
+  const quiet = await until(async () => { const state = (await f.request('/auto-pick')).data; return !state.activeJob && !state.pendingCount ? state : null; });
+  assert.equal(quiet.paused, false);
   const result = (await f.request('/results')).data.results.find(record => record.id !== seedId);
   assert.equal(result.status, 'partial');
   assert.equal(result.health.summaryState, 'missing');
@@ -277,15 +277,15 @@ test('saved timed subtitles download with aligned Korean cues and reject unavail
   const server = await new Promise(resolve => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
   t.after(() => new Promise(resolve => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}/api/analysis/results/${seedId}/subtitles`;
-  const original = await fetch(base + '?format=srt&language=original');
+  const original = await httpFixtureResponse(base + '?format=srt&language=original');
   assert.equal(original.status, 200);
   assert.match(original.headers.get('content-disposition'), /attachment/);
   assert.match(await original.text(), /00:00:01,250 --> 00:00:03,500\nこんにちは/);
-  const translated = await fetch(base + '?format=vtt&language=ko');
+  const translated = await httpFixtureResponse(base + '?format=vtt&language=ko');
   assert.equal(translated.status, 200);
   assert.match(await translated.text(), /^WEBVTT\n\n1\n00:00:01\.250 --> 00:00:03\.500\n안녕하세요/);
-  assert.equal((await fetch(base + '?format=html')).status, 400);
-  assert.equal((await fetch(base.replace(seedId, 'ffffffffffffffffffffffffffffffff'))).status, 404);
+  assert.equal((await httpFixtureResponse(base + '?format=html')).status, 400);
+  assert.equal((await httpFixtureResponse(base.replace(seedId, 'ffffffffffffffffffffffffffffffff'))).status, 404);
   const untranslated = await fixture(t, { seed: { transcript: [{ start: 1, end: 3, text: '原文' }] } });
   assert.equal((await untranslated.request(`/results/${seedId}/subtitles?language=ko`)).status, 400);
 });
