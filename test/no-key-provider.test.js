@@ -1536,6 +1536,19 @@ test('ordinary dialogue about being unable to help is not classified as a transl
     assert.equal((await f.run()).subtitleRepairStatus, 'completed'); assert.equal(f.requests.length, 2);
 });
 
+for (const dialogue of ['그 둘이 번역할 수 없어. 새 통역사를 불러 줘.', '수진이 번역할 수 없어. 오늘은 사무실에 없거든.',
+    '민준이 작업을 처리할 수 없어. 다른 담당자에게 물어보자.']) {
+    test(`ordinary subject suffix remains a source-aligned reviewed subtitle: ${dialogue}`, async t => {
+        const f = await translationGuardFixture(t, { count: 80, text: () => '担当者は翻訳できません。別の担当者に聞きましょう。',
+            respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index, text: dialogue })), terms: [] }) });
+        const result = await f.run();
+        assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError); assert.equal(f.requests.length, 2);
+        assert(result.subtitleTranslation.every(cue => cue.text.replace(/\s+/g, ' ') === dialogue));
+        assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), f.source.map(cue => [cue.id, cue.start, cue.end]));
+        assert.equal(result.subtitleDiagnostic, undefined);
+    });
+}
+
 for (const phase of ['draft', 'review']) for (const refusal of [
     '죄송하지만 해당 요청을 도와드릴 수 없습니다.', '이 요청을 도와드릴 수 없습니다.', '요청하신 작업을 수행할 수 없습니다.'
 ]) test(`an explicit scoped task refusal in the ${phase} stops without correction: ${refusal}`, async t => {

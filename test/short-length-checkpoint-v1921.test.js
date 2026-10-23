@@ -65,7 +65,7 @@ async function fixture(t, { prefix = 3, version = 7, mutate = () => {} } = {}) {
     return { dataDir, directory, record, transcript, calls, run, drained };
 }
 
-for (const version of [7, 8]) test(`an exact v${version} independently reviewed short Korean checkpoint migrates to the current contract without retranslating accepted cues`, async t => {
+for (const version of [7, 8, 9]) test(`an exact v${version} independently reviewed short Korean checkpoint migrates to the current contract without retranslating accepted cues`, async t => {
     const f = await fixture(t, { version }); const original = structuredClone(f.transcript);
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
@@ -74,12 +74,12 @@ for (const version of [7, 8]) test(`an exact v${version} independently reviewed 
     assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), original.map(cue => [cue.id, cue.start, cue.end]));
     assert.deepEqual(result.transcript, original);
     const migrated = JSON.parse(await fs.readFile(path.join(f.directory, f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(migrated.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(TRANSLATION_PROMPT_VERSION, 9);
+    assert.equal(migrated.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(TRANSLATION_PROMPT_VERSION, 10);
     assert.equal(migrated.subtitleQuality, 'accurate'); assert.equal(migrated.reviewPasses, 2); assert.equal(migrated.completedCues, 3);
     await f.drained();
 });
 
-for (const version of [7, 8]) test(`an exact v${version} reviewed short prefix is retained while only its missing tail receives translation and review`, async t => {
+for (const version of [7, 8, 9]) test(`an exact v${version} reviewed short prefix is retained while only its missing tail receives translation and review`, async t => {
     const f = await fixture(t, { prefix: 2, version }); const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.deepEqual(f.calls.map(call => [call.review, call.indexes]), [[false, [2]], [true, [2]]]);
@@ -89,7 +89,7 @@ for (const version of [7, 8]) test(`an exact v${version} reviewed short prefix i
     await f.drained();
 });
 
-for (const version of [7, 8]) for (const [name, mutate] of [
+for (const version of [7, 8, 9]) for (const [name, mutate] of [
     ['source fingerprint', saved => { saved.sourceFingerprint = '0'.repeat(64); }],
     ['source cue ID', saved => { saved.subtitles[1].id = 'owned-unrelated-cue'; }],
     ['source cue start', saved => { saved.subtitles[1].start += 0.25; }],

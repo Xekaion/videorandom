@@ -97,7 +97,7 @@ for (const count of [80, 160, 320]) test(`sparse review explicitly approves ever
         } else assert(call.schema.properties.subtitles, 'the initial translation remains a complete normal draft');
     }
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(TRANSLATION_PROMPT_VERSION, 9);
+    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(TRANSLATION_PROMPT_VERSION, 10);
     assert.equal(saved.reviewPasses, 2); assert.equal(saved.completedCues, count);
     await f.drained();
 });

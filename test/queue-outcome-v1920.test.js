@@ -13,6 +13,8 @@ function assertOutcome(actual, canContinue, code) {
 const partial = extra => ({ status: 'partial', warnings: ['Synthetic quality warning'], ...extra });
 const allowed = ['SUBTITLE_CUE_COUNT_MISMATCH', 'SUBTITLE_BATCH_INVALID', 'SUBTITLE_TEXT_TOO_SHORT',
   'SUBTITLE_REVIEW_TOO_SHORT', 'SUBTITLE_CUES_PENDING', 'SUBTITLE_FOREIGN_TEXT', 'SOURCE_REVIEW_REQUIRED', 'FILE_NOT_FOUND', 'SOURCE_CHANGED'];
+// Bare subtitle refusal codes lack the response source proof required to scope
+// them to one video. The exact code/source/message cases have their own tests.
 const blocked = ['PROVIDER_UNKNOWN', 'PROVIDER_REFUSAL', 'SUBTITLE_PROVIDER_REFUSAL', 'SUBTITLE_REFUSAL_TEXT_DETECTED',
   'PROVIDER_AUTH', 'PROVIDER_QUOTA', 'PROVIDER_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'NETWORK_UNREACHABLE',
   'LOCAL_DEPENDENCY_MISSING', 'STORAGE_WRITE_FAILED', 'RESULT_SAVE_FAILED', 'ANALYSIS_BUSY', 'ANALYSIS_CANCELLED'];
