@@ -7,6 +7,7 @@ const http = require('node:http');
 const express = require('express');
 const { createAnalysisService } = require('../lib/analysis-service');
 const { createConnectionStore } = require('../lib/connection-store');
+const { httpJsonFixture } = require('./http-json-fixture');
 
 const code = 'fixture-remembered-code-123456789';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -37,10 +38,7 @@ async function fixture(t, { analyze, deferAutoStart = false, failingSave = false
     const app = express(); app.use(express.json()); app.use('/api/analysis', service.router);
     const server = await new Promise(resolve => { const created = app.listen(0, '127.0.0.1', () => resolve(created)); });
     const base = `http://127.0.0.1:${server.address().port}/api/analysis`;
-    const request = async (endpoint, body, method = body === undefined ? 'GET' : 'POST') => {
-      const response = await fetch(base + endpoint, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
-      return { status: response.status, data: await response.json() };
-    };
+    const request = (endpoint, body, method = body === undefined ? 'GET' : 'POST') => httpJsonFixture(base, endpoint, body, method);
     let closed = false;
     const close = async () => { if (closed) return; closed = true; await service.stop(); await until(async () => !(await request('/auto-pick')).data.activeJob); await new Promise(resolve => server.close(resolve)); };
     closers.push(close);
@@ -90,13 +88,14 @@ test('unverified auto settings and a failed connection check never overwrite a r
 
 test('forgetting while a connection check is in flight prevents late credential resurrection', async t => {
   const f = await fixture(t);
-  let release, arrived;
-  const hold = new Promise(resolve => { release = resolve; }), accepted = new Promise(resolve => { arrived = resolve; });
-  const pair = await relay(t, async () => { arrived(); await hold; });
+  let release, arrived = false;
+  const hold = new Promise(resolve => { release = resolve; });
+  const pair = await relay(t, async () => { arrived = true; await hold; });
   const checking = f.request('/remote/check', pair);
-  await accepted;
-  assert.equal((await f.request('/connection', undefined, 'DELETE')).status, 200);
-  release();
+  try {
+    await until(() => arrived);
+    assert.equal((await f.request('/connection', undefined, 'DELETE')).status, 200);
+  } finally { release(); }
   const checked = await checking;
   assert.equal(checked.data.ready, true); assert.equal(checked.data.connection, undefined);
   assert.equal((await f.request('/connection')).data.remembered, false);

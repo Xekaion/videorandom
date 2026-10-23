@@ -37,6 +37,10 @@
     if (CAUSE_CODES.has(value.causeCode)) item.causeCode = value.causeCode;
     if (typeof value.refusalSource === 'string' && Object.hasOwn(REFUSAL_SOURCES, value.refusalSource)) item.refusalSource = value.refusalSource;
     if (typeof value.executionSource === 'string' && Object.hasOwn(EXECUTION_SOURCES, value.executionSource)) item.executionSource = value.executionSource;
+    if (typeof value.providerRequestedModel === 'string' && /^gpt-[a-z0-9][a-z0-9.-]{0,79}$/.test(value.providerRequestedModel)) item.providerRequestedModel = value.providerRequestedModel;
+    if (['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value.providerReasoningEffort)) item.providerReasoningEffort = value.providerReasoningEffort;
+    if (value.providerServiceTier === 'standard') item.providerServiceTier = 'standard';
+    if (['capacity', 'timeout', 'authentication', 'quota', 'unavailable', 'network', 'refusal'].includes(value.providerErrorType)) item.providerErrorType = value.providerErrorType;
     for (const key of ['executionElapsedMs', 'executionDeadlineMs']) if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 604800000) item[key] = value[key];
     for (const key of ['providerReconnectAttempt', 'providerReconnectLimit']) if (integer(value[key]) && value[key] <= 1000) item[key] = value[key];
     if (Number.isInteger(value.providerHttpStatus) && value.providerHttpStatus >= 100 && value.providerHttpStatus <= 599) item.providerHttpStatus = value.providerHttpStatus;
@@ -106,6 +110,7 @@
       if (event.code) message.append(node('span', 'diagnostics-meta', safeText(event.code, 160)));
       const technicalCodes = [event.httpStatus ? `HTTP ${event.httpStatus}` : '', event.systemCode ? `시스템 ${event.systemCode}` : '', event.causeCode ? `원인 ${event.causeCode}` : ''].filter(Boolean).join(' · ');
       if (technicalCodes) message.append(node('span', 'diagnostics-meta', technicalCodes));
+      if (event.providerRequestedModel) message.append(node('span', 'diagnostics-meta', `요청 모델 ${event.providerRequestedModel}${event.providerReasoningEffort ? ` · ${event.providerReasoningEffort}` : ''}${event.providerServiceTier ? ' · Standard' : ''}`));
       if (event.executionSource) {
         const times = [Number.isSafeInteger(event.executionElapsedMs) ? `대기 ${Math.round(event.executionElapsedMs / 1000)}초` : '',
           Number.isSafeInteger(event.executionDeadlineMs) ? `제한 ${Math.round(event.executionDeadlineMs / 1000)}초` : ''].filter(Boolean).join(' / ');

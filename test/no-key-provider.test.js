@@ -177,7 +177,9 @@ test('existing subtitles are retained and fixed isolated Codex invocation annota
     assert.ok(call.args.includes('shell_tool'));
     assert.ok(call.args.includes('apps'));
     assert.ok(call.args.includes('plugins'));
-    assert.ok(!call.args.includes('--model'), 'use the account default unless configured explicitly');
+    assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6-luna', 'pin the explicit low-usage model');
+    assert.ok(call.args.includes('model_reasoning_effort="low"'));
+    assert.ok(call.args.includes('service_tier="default"'));
     assert.ok(call.input.includes(original[0].text));
     assert.ok(!call.input.includes(record.path));
     assert.ok(call.options.cwd.startsWith(path.join(dataDir, 'tmp')));

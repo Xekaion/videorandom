@@ -413,7 +413,8 @@ test('supplement and failure diagnostics retain only technical counters and cano
   assert.equal(failure.stage, 'translation_review'); assert.equal(failure.httpStatus, 503);
   const allowed = new Set(['source', 'level', 'event', 'stage', 'totalCues', 'completedCues', 'expectedCues', 'returnedCues', 'startCue', 'endCue', 'code', 'message', 'httpStatus',
     'executionSource', 'executionElapsedMs', 'executionDeadlineMs', 'providerErrorType', 'providerSystemCode',
-    'providerReconnectAttempt', 'providerReconnectLimit', 'providerHttpStatus']);
+    'providerReconnectAttempt', 'providerReconnectLimit', 'providerHttpStatus',
+    'providerRequestedModel', 'providerReasoningEffort', 'providerServiceTier']);
   for (const event of [...diagnostics, result.subtitleDiagnostic]) assert.ok(Object.keys(event).every(key => allowed.has(key)), JSON.stringify(event));
   const serialized = JSON.stringify([...diagnostics, result.subtitleDiagnostic]);
   for (const secret of [JAPANESE, KOREAN, RETAINED, marker, privatePath, f.dataDir, 'contextOtherSubtitles', '자료 JSON:']) assert.equal(serialized.includes(secret), false);

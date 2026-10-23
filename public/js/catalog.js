@@ -118,6 +118,10 @@
       || ({ ready: '정리 완료', 'extraction-only': '로컬 추출 · 자동 요약 전', 'summary-missing': '요약 실패 / 누락', partial: '일부 완료 · 복구 필요', failed: '분석 실패 · 복구 필요' })[healthFor(record).code] || '미분석';
   };
   const codexReady = () => !!(state.config?.providers?.codex?.available && state.config.providers.codex.loggedIn && state.config.providers?.speech?.available);
+  const codexPolicyLabel = policy => policy && typeof policy.requestedModel === 'string'
+    && /^gpt-[a-z0-9][a-z0-9.-]{0,79}$/.test(policy.requestedModel)
+    && ['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(policy.reasoningEffort) && policy.serviceTier === 'standard'
+    ? `${policy.requestedModel} · ${policy.reasoningEffort} · Standard` : '';
 
   function codexUnavailableReason() {
     const providers = state.config?.providers;
@@ -1447,7 +1451,7 @@
     $('catalogProviderStatus').textContent = mode === 'remote'
       ? '음성 인식과 자동 요약은 연결한 서버 PC에서 실행합니다. 이 PC에는 Codex나 음성 인식 환경을 설치하지 않아도 됩니다.'
       : mode === 'local' ? '로컬 추출에는 Codex 로그인이나 음성 인식 환경이 필요하지 않습니다.'
-        : codexReady() ? '이 PC의 Codex 로그인과 로컬 음성 인식 준비 완료' : `이 PC 자동 요약: ${codexUnavailableReason()}`;
+        : codexReady() ? `이 PC의 Codex 로그인과 로컬 음성 인식 준비 완료${codexPolicyLabel(state.config?.providers?.codex?.modelPolicy) ? ` · 요청 모델 ${codexPolicyLabel(state.config.providers.codex.modelPolicy)}` : ''}` : `이 PC 자동 요약: ${codexUnavailableReason()}`;
     $('catalogProviderStatus').classList.toggle('catalog-error', mode === 'codex' && !codexReady());
     if (state.config?.tools?.available === false) {
       $('catalogToolStatus').textContent = '분석 도구가 없습니다. FFmpeg와 FFprobe를 설치한 뒤 결과 불러오기를 눌러 주세요.';
@@ -2168,6 +2172,9 @@
     const versions = record.analysisProvenance || {};
     const versionLabel = stamp => [validVersion(stamp?.clientVersion) ? `프로그램 ${stamp.clientVersion}` : '', validVersion(stamp?.serverVersion) ? `분석 서버 ${stamp.serverVersion}` : ''].filter(Boolean).join(' / ');
     $('catalogAnalysisVersions').textContent = `분석 버전: ${versionLabel(versions.analysis) || '기록 없음 · 이전 결과의 버전은 추정하지 않습니다.'}${versionLabel(versions.translation) ? ` · 자막 번역 복구 버전: ${versionLabel(versions.translation)}` : ''}`;
+    const requestedModels = ['summary', 'translation'].map(operation => codexPolicyLabel(record.codexModels?.[operation])
+      ? `${operation === 'summary' ? '요약' : '번역'} 요청 모델 ${codexPolicyLabel(record.codexModels[operation])}` : '').filter(Boolean);
+    if (requestedModels.length) $('catalogAnalysisVersions').textContent += ` · ${requestedModels.join(' / ')}`;
     $('catalogDetailHealth').textContent = healthLabel(record);
     $('catalogDetailRepairNote').textContent = detailRepairNote(record);
     $('catalogDetailRepair').classList.toggle('hidden', healthFor(record).repairable === false);

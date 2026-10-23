@@ -55,6 +55,14 @@ async function boot({ response = result(), handler } = {}) {
     get maxActive() { return maxActive; } };
 }
 
+test('requested model configuration is visible without claiming an actual model or displaying invalid fields', async () => {
+  const ui = await boot({ response: result([event('owned-model', { code: 'PROVIDER_CAPACITY', providerErrorType: 'capacity',
+    providerRequestedModel: 'gpt-6-luna', providerReasoningEffort: 'low', providerServiceTier: 'standard', providerActualModel: 'PRIVATE_UNVERIFIED' })]) });
+  await ui.open(true);
+  const text = textOf(ui.elements.get('diagnosticsRows'));
+  assert.match(text, /요청 모델 gpt-6-luna.*low.*Standard/); assert(!text.includes('PRIVATE_UNVERIFIED'));
+});
+
 test('diagnostics stay dormant while closed and poll only an open visible panel without overlap', async () => {
   const ui = await boot({ response: result([event('01')]) });
   assert.equal(ui.calls.length, 0); assert.equal(ui.timers.size, 0);
