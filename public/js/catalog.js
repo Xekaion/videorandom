@@ -14,7 +14,7 @@
     pendingRequest: null, requestFailure: null, jobTargets: { id: '', keys: new Set() }, detailActivityPath: '',
     refreshing: false, detailId: null, detailPath: '', detailRequest: 0, saving: false, subtitleDownloading: false, subtitleFolderSaving: false, hasModePreference: false,
     hostBusy: false, remoteChecking: false, connectionForgetting: false, connection: null, connectionRevision: 0, connectionVersion: 0, connectionCodeOrigin: '',
-    autoPick: null, queue: null, queueBusy: false, queuePolling: false, queueLoadError: false, queueUnsupported: false, queueRenderKey: '', queueIssueDetails: new Map(), queueRevision: 0, autoTimer: null, autoSettingsTimer: null, settingsRevision: 0, noticeRevision: 0, fastSave: null, fastNoticeRevision: null,
+    autoPick: null, queue: null, queueBusy: false, queuePolling: false, queueLoadError: false, queueUnsupported: false, queueRenderKey: '', queueIssueDetails: new Map(), queueIssuesBusy: false, queueIssueAction: '', queueIssueRevision: 0, queueRevision: 0, autoTimer: null, autoSettingsTimer: null, settingsRevision: 0, noticeRevision: 0, fastSave: null, fastNoticeRevision: null,
     autoPolling: false, autoBusy: false, autoResuming: false, autoResumeError: '', autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
     resultsReady: false, autoSavedCount: null, autoResultsLoading: false, autoResultsWanted: null,
     winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: '', speechInfo: { jobId: '', fileKey: '', metadata: null }
@@ -259,10 +259,11 @@
     if (state.queueBusy || repairTargetBusy(record)) return;
     state.queueBusy = true;
     state.queueRevision++;
+    const issueRevision = state.queueIssueRevision;
     render(); renderQueue();
     try {
       const result = await request('/api/analysis/queue/repair', jsonOptions('POST', { recordId: record.id, operation, options }));
-      applyQueue(result);
+      applyQueue(result, issueRevision);
       const label = operation === 'translation-only' ? '한국어 자막 번역 복구' : '영상 복구';
       const message = result.status === 'already-queued'
         ? `${record.name} · 이미 진행 또는 대기 중이어서 중복 추가하지 않았습니다.`
@@ -516,10 +517,13 @@
     }
   }
 
-  function applyQueue(value) {
+  function applyQueue(value, issueRevision = state.queueIssueRevision) {
     const queue = value?.queue || value;
     if (!queue || !Array.isArray(queue.pending)) return;
-    state.queue = queue;
+    // A response sent before history deletion may still contain the old list.
+    // Preserve only that list, while accepting unrelated queue/job updates.
+    state.queue = issueRevision !== state.queueIssueRevision || state.queueIssuesBusy
+      ? { ...queue, fileIssues: state.queue?.fileIssues } : queue;
     applyAutoPick(queue);
     renderQueue();
   }
@@ -593,14 +597,21 @@
 
   function renderQueueIssues(value) {
     const panel = $('catalogQueueIssues');
+    const error = typeof value?.error === 'string' ? value.error.slice(0, 1000) : '';
     const issues = value && Number.isSafeInteger(value.total) && value.total > 0 && Array.isArray(value.items)
       ? value.items.slice(0, 20).filter(item => item && typeof item.recordId === 'string' && /^[a-f0-9]{16,64}$/.test(item.recordId)
         && typeof item.name === 'string' && typeof item.path === 'string' && typeof item.reason === 'string') : [];
-    panel.classList.toggle('hidden', !issues.length);
-    $('catalogQueueIssuesTitle').textContent = issues.length ? `다음 분석으로 넘긴 영상 · 저장 기록 ${value.total.toLocaleString()}건` : '';
+    panel.classList.toggle('hidden', !issues.length && !error);
+    $('catalogQueueIssuesTitle').textContent = issues.length ? `다음 분석으로 넘긴 영상 · 저장 기록 ${value.total.toLocaleString()}건` : error ? '다음 분석으로 넘긴 영상 · 저장 기록' : '';
     $('catalogQueueIssuesNote').textContent = issues.length
-      ? `미완료 결과와 원인을 보관했습니다. 필요할 때 개별 복구할 수 있습니다.${value.total > issues.length ? ` 최근 ${issues.length}건을 표시합니다.` : ''}` : '';
-    const renderKey = JSON.stringify(issues);
+      ? `목록에서 삭제해도 분석 결과·자막 파일·오류 기록은 보관됩니다.${value.total > issues.length ? ` 최근 ${issues.length}건을 표시합니다.` : ''}` : '';
+    const clear = $('catalogQueueIssuesClear');
+    clear.disabled = state.queueIssuesBusy || !issues.length || Boolean(error);
+    clear.textContent = state.queueIssuesBusy && state.queueIssueAction === 'all' ? '기록 비우는 중…' : '기록 비우기';
+    panel.setAttribute('aria-busy', String(state.queueIssuesBusy));
+    $('catalogQueueIssuesError').textContent = error;
+    $('catalogQueueIssuesError').classList.toggle('hidden', !error);
+    const renderKey = JSON.stringify([issues, state.queueIssuesBusy, state.queueIssueAction, error]);
     if (panel.dataset.renderKey === renderKey) return;
     panel.dataset.renderKey = renderKey;
     const list = make('ul', 'catalog-job-failure-list');
@@ -629,20 +640,70 @@
           await openDetail(issue.recordId);
         } finally { detail.disabled = false; }
       });
-      item.append(detail); list.append(item);
+      const remove = make('button', 'btn-mini', state.queueIssuesBusy && state.queueIssueAction === issue.recordId ? '삭제 중…' : '목록에서 삭제');
+      remove.type = 'button'; remove.dataset.queueIssueDeleteId = issue.recordId;
+      remove.disabled = state.queueIssuesBusy || Boolean(error);
+      remove.setAttribute('aria-label', `${issue.name} 저장 기록을 목록에서 삭제`);
+      remove.title = '분석 결과와 자막 파일을 보관하고 이 목록의 기록만 삭제합니다.';
+      remove.addEventListener('click', () => deleteQueueIssues({ recordId: issue.recordId, recordedAt: issue.recordedAt, code: issue.code }));
+      const actions = make('div', 'catalog-queue-issue-actions');
+      actions.append(detail, remove);
+      item.append(actions); list.append(item);
     }
     $('catalogQueueIssueItems').replaceChildren(list);
+  }
+
+  async function deleteQueueIssues(body) {
+    if (state.queueIssuesBusy || state.queue?.fileIssues?.error) return;
+    state.queueIssuesBusy = true;
+    state.queueIssueAction = body.clearAll === true ? 'all' : body.recordId;
+    state.queueIssueRevision++;
+    const focused = document.activeElement?.dataset?.queueIssueDeleteId
+      || document.activeElement === $('catalogQueueIssuesClear');
+    renderQueueIssues(state.queue?.fileIssues);
+    try {
+      const result = await request('/api/analysis/queue/issues', jsonOptions('DELETE', body));
+      const updated = result.fileIssues || result.queue?.fileIssues;
+      if (!updated || !Number.isSafeInteger(updated.total) || updated.total < 0 || !Array.isArray(updated.items)) {
+        throw new Error('저장 기록 응답을 확인하지 못했습니다. 목록을 새로고침해 주세요.');
+      }
+      if (state.queue) state.queue = { ...state.queue, fileIssues: updated };
+      const count = Number.isSafeInteger(result.removedCount) && result.removedCount >= 0 ? result.removedCount : 0;
+      queueNotice(count > 0 ? `저장 기록 ${count.toLocaleString()}건을 목록에서 삭제했습니다. 분석 결과와 자막 파일은 보관됩니다.`
+        : '이미 삭제되었거나 새 기록으로 바뀌었습니다. 현재 목록을 확인해 주세요.');
+    } catch (error) {
+      const stale = error.status === 404 && error.message === '목록에서 기록을 찾을 수 없습니다. 목록을 새로 불러와 주세요.';
+      if (stale) {
+        queueNotice(error.message, true);
+        try {
+          const fresh = await request('/api/analysis/queue?view=summary');
+          const updated = (fresh.queue || fresh).fileIssues;
+          if (state.queue && Number.isSafeInteger(updated?.total) && updated.total >= 0 && Array.isArray(updated.items)) {
+            state.queue = { ...state.queue, fileIssues: updated };
+            queueNotice('해당 기록이 이미 삭제되었거나 변경되었습니다. 목록을 새로 불러왔습니다.');
+          }
+        } catch (_) { /* Retain the saved list and explicit refresh guidance. */ }
+      } else queueNotice(error.status === 404 ? '기록 삭제를 사용하려면 이 PC 프로그램을 최신 버전으로 다시 실행하세요.'
+        : `기록 삭제 실패 · ${error.message}`, true);
+    } finally {
+      state.queueIssuesBusy = false;
+      state.queueIssueAction = '';
+      state.queueIssueRevision++;
+      renderQueueIssues(state.queue?.fileIssues);
+      if (focused) (state.queue?.fileIssues?.items?.length ? $('catalogQueueIssuesClear') : $('catalogQueueRefresh')).focus();
+    }
   }
 
   async function refreshQueue() {
     if (state.queuePolling || state.queueBusy || state.autoPolling) return;
     state.queuePolling = true;
     const revision = state.queueRevision;
+    const issueRevision = state.queueIssueRevision;
     renderQueue();
     try {
       const result = await readQueue();
       if (revision === state.queueRevision) {
-        applyQueue(result);
+        applyQueue(result, issueRevision);
         if (state.queueLoadError && !state.queueUnsupported) queueNotice();
         state.queueLoadError = false;
       }
@@ -654,10 +715,11 @@
     if (state.queueBusy || state.queueUnsupported) return;
     state.queueBusy = true;
     state.queueRevision++;
+    const issueRevision = state.queueIssueRevision;
     renderQueue(); updateSelectionUI();
     try {
       const result = await request(`/api/analysis/queue${suffix}`, jsonOptions(method, body));
-      applyQueue(result);
+      applyQueue(result, issueRevision);
       queueNotice(suffix === '/pending' ? '대기 목록을 갱신했습니다.' : suffix === '/move' ? '분석 순서를 바꿨습니다.'
         : (result.queue || result).paused ? '다음 분석을 일시 중지했습니다. 현재 작업은 계속됩니다.' : '대기 분석을 재개했습니다.');
     } catch (error) {
@@ -682,10 +744,11 @@
     catch (error) { queueNotice(error.message, true); $('catalogSettings').open = true; return; }
     state.queueBusy = true;
     state.queueRevision++;
+    const issueRevision = state.queueIssueRevision;
     renderQueue(); updateSelectionUI();
     try {
       const result = await request('/api/analysis/queue', jsonOptions('POST', { files, options }));
-      applyQueue(result);
+      applyQueue(result, issueRevision);
       queueNotice(`${Number(result.addedCount) || 0}개 영상을 대기열에 추가했습니다.${result.skippedCount ? ` 이미 대기·진행 중인 ${result.skippedCount}개는 중복 추가하지 않았습니다.` : ''}`);
     } catch (error) { queueNotice(`대기 추가 실패 · ${error.message}`, true); }
     finally { state.queueBusy = false; renderQueue(); updateSelectionUI(); await refreshQueue(); }
@@ -755,12 +818,13 @@
     if (state.queuePolling) { scheduleAutoPoll(1000); return; }
     state.autoPolling = true;
     const revision = state.queueRevision;
+    const issueRevision = state.queueIssueRevision;
     try {
       const result = await readQueue();
       if (revision !== state.queueRevision) return;
       if (state.autoTransportError) autoNotice();
       state.autoTransportError = false;
-      applyQueue(result);
+      applyQueue(result, issueRevision);
     }
     catch (error) {
       state.autoTransportError = true;
@@ -2558,6 +2622,7 @@
     $('catalogQueueAdd').addEventListener('click', enqueueSelected);
     $('catalogQueuePause').addEventListener('click', () => mutateQueue('', 'PUT', { paused: state.queue?.paused !== true }));
     $('catalogQueueClear').addEventListener('click', () => mutateQueue('/pending', 'DELETE', {}));
+    $('catalogQueueIssuesClear').addEventListener('click', () => deleteQueueIssues({ clearAll: true }));
     $('winnerAutoResume').addEventListener('click', resumeWinnerAnalysis);
     $('catalogStorageCopy').addEventListener('click', () => copyText(state.config?.storage?.directory, '이 PC의 분석 결과 저장 폴더 경로를 복사했습니다. 파일 탐색기 주소창에 붙여 넣으면 열 수 있습니다.'));
     ['catalogRemoteUrl', 'catalogConnectionCode'].forEach(id => $(id).addEventListener('input', () => {

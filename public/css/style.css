@@ -1873,3 +1873,10 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-job-failure-more { margin-top: 10px; }
 .catalog-job-failure-more > summary { cursor: pointer; color: #baddff; padding: 9px 0; font-size: 13px; }
 .catalog-job-failure-more > summary:focus-visible, .catalog-job-failure-item button:focus-visible { outline: 3px solid #67e8f9; outline-offset: 3px; }
+.catalog-queue-issues-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.catalog-queue-issues-heading > strong { color: #fcd486; font-size: 14px; }
+.catalog-queue-issues-disclosure { margin-top: 8px; min-width: 0; }
+.catalog-queue-issues-disclosure > summary { cursor: pointer; padding: 9px 0; color: #baddff; font-size: 13px; }
+.catalog-queue-issues-disclosure > summary:focus-visible, #catalogQueueIssueItems:focus-visible { outline: 3px solid #67e8f9; outline-offset: 3px; }
+#catalogQueueIssueItems { max-height: 360px; overflow-y: auto; scrollbar-gutter: stable; padding: 3px; }
+.catalog-queue-issue-actions { display: flex; flex-wrap: wrap; gap: 8px; }
