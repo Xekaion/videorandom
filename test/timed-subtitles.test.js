@@ -156,9 +156,9 @@ test('long translations are chunked at cue boundaries and preserve the global cu
   assert.equal(result.subtitleTranslation.at(-1).text, '일상 대화 164');
 });
 
-test('malformed translations preserve the original and missing-cue repair stops when its own response is invalid', async t => {
-  for (const [subtitles, expectedCalls] of [[[{ index: 0, text: '안녕하세요.' }], 2],
-    [[{ index: 0, text: '중복' }, { index: 0, text: '대사' }], 1], [[{ index: 0, text: '' }, { index: 1, text: '대사' }], 1]]) {
+test('malformed translation rows preserve the original and valid tail after bounded missing-cue recovery', async t => {
+  for (const [subtitles, retainedIndexes] of [[[{ index: 0, text: '안녕하세요.' }], [0]],
+    [[{ index: 0, text: '중복' }, { index: 0, text: '대사' }], []], [[{ index: 0, text: '' }, { index: 1, text: '대사' }], [1]]]) {
     const { dataDir, record } = await fixture(t);
     const mocked = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes) ? { subtitles } : summary());
     const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
@@ -166,8 +166,17 @@ test('malformed translations preserve the original and missing-cue repair stops 
     assert.equal(result.summary, summary().summary);
     assert.deepEqual(result.transcript, source());
     assert.equal(result.subtitleTranslation, undefined);
-    assert.match(result.subtitleError, /대사|번호/);
-    assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, expectedCalls);
+    assert.equal(result.subtitleError, null);
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+    assert.equal(result.subtitleTranslationProgress.processedCues, 2);
+    assert.equal(result.subtitleTranslationProgress.completedCues, retainedIndexes.length);
+    if (result.subtitleTranslationProgress.cueIndexes) assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, retainedIndexes);
+    else assert.deepEqual(retainedIndexes, Array.from({ length: retainedIndexes.length }, (_, index) => index), 'only a contiguous prefix may omit sparse cue indexes');
+    assert.deepEqual((result.subtitleTranslationPartial || []).map(cue => [cue.start, cue.end]),
+      retainedIndexes.map(index => [source()[index].start, source()[index].end]));
+    const requests = mocked.calls.filter(call => call.schema?.properties.subtitles);
+    assert(requests.length > 1 && requests.length <= 5, 'row recovery is bounded and never accepts an ambiguous duplicate');
   }
 });
 
@@ -340,7 +349,7 @@ test('translation isolates foreign-language copies after one correction while re
   }
 });
 
-test('translation rejects unsafe subtitle formatting without retry', async t => {
+test('translation isolates unsafe subtitle formatting after one correction and retains its valid tail', async t => {
   for (const text of ['00:00:01 --> 00:00:02\n한국어', '```\n한국어\n```']) {
     const { dataDir, record } = await fixture(t);
     const mocked = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes)
@@ -348,7 +357,13 @@ test('translation rejects unsafe subtitle formatting without retry', async t => 
     const result = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
     assert.equal(result.status, 'partial');
     assert.equal(result.subtitleLanguage, undefined);
-    assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, 1);
+    assert.equal(result.subtitleError, null);
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+    assert.equal(result.subtitleTranslationProgress.processedCues, 2);
+    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, [1]);
+    assert.deepEqual(result.subtitleTranslationPartial, [{ ...source()[1], text: '역은 어디인가요?' }]);
+    assert.equal(mocked.calls.filter(call => call.schema?.properties.subtitles).length, 2);
     assert.deepEqual(result.transcript, source());
   }
 });

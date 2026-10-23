@@ -147,12 +147,13 @@ for (const profile of ['fast', 'turbo']) test(`${profile} single-pass translatio
     await f.drained();
 });
 
-for (const failure of ['503 service unavailable', '401 authentication failed', 'quota usage limit', 'execution timeout', 'ECONNRESET network failure', 'response refusal', 'malformed response']) {
+for (const failure of ['503 service unavailable', '401 authentication failed', 'quota usage limit', 'execution timeout', 'ECONNRESET network failure', 'response refusal', 'malformed response', 'non-array approval response']) {
     test(`a later ${failure} stops immediately and retains the earlier sparse approved set`, async t => {
         const f = await fixture(t, { count: 240, handler: (call, state) => {
             if (call.review && call.start === 80) {
                 if (failure === 'response refusal') return { refusal: true };
-                if (failure === 'malformed response') return { approvedIndexes: [99999], corrections: [], terms: [] };
+                if (failure === 'malformed response') return { approvedIndexes: null, corrections: [], terms: [] };
+                if (failure === 'non-array approval response') return { approvedIndexes: {}, corrections: [], terms: [] };
                 throw new Error('Owned synthetic ' + failure);
             }
             return state.normalResponse(call);
@@ -166,7 +167,39 @@ for (const failure of ['503 service unavailable', '401 authentication failed', '
         assert.equal(f.calls.length, 5, 'the failed provider request starts no replacement or later batch');
         assert(!f.calls.some(call => call.start >= 160));
         if (failure === 'response refusal') assert.equal(result.subtitleDiagnostic.refusalSource, 'response-field');
-        else if (failure !== 'malformed response') assert(result.subtitleError.includes(failure));
+        else if (!['malformed response', 'non-array approval response'].includes(failure)) assert(result.subtitleError.includes(failure));
+        await f.drained();
+    });
+}
+
+for (const shape of ['malformed known correction', 'unknown approval index']) {
+    test(`a later ${shape} retains the earlier sparse prefix and original final cue after bounded corrections`, async t => {
+        const f = await fixture(t, { count: 241, handler: (call, state) => {
+            const response = state.normalResponse(call);
+            if (call.review && call.indexes.includes(100)) {
+                response.approvedIndexes = response.approvedIndexes.filter(index => index !== 100);
+                if (shape === 'malformed known correction') response.corrections = [{ index: 100, text: 123 }];
+                else response.approvedIndexes.push(99999);
+            }
+            return response;
+        } });
+        const original = structuredClone(f.transcript);
+        const result = await f.run(); assertSparse(result, original, [20, 100]);
+        assert.deepEqual(f.transcript, original);
+        assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(result.subtitleError, null);
+        assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+        assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+        assert.equal(result.subtitleTranslationProgress.processedCues, 241);
+        assert.equal(result.subtitleTranslationPartial.at(-1).id, 'owned-gap-240');
+        assert(f.calls.some(call => call.review && call.indexes.includes(240)), 'the final source cue is actually reviewed');
+        assert(f.calls.some(call => call.review && call.count === 1 && call.indexes[0] === 100), 'only the unresolved original index is corrected');
+        assert(f.commits.some(progress => progress.completedCues === 79 && progress.cueIndexes?.at(-1) === 79),
+            'the earlier sparse approved prefix remains durable before the malformed later response');
+        const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
+        assert.deepEqual(saved.cueIndexes, result.subtitleTranslationProgress.cueIndexes);
+        assert(saved.subtitles.every(cue => Number.isSafeInteger(cue.index) && cue.index < original.length));
+        for (const cue of saved.subtitles) assert.deepEqual([cue.id, cue.start, cue.end],
+            [original[cue.index].id, original[cue.index].start, original[cue.index].end]);
         await f.drained();
     });
 }

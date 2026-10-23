@@ -192,13 +192,12 @@ for (const failure of ['503 Service Unavailable', '401 authentication failed', '
     });
 }
 
-for (const failure of ['refusal', 'wrong index', 'missing array']) test(`a prefetched structured ${failure} never becomes stale-context recovery`, async t => {
+for (const failure of ['refusal', 'missing array']) test(`a prefetched structured ${failure} never becomes stale-context recovery`, async t => {
     const f = await fixture(t, { handler: async call => {
         if (call.start === 80 && call.review) { await call.cancelled; return response(call); }
         if (call.start === 160 && !call.review) {
             const result = response(call);
             if (failure === 'refusal') result.subtitles[0].text = '이 요청의 번역을 제공할 수 없습니다.';
-            if (failure === 'wrong index') result.subtitles[0].index = -1;
             return failure === 'missing array' ? { terms: [] } : result;
         }
     } });
@@ -206,6 +205,30 @@ for (const failure of ['refusal', 'wrong index', 'missing array']) test(`a prefe
     assert.equal(result.subtitleRepairStatus, 'failed');
     assert.equal(result.subtitleTranslationPartial.length, 80);
     assert.equal(f.calls.filter(call => call.start === 160 && !call.review).length, 1);
+    await f.assertDrained();
+});
+
+test('a prefetched invalid index is repaired after the preceding review commits and preserves the remaining source tail', async t => {
+    const draftReady = deferred();
+    const f = await fixture(t, { handler: async (call, state) => {
+        if (call.start === 80 && call.review) await draftReady.promise;
+        const result = response(call);
+        if (call.start === 160 && !call.review && call.count === 80) {
+            result.subtitles[0].index = -1;
+            draftReady.resolve();
+        }
+        if (call.start === 160 && !call.review && call.count === 1) {
+            assert(state.commits.includes(160), 'the prior independent review must be durably committed before malformed-row recovery starts');
+        }
+        return result;
+    } });
+    const original = structuredClone(f.transcript);
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.equal(f.calls.filter(call => call.start === 160 && !call.review && call.count === 1).length, 1);
+    assert(f.calls.some(call => call.review && call.input.subtitles.at(-1).index === original.length - 1));
+    assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), original.map(cue => [cue.id, cue.start, cue.end]));
+    assert.deepEqual(f.transcript, original);
     await f.assertDrained();
 });
 

@@ -262,19 +262,43 @@ test('a successful concise repair clears old failure warnings instead of merging
 });
 
 for (const failure of ['response refusal', '401 authentication failed', 'quota usage limit', '503 service unavailable',
-    'execution timeout', 'ECONNRESET network failure', 'invalid index', 'empty cue']) {
+    'execution timeout', 'ECONNRESET network failure', 'invalid root shape']) {
     test(`a concise draft does not bypass ${failure} or start an automatic retry`, async t => {
         const f = await fixture(t, { count: 80, handler: (call, { normal }) => {
             if (!call.review) return normal(call);
             if (failure === 'response refusal') return { refusal: true };
-            if (failure === 'invalid index') return { approvedIndexes: [99999], corrections: [], terms: [] };
-            if (failure === 'empty cue') return { approvedIndexes: [], corrections: [{ index: 0, text: '' }], terms: [] };
+            if (failure === 'invalid root shape') return { approvedIndexes: null, corrections: [], terms: [] };
             throw new Error('Owned synthetic ' + failure);
         } });
         const result = await f.run();
         assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.calls.length, 2);
         assert.equal(result.subtitleTranslation, undefined); assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
         assert.notEqual(result.subtitleTranslationProgress?.translationComplete, true);
+        await f.drained();
+    });
+}
+
+for (const failure of ['invalid index', 'empty cue']) {
+    test(`a concise draft isolates an ${failure} and retains its explicitly approved tail`, async t => {
+        const f = await fixture(t, { count: 81, handler: (call, { normal }) => {
+            if (!call.review || !call.indexes.includes(0)) return normal(call);
+            const approvedIndexes = call.indexes.filter(index => index !== 0);
+            return failure === 'invalid index'
+                ? { approvedIndexes: [...approvedIndexes, 99999], corrections: [], terms: [] }
+                : { approvedIndexes, corrections: [{ index: 0, text: '' }], terms: [] };
+        } });
+        const result = await f.run();
+        assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(result.subtitleError, null);
+        assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+        assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+        assert.equal(result.subtitleTranslationProgress.processedCues, 81);
+        assert.equal(result.subtitleTranslationProgress.completedCues, 80);
+        assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, Array.from({ length: 80 }, (_, index) => index + 1));
+        assert(result.subtitleTranslationPartial.every(cue => cue.text === shortKorean));
+        assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]),
+            f.transcript.slice(1).map(cue => [cue.id, cue.start, cue.end]));
+        assert.equal(f.calls.length, 5, 'one malformed cue is corrected once and the final batch is still reviewed');
+        assert(f.calls.some(call => call.review && call.start === 80));
         await f.drained();
     });
 }

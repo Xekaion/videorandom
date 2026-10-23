@@ -226,18 +226,23 @@ test('an all-foreign accurate source finishes its traversal with zero approved c
 });
 
 for (const phase of ['draft', 'review']) for (const corruption of ['wrong index', 'duplicate index', 'conflicting terms', 'subtitle refusal']) {
-    test(`${phase} foreign text cannot hide a sibling ${corruption} or start a correction`, async t => {
+    const recoverable = ['wrong index', 'duplicate index'].includes(corruption);
+    test(`${phase} foreign text with a sibling ${corruption} ${recoverable ? 'isolates both unresolved cues' : 'still stops without correction'}`, async t => {
         const f = await fixture(t, { count: 80, bad: [0], phase, handler: call => {
             if (call.review !== (phase === 'review')) return undefined;
-            const subtitles = call.indexes.map(index => ({ index, text: index === 0 ? FOREIGN : KOREAN }));
+            const subtitles = call.indexes.map(index => ({ index: index === 1 && corruption === 'wrong index' ? 99999
+                : index === 1 && corruption === 'duplicate index' ? 0 : index, text: index === 0 ? FOREIGN : KOREAN }));
             const terms = [];
-            if (corruption === 'wrong index') subtitles[1].index = 99999;
-            if (corruption === 'duplicate index') subtitles[1].index = 0;
             if (corruption === 'conflicting terms') terms.push({ source: '合成駅', translation: '합성역' }, { source: '合成駅', translation: '다른역' });
             if (corruption === 'subtitle refusal') subtitles[1].text = '이 요청의 번역을 제공할 수 없습니다.';
             return { subtitles, terms };
         } });
         const result = await f.run();
+        if (recoverable) {
+            assertAcceptedExcept(result, f.transcript, [0, 1]);
+            assert(f.calls.length > (phase === 'draft' ? 1 : 2), 'only unresolved source rows receive bounded correction');
+            await f.drained(); return;
+        }
         assert.equal(result.subtitleRepairStatus, 'failed'); assert.notEqual(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
         assert.equal(f.calls.length, phase === 'draft' ? 1 : 2);
         assert.notEqual(result.subtitleTranslationProgress.processingComplete, true);
@@ -254,10 +259,7 @@ const failures = {
     unavailable: () => { throw new Error('Owned synthetic 503 service unavailable'); },
     timeout: () => { throw new Error('Owned synthetic execution timeout'); },
     network: () => { throw new Error('Owned synthetic ECONNRESET network failure'); },
-    'malformed JSON': () => '{malformed-owned-response',
-    'wrong index': call => ({ subtitles: call.indexes.map((index, offset) => ({ index: offset ? index : 99999, text: KOREAN })), terms: [] }),
-    'duplicate index': call => ({ subtitles: call.indexes.map((index, offset) => ({ index: offset === 1 ? call.indexes[0] : index, text: KOREAN })), terms: [] }),
-    'unsafe subtitle formatting': call => ({ subtitles: call.indexes.map(index => ({ index, text: '```\n합성 안내\n```' })), terms: [] })
+    'malformed JSON': () => '{malformed-owned-response'
 };
 for (const phase of ['draft', 'review']) for (const [name, fail] of Object.entries(failures)) {
     test(`a later ${phase} ${name} still stops immediately after an earlier recoverable foreign cue`, async t => {

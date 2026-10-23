@@ -168,22 +168,20 @@ for (const phase of ['draft', 'review']) test(`a ${phase} subset with only one v
   assert.deepEqual(requests.slice(1).flatMap(item => item.input.subtitles.map(cue => cue.index)), Array.from({ length: 79 }, (_, index) => index + 1));
 });
 
-for (const phase of ['draft', 'review']) test(`a deficient ${phase} supplement preserves exact reviewed indexes and respects empty-draft versus missing-review boundaries`, async t => {
+for (const phase of ['draft', 'review']) test(`a deficient ${phase} supplement preserves exact reviewed indexes and leaves unresolved rows as gaps`, async t => {
   const f = await fixture(t, { respond: item => {
     if (item.review === (phase === 'review')) return responseFor(item.input.subtitles.slice(0, item.count === 80 ? 40 : item.count - 1));
   } });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, phase === 'draft' ? 'failed' : 'partial');
-  assert.equal(f.requests.length, phase === 'draft' ? 3 : 6);
-  assert.equal(result.subtitleTranslationPartial?.length || 0, phase === 'review' ? 78 : 0,
+  assert.equal(result.subtitleRepairStatus, 'partial');
+  assert.equal(f.requests.length, 6);
+  assert.equal(result.subtitleTranslationPartial?.length || 0, 78,
     'explicitly reviewed tails survive missing rows; an unreviewed draft is never committed');
-  assert.equal(result.subtitleDiagnostic.code, phase === 'draft' ? 'SUBTITLE_CUE_COUNT_MISMATCH' : 'SUBTITLE_CUES_PENDING');
-  if (phase === 'review') {
-    const indexes = Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 59 && index !== 79);
-    assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, indexes);
-    assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), indexes.map(index =>
-      [f.source[index].id, f.source[index].start, f.source[index].end]));
-  }
+  assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+  const indexes = Array.from({ length: 80 }, (_, index) => index).filter(index => index !== 59 && index !== 79);
+  assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, indexes);
+  assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), indexes.map(index =>
+    [f.source[index].id, f.source[index].start, f.source[index].end]));
 });
 
 test('a concise review supplement is retained after the three missing-only calls', async t => {
@@ -253,18 +251,30 @@ const invalid = {
   'empty array': () => ({ subtitles: [], terms: [] }),
   'absent array': () => ({ terms: [] })
 };
-for (const phase of ['draft', 'review']) for (const [name, makeInvalid] of Object.entries(invalid)) test(`a ${phase} ${name} ${phase === 'review' && name === 'empty array' ? 'stays uncertified after bounded corrections' : 'fails without any missing-cue requests'}`, async t => {
+for (const phase of ['draft', 'review']) for (const [name, makeInvalid] of Object.entries(invalid)) test(`a ${phase} ${name} ${['duplicate', 'excess', 'out-of-range', 'unsafe subtitle formatting', 'empty text', 'empty array'].includes(name)
+  ? 'retains only validated rows after bounded corrections' : 'fails without any missing-cue requests'}`, async t => {
   const f = await fixture(t, { respond: item => item.review === (phase === 'review') ? makeInvalid(item.input.subtitles) : undefined });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, phase === 'review' && name === 'empty array' ? 'partial' : 'failed');
-  assert.equal(f.requests.length, phase === 'review' && name === 'empty array' ? 66 : phase === 'draft' ? 1 : 2);
-  if (phase === 'review' && name === 'empty array') {
+  const recoverable = ['duplicate', 'excess', 'out-of-range', 'unsafe subtitle formatting', 'empty text', 'empty array'].includes(name);
+  assert.equal(result.subtitleRepairStatus, recoverable ? 'partial' : 'failed');
+  if (recoverable) {
+    assert(f.requests.length > (phase === 'draft' ? 1 : 2) && f.requests.length <= 66, 'only the bounded shared correction budget is available');
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(result.subtitleTranslationProgress.complete, false);
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+    assert.equal(result.subtitleTranslationProgress.processedCues, f.source.length);
     assert.equal(result.subtitleTranslation, undefined);
-    assert(f.requests.slice(2).every(item => item.review && item.count <= 20));
+    const expected = name === 'excess' ? Array.from({ length: 79 }, (_, index) => index + 1) : [];
+    assert.equal(result.subtitleTranslationPartial?.length || 0, expected.length);
+    if (expected.length) {
+      assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, expected);
+      assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), expected.map(index =>
+        [f.source[index].id, f.source[index].start, f.source[index].end]));
+    }
+  } else {
+    assert.equal(f.requests.length, phase === 'draft' ? 1 : 2);
+    assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
   }
-  assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
   assert.deepEqual(result.transcript, f.source);
 });
 

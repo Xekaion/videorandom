@@ -200,7 +200,7 @@ for (const failure of ['503 service unavailable', '401 authentication failed', '
             if (call.review && call.count === 2) return reviewFor(call.input.subtitles.filter(entry => entry.index !== 5));
             if (call.review && call.count === 1) {
                 if (failure === 'response refusal') return { refusal: true };
-                if (failure === 'malformed response') return { approvedIndexes: [99999], corrections: [], terms: [] };
+                if (failure === 'malformed response') return { approvedIndexes: null, corrections: [], terms: [] };
                 throw new Error('Owned synthetic ' + failure);
             }
             return state.normalResponse(call);
@@ -216,15 +216,32 @@ for (const failure of ['503 service unavailable', '401 authentication failed', '
     });
 }
 
-const invalid = {
+const recoverableRows = {
     duplicate: entries => ({ subtitles: [{ index: entries[0].index, text: textFor(0) }, { index: entries[0].index, text: textFor(0) }], terms: [] }),
     excess: entries => responseFor([...entries, entries[0]]),
     'out-of-range': () => ({ subtitles: [{ index: 99999, text: koreanText }], terms: [] }),
     'empty text': entries => ({ subtitles: [{ index: entries[0].index, text: '' }], terms: [] }),
     'unsafe subtitle formatting': entries => ({ subtitles: [{ index: entries[0].index, text: '```\n합성 안내\n```' }], terms: [] }),
+    'empty array': () => ({ subtitles: [], terms: [] }),
+    'empty array without schema terms': () => ({ subtitles: [] })
+};
+for (const phase of ['draft', 'review']) for (const [name, respond] of Object.entries(recoverableRows)) test(`a ${phase} ${name} leaves only uncertified rows pending and still processes the final source batch`, async t => {
+    const f = await fixture(t, { count: 160, handler: (call, state) => call.review === (phase === 'review') && call.start < 80
+        ? respond(call.input.subtitles) : state.normalResponse(call) });
+    const original = structuredClone(f.transcript);
+    const result = await f.run();
+    assertPending(result, original, name === 'excess' ? [0] : indexes(80));
+    assert(f.calls.some(call => call.review && call.indexes.at(-1) === 159), 'a malformed earlier row cannot prevent the final independent source cues from being reviewed');
+    const corrections = f.calls.filter(call => call.review === (phase === 'review') && call.start < 80 && call.count < 80);
+    assert(corrections.length > 0 && corrections.length <= 64, 'all row repairs share the existing per-video limit');
+    assert(corrections.every(call => call.count <= 20));
+    assert.deepEqual(f.transcript, original);
+    await f.drained();
+});
+
+const invalid = {
     'missing array': () => ({ terms: [] }),
     'null array': () => ({ subtitles: null, terms: [] }),
-    'empty array without schema terms': () => ({ subtitles: [] }),
     'unknown empty-result field': () => ({ subtitles: [], terms: [], unexpected: true }),
     'invalid empty-result terms': () => ({ subtitles: [], terms: [{ source: '合成駅' }] })
 };
@@ -235,15 +252,6 @@ for (const phase of ['draft', 'review']) for (const [name, respond] of Object.en
     assert.equal(f.calls.length, phase === 'draft' ? 1 : 2);
     assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
     assert(!f.calls.some(call => call.start >= 80)); await f.drained();
-});
-
-test('an empty draft is not a review and stops with the explicit requested/returned count', async t => {
-    const f = await fixture(t, { handler: () => ({ subtitles: [], terms: [] }) });
-    const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.calls.length, 1);
-    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUE_COUNT_MISMATCH');
-    assert.match(result.subtitleError, /번역.*요청 80구간.*응답 0구간/);
-    await f.drained();
 });
 
 test('empty review recovery cannot omit required draft name confirmation', async t => {

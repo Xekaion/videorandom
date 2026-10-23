@@ -97,7 +97,7 @@ for (const count of [80, 160, 320]) test(`sparse review explicitly approves ever
         } else assert(call.schema.properties.subtitles, 'the initial translation remains a complete normal draft');
     }
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, 8); assert.equal(TRANSLATION_PROMPT_VERSION, 8);
+    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(TRANSLATION_PROMPT_VERSION, 9);
     assert.equal(saved.reviewPasses, 2); assert.equal(saved.completedCues, count);
     await f.drained();
 });
@@ -309,23 +309,23 @@ test('parent cancellation during sparse review kills and drains its child before
     await f.drained();
 });
 
-test('an exact v6 fully reviewed checkpoint migrates to v8 without any new translation or review request', async t => {
+for (const version of [6, 8]) test(`an exact v${version} fully reviewed checkpoint migrates to the current contract without any new translation or review request`, async t => {
     const f = await fixture(t);
     const sourceFingerprint = crypto.createHash('sha256').update(JSON.stringify(f.transcript.map(cue => [cue.id, cue.start, cue.end, cue.text]))).digest('hex');
-    const saved = { version: 1, translationVersion: 6, targetLanguage: 'ko', subtitleQuality: 'accurate', reviewPasses: 2,
+    const saved = { version: 1, translationVersion: version, targetLanguage: 'ko', subtitleQuality: 'accurate', reviewPasses: 2,
         language: 'ko', sourceFingerprint, totalCues: 80, completedCues: 80, sourceComplete: true, sourceProcessed: true,
         sourceAuditComplete: true, complete: true, translationComplete: true,
         subtitles: f.transcript.map((cue, index) => ({ index, id: cue.id, start: cue.start, end: cue.end, text: koreanText })), terms: [] };
     const checkpointDir = path.join(f.dataDir, 'checkpoints');
     await fs.mkdir(checkpointDir, { recursive: true });
-    const v6Index = crypto.createHash('sha256').update(`videorandom-subtitles\0${6}\0ko\0accurate\0${sourceFingerprint}`).digest('hex');
-    await fs.writeFile(path.join(checkpointDir, `${v6Index}-translation-ko-v6.json`), JSON.stringify(saved), 'utf8');
+    const indexId = crypto.createHash('sha256').update(`videorandom-subtitles\0${version}\0ko\0accurate\0${sourceFingerprint}`).digest('hex');
+    await fs.writeFile(path.join(checkpointDir, `${indexId}-translation-ko-v${version}.json`), JSON.stringify(saved), 'utf8');
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.equal(f.calls.length, 0, 'only exact final accepted source, timing, ID, profile and review-pass matches are reusable');
     assert.equal(result.subtitleTranslation.length, 80);
     assert(result.subtitleTranslation.every(cue => unwrapped(cue.text) === koreanText));
     const migrated = JSON.parse(await fs.readFile(path.join(checkpointDir, f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(migrated.translationVersion, 8); assert.equal(migrated.reviewPasses, 2); assert.equal(migrated.completedCues, 80);
+    assert.equal(migrated.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(migrated.reviewPasses, 2); assert.equal(migrated.completedCues, 80);
     await f.drained();
 });

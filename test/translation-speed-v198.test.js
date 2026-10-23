@@ -101,7 +101,7 @@ for (const count of [320, 400, 479]) test(`accurate ${count}-cue subtitles overl
     assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), original.map(cue => [cue.id, cue.start, cue.end]));
     assert.deepEqual(f.transcript, original);
     const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', f.record.id + '-ko.json'), 'utf8'));
-    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(TRANSLATION_PROMPT_VERSION, 8);
+    assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION); assert.equal(TRANSLATION_PROMPT_VERSION, 9);
     assert.equal(saved.reviewPasses, 2); assert.equal(saved.completedCues, count);
     await f.assertDrained();
 });
