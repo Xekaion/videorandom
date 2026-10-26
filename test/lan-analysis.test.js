@@ -30,7 +30,8 @@ function multipart(info, files = [{ field: 'frames', name: 'frame_001.jpg', type
 
 async function fixture(t, processPackage = async ({ record }) => ({ ...record, summary: '사람들이 인사한다.', labels: ['인사'], frames: record.frames.map(f => ({ ...f, caption: '인사 장면' })) })) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-lan-'));
-  const service = createLanAnalysis({ dataDir, processPackage });
+  const service = createLanAnalysis({ dataDir, processPackage,
+    diskSpace: { assert: async () => ({ known: false, ok: true }), check: async () => ({ known: false, ok: true }) } });
   assert.equal(service.status().running, false);
   const status = await service.start({ port: 0, host: '127.0.0.1' });
   const base = `http://127.0.0.1:${status.port}`;
@@ -131,7 +132,8 @@ test('relay starts only explicitly and requires private client plus bearer authe
   const f = await fixture(t);
   assert.ok(f.status.connectionCode.length >= 24);
   const status = await (await f.request('/v1/status')).json();
-  assert.deepEqual(status, { ready: true, protocol: 1, appVersion: require('../package.json').version, active: 0, queued: 0, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3', 'subtitle-translation-only-v1', 'managed-update-v1', 'diagnostics-v1', 'original-frame-fingerprints-v1', 'turbo-subtitles-v1', 'sparse-subtitles-v1'] });
+  assert.deepEqual(status, { ready: true, protocol: 1, appVersion: require('../package.json').version, active: 0, queued: 0,
+    storage: { known: false, availableBytes: null, requiredBytes: 32 * 1024 * 1024, reserveBytes: 512 * 1024 * 1024, ok: true }, capabilities: ['timed-subtitles-v1', 'subtitle-quality-v1', 'subtitle-quality-v2', 'subtitle-quality-v3', 'subtitle-translation-only-v1', 'managed-update-v1', 'diagnostics-v1', 'original-frame-fingerprints-v1', 'turbo-subtitles-v1', 'sparse-subtitles-v1'] });
   assert.equal(JSON.stringify(status).includes(f.status.connectionCode), false);
   assert.equal((await httpFixtureResponse(f.base + '/v1/status')).status, 401);
   assert.equal((await f.request('/v1/status', { headers: { Authorization: 'Bearer ' + 'x'.repeat(32) } })).status, 401);

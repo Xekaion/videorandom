@@ -3,7 +3,7 @@
   'use strict';
   const ENDPOINT = '/api/analysis/diagnostics';
   const state = { events: [], clients: [], stats: {}, loaded: false, cursor: '', hasMore: false, gaps: [],
-    generation: 0, active: null, pending: false, debounce: null, timer: null, error: '', lastUpdated: '' };
+    generation: 0, active: null, pending: false, debounce: null, timer: null, error: '', lastUpdated: '', storageHealth: null };
   const element = id => document.getElementById(id);
   const safeText = (value, limit = 500) => typeof value === 'string' ? value.slice(0, limit) : '';
   const integer = value => Number.isSafeInteger(value) && value >= 0 && value <= 10000000;
@@ -16,6 +16,10 @@
     'subtitle-text': '자막 속 작업 거절 문구 감지', 'execution-error': '도구 실행 오류의 거절 표시' });
   const EXECUTION_SOURCES = Object.assign(Object.create(null), { 'local-deadline': '도구 대기 제한 초과', 'provider-error': '서비스 오류 응답',
     'process-exit': '도구 비정상 종료', 'process-error': '도구 실행 오류', cancelled: '작업 중지' });
+  const HEALTH_OPERATIONS = Object.assign(Object.create(null), { initialize: '저장 폴더 준비', 'load-health': '이전 저장 상태 읽기',
+    'load-receipts': '수신 확인 읽기', 'load-events': '작업 로그 읽기', 'load-outbox': '전송 대기 기록 읽기', identity: 'PC 식별 정보 저장·읽기',
+    append: '작업 로그 저장', enqueue: '전송 대기 기록 저장', ack: '수신 확인 저장', connection: '전송 연결 확인', pending: '전송 대기 기록 확인',
+    send: '진단 기록 전송', acknowledgement: '진단 기록 수신 확인' });
   const openAndVisible = () => element('diagnosticsPanel').open && document.hidden !== true && document.visibilityState !== 'hidden';
   const node = (tag, className, value) => { const item = document.createElement(tag); if (className) item.className = className; if (value !== undefined) item.textContent = String(value); return item; };
   const stages = Object.assign(Object.create(null), { translation_draft: '한국어 번역 초안', translation_review: '한국어 번역 검수', translation: '한국어 번역',
@@ -64,7 +68,48 @@
     element('diagnosticsError').textContent = state.error;
     element('diagnosticsError').classList.toggle('hidden', !state.error);
   }
+  function cleanStorageHealth(value) {
+    if (!value || !Array.isArray(value.currentFailures) || !Array.isArray(value.failureHistory)) return null;
+    const clean = saved => {
+      if (!saved || !Object.hasOwn(HEALTH_OPERATIONS, saved.operation || '')) return null;
+      const first = typeof saved.firstFailureAt === 'string' ? Date.parse(saved.firstFailureAt) : NaN;
+      const last = typeof saved.lastFailureAt === 'string' ? Date.parse(saved.lastFailureAt) : NaN;
+      const recovered = typeof saved.recoveredAt === 'string' ? Date.parse(saved.recoveredAt) : NaN;
+      if (!Number.isFinite(first) || !Number.isFinite(last) || first > last) return null;
+      return { operation: saved.operation, firstFailureAt: new Date(first).toISOString(), lastFailureAt: new Date(last).toISOString(),
+        ...(Number.isFinite(recovered) && recovered >= last ? { recoveredAt: new Date(recovered).toISOString() } : {}),
+        ...(integer(saved.failureCount) && saved.failureCount > 0 ? { failureCount: saved.failureCount } : {}),
+        ...(SYSTEM_CODES.has(saved.systemCode) ? { systemCode: saved.systemCode } : {}) };
+    };
+    return { currentFailures: value.currentFailures.slice(0, 32).map(clean).filter(item => item && !item.recoveredAt),
+      failureHistory: value.failureHistory.slice(-32).map(clean).filter(item => item?.recoveredAt).reverse() };
+  }
+  function renderStorageHealth() {
+    const section = element('diagnosticsStorageHealth');
+    if (!section) return;
+    const health = state.storageHealth, current = health?.currentFailures || [], recovered = health?.failureHistory || [];
+    section.classList.toggle('hidden', !current.length && !recovered.length);
+    element('diagnosticsStorageHealthSummary').textContent = current.length
+      ? `현재 확인이 필요한 저장 오류 ${current.length}건 · 아래 작업과 실패 시각을 확인하세요.`
+      : recovered.length ? '저장 동작 정상 확인 · 이전 오류와 복구 시각을 보관합니다.' : '';
+    const rows = (items, done) => {
+      const fragment = document.createDocumentFragment();
+      for (const item of items) {
+        const row = node('div', `diagnostics-health-item ${done ? 'diagnostics-health-recovered' : 'diagnostics-health-current'}`);
+        row.append(node('strong', '', `${done ? '복구됨' : '확인 필요'} · ${HEALTH_OPERATIONS[item.operation]}${item.systemCode ? ` · ${item.systemCode}` : ''}`),
+          node('span', 'diagnostics-meta', `최초 ${dateText(item.firstFailureAt)} · 최근 실패 ${dateText(item.lastFailureAt)}${item.failureCount ? ` · ${item.failureCount.toLocaleString()}회` : ''}`));
+        if (done) row.append(node('span', 'diagnostics-meta', `저장 동작 복구 확인 ${dateText(item.recoveredAt)}`));
+        fragment.append(row);
+      }
+      return fragment;
+    };
+    element('diagnosticsStorageHealthCurrent').replaceChildren(rows(current, false));
+    element('diagnosticsStorageHealthRecovered').replaceChildren(rows(recovered, true));
+    element('diagnosticsStorageHealthHistoryTitle').textContent = `해결된 저장 오류 이력 ${recovered.length}건 펼치기`;
+    element('diagnosticsStorageHealthHistory').classList.toggle('hidden', !recovered.length);
+  }
   function render() {
+    renderStorageHealth();
     const clients = document.createDocumentFragment();
     for (const client of state.clients) {
       const item = node('div', 'diagnostics-client');
@@ -195,6 +240,7 @@
         .map(client => ({ clientId: safeText(client.clientId, 120), clientName: safeText(client.clientName, 120), lastSeenAt: safeText(client.lastSeenAt, 80) }));
       state.stats = {};
       for (const key of ['total', 'errors', 'warnings']) if (integer(data.stats?.[key])) state.stats[key] = data.stats[key];
+      state.storageHealth = cleanStorageHealth(data.storageHealth);
       state.loaded = true; state.lastUpdated = dateText(new Date().toISOString()); showError(safeText(data.error, 1000));
     } catch (error) { if (active.generation === state.generation && openAndVisible()) showError(safeText(error.message, 1000) || '작업 로그를 불러오지 못했습니다.'); }
     finally {

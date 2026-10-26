@@ -528,6 +528,31 @@
     renderQueue();
   }
 
+  function queueRecoveryStatus(queue) {
+    const seen = new Set();
+    const entries = Array.isArray(queue.remoteResults) ? queue.remoteResults.slice(0, 100).filter(item => item
+      && typeof item.recordId === 'string' && /^[a-f0-9]{16,64}$/.test(item.recordId)
+      && ['accepted', 'waiting', 'blocked'].includes(item.state) && !seen.has(item.recordId) && seen.add(item.recordId)) : [];
+    const waiting = entries.filter(item => item.state !== 'blocked'), blocked = entries.filter(item => item.state === 'blocked');
+    const fileName = item => typeof item.name === 'string' ? item.name.replace(/\\/g, '/').split('/').at(-1).replace(/[\x00-\x1f]/g, '').slice(0, 180) || '영상 이름 미상' : '영상 이름 미상';
+    const code = item => typeof item.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(item.code) ? ` (${item.code})` : '';
+    const status = [waiting.length ? `서버 결과 수신 대기 ${waiting.length}개` : '', blocked.length ? `서버 결과 확인 필요 ${blocked.length}개` : ''].filter(Boolean);
+    const reasons = [];
+    if (waiting.length) reasons.push(`서버 결과 확인 대기: ${fileName(waiting[0])}${waiting.length > 1 ? ` 외 ${waiting.length - 1}개` : ''}`);
+    if (blocked.length) reasons.push(`서버 결과 수신 확인 필요: ${blocked.slice(0, 2).map(item => fileName(item) + code(item)).join(' · ')}${blocked.length > 2 ? ` 외 ${blocked.length - 2}개` : ''}`);
+    if (typeof queue.remoteResultError === 'string' && queue.remoteResultError.trim()) reasons.push(queue.remoteResultError.trim().slice(0, 500));
+    const space = queue.storageWait;
+    const storageWaiting = space && ['local', 'remote'].includes(space.location);
+    if (storageWaiting) {
+      const bytes = value => Number.isSafeInteger(value) && value >= 0;
+      const size = value => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(2)} GB`
+        : value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${Math.ceil(value / 1024).toLocaleString()} KB`;
+      const required = bytes(space.requiredBytes) ? Math.min(Number.MAX_SAFE_INTEGER, space.requiredBytes + (bytes(space.reserveBytes) ? space.reserveBytes : 0)) : null;
+      reasons.unshift(`${space.location === 'remote' ? '분석 서버 PC' : '이 PC'} 저장 공간 대기 · ${bytes(space.availableBytes) ? `여유 ${size(space.availableBytes)}` : '여유 공간 확인 중'} / ${required !== null ? `필요 ${size(required)}${bytes(space.reserveBytes) && space.reserveBytes > 0 ? ' (안전 여유 포함)' : ''}` : '필요 용량 확인 중'} · 공간이 확보되면 다시 확인합니다.`);
+    }
+    return { status, reasons, waiting: waiting.length, blocked: blocked.length, storageWaiting };
+  }
+
   function renderQueue() {
     const queue = state.queue;
     if (!queue) return;
@@ -542,10 +567,13 @@
     $('catalogQueuePause').title = '이미 시작된 작업에 포함된 영상은 계속 처리하고, 추가 대기열의 다음 작업부터 일시 중지합니다.';
     $('catalogQueueClear').disabled = state.queueBusy || state.queueUnsupported || !pending.length;
     $('catalogQueueRefresh').disabled = state.queuePolling || state.queueBusy;
-    $('catalogQueueStatus').textContent = queue.paused ? `일시 중지됨 · 대기 ${pending.length}개 보관 중`
+    const recovery = queueRecoveryStatus(queue);
+    const status = recovery.storageWaiting ? `저장 공간 확보 대기 · 대기 ${pending.length}개 보관 중`
+      : queue.paused ? `일시 중지됨 · 대기 ${pending.length}개 보관 중`
       : nextBatch.length ? `현재 작업 안에 다음 영상 ${nextBatch.length}개 · 추가 대기 ${pending.length}개`
-      : pending.length ? `다음 영상 ${pending.length}개 대기 중` : '대기 중인 영상이 없습니다.';
-    const reason = queue.waitingReason || (queue.paused ? '대기열이 일시 중지되어 있습니다. 재개하면 다음 영상을 처리합니다. 현재 진행 중인 작업은 계속됩니다.' : '');
+      : pending.length ? `다음 영상 ${pending.length}개 대기 중` : recovery.waiting ? '서버 작업 결과 확인 중' : recovery.blocked ? '서버 작업 결과 확인 필요' : '대기 중인 영상이 없습니다.';
+    $('catalogQueueStatus').textContent = [status, ...recovery.status].join(' · ');
+    const reason = [queue.waitingReason || (queue.paused && !recovery.storageWaiting ? '대기열이 일시 중지되어 있습니다. 재개하면 다음 영상을 처리합니다. 현재 진행 중인 작업은 계속됩니다.' : ''), ...recovery.reasons].filter(Boolean).join('\n');
     $('catalogQueueReason').textContent = reason;
     $('catalogQueueReason').classList.toggle('hidden', !reason);
     const renderKey = JSON.stringify([state.queueBusy, state.queueUnsupported, nextBatch, pending]);

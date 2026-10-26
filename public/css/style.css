@@ -1692,6 +1692,14 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .diagnostics-toolbar .btn, .diagnostics-pagination .btn { font-size: 11px; padding: 10px 12px; text-decoration: none; white-space: nowrap; }
 .diagnostics-status { color: #a5dce5; font-size: 11px; line-height: 1.8; margin-bottom: 10px; }
 .diagnostics-error { color: #fda4af; border: 1px solid rgba(244,63,94,.25); background: rgba(244,63,94,.07); border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; margin-bottom: 12px; }
+.diagnostics-storage-health { border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 11px 13px; margin-bottom: 12px; font-size: 12px; line-height: 1.7; }
+.diagnostics-storage-health h3 { font-size: 13px; margin-bottom: 5px; }
+.diagnostics-health-items { max-height: 180px; overflow-y: auto; overflow-wrap: anywhere; }
+.diagnostics-health-item { padding: 7px 0; border-top: 1px solid rgba(255,255,255,.07); }
+.diagnostics-health-current { color: #ffdda2; }
+.diagnostics-health-recovered { color: #b5d8c7; }
+.diagnostics-health-history { margin-top: 7px; }
+.diagnostics-health-history summary { cursor: pointer; color: #b5d8c7; }
 .diagnostics-clients-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 9px; margin: 16px 0 9px; }
 .diagnostics-clients-heading h3 { font-size: 12px; }
 .diagnostics-clients-heading span { color: var(--color-text-muted); font-size: 10px; }
