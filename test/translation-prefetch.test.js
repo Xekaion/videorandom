@@ -127,7 +127,7 @@ test('only a newly committed term conflict replaces one stale draft and reviews 
     await f.assertDrained();
 });
 
-test('a stale replacement that still conflicts stops after its single replacement request', async t => {
+test('a stale replacement that still conflicts is repaired once then quarantined while later batches continue', async t => {
     const f = await fixture(t, { handler: async call => {
         await delay(1);
         const result = response(call);
@@ -136,10 +136,11 @@ test('a stale replacement that still conflicts stops after its single replacemen
         return result;
     } });
     const result = await f.run();
-    assert.match(result.subtitleError, /인명·호칭 표기가 앞 구간과 일치하지 않습니다/);
-    assert.equal(result.subtitleTranslationPartial.length, 160);
-    assert.equal(f.calls.filter(call => call.start === 160 && !call.review).length, 2);
-    assert.equal(f.calls.some(call => call.start === 160 && call.review || call.start > 160), false);
+    assert.equal(result.subtitleError, null); assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationPartial.length, 400);
+    assert.equal(f.calls.filter(call => call.start === 160 && !call.review).length, 3);
+    assert.equal(f.calls.some(call => call.start === 160 && call.review), false);
+    assert(f.calls.some(call => call.start === 400 && call.review));
     await f.assertDrained();
 });
 
@@ -162,18 +163,18 @@ test('an exact reviewed version-five checkpoint migrates without any new generat
     await f.assertDrained();
 });
 
-test('a conflict already present in the draft snapshot stops without requesting a replacement', async t => {
+test('a conflict already present in the draft snapshot is bounded without cancelling the current review', async t => {
     const f = await fixture(t, { handler: async call => {
-        if (call.start === 80 && call.review) { await call.cancelled; return response(call); }
+        if (call.start === 80 && call.review) { await delay(20); return response(call); }
         const result = response(call);
         if (call.review && call.start === 0) result.terms = [{ source: '太郎', translation: '타로' }];
         if (!call.review && call.start === 160) result.terms = [{ source: '太郎', translation: '다로' }];
         return result;
     } });
     const result = await f.run();
-    assert.match(result.subtitleError, /인명·호칭 표기가 앞 구간과 일치하지 않습니다/);
-    assert.equal(result.subtitleTranslationPartial.length, 80);
-    assert.equal(f.calls.filter(call => call.start === 160 && !call.review).length, 1);
+    assert.equal(result.subtitleError, null); assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(result.subtitleTranslationPartial.length, 400);
+    assert.equal(f.calls.filter(call => call.start === 160 && !call.review).length, 2);
     await f.assertDrained();
 });
 
@@ -192,9 +193,9 @@ for (const failure of ['503 Service Unavailable', '401 authentication failed', '
     });
 }
 
-for (const failure of ['refusal', 'missing array']) test(`a prefetched structured ${failure} never becomes stale-context recovery`, async t => {
+for (const failure of ['refusal', 'missing array']) test(`a prefetched structured ${failure} keeps its own refusal or local validation boundary`, async t => {
     const f = await fixture(t, { handler: async call => {
-        if (call.start === 80 && call.review) { await call.cancelled; return response(call); }
+        if (call.start === 80 && call.review) { if (failure === 'refusal') await call.cancelled; else await delay(20); return response(call); }
         if (call.start === 160 && !call.review) {
             const result = response(call);
             if (failure === 'refusal') result.subtitles[0].text = '이 요청의 번역을 제공할 수 없습니다.';
@@ -202,9 +203,10 @@ for (const failure of ['refusal', 'missing array']) test(`a prefetched structure
         }
     } });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.equal(result.subtitleTranslationPartial.length, 80);
-    assert.equal(f.calls.filter(call => call.start === 160 && !call.review).length, 1);
+    assert.equal(result.subtitleRepairStatus, failure === 'refusal' ? 'failed' : 'partial');
+    assert.equal(result.subtitleTranslationPartial.length, failure === 'refusal' ? 80 : 400);
+    assert.equal(f.calls.filter(call => call.start === 160 && !call.review).length, failure === 'refusal' ? 1 : 2);
+    if (failure !== 'refusal') assert.equal(result.subtitleTranslationProgress.processingComplete, true);
     await f.assertDrained();
 });
 

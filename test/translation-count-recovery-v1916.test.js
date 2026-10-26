@@ -193,14 +193,13 @@ test('successful empty reviews consume at most64 corrections, leave every unchec
     await f.drained();
 });
 
-for (const failure of ['503 service unavailable', '401 authentication failed', 'quota usage limit', 'execution timeout', 'ECONNRESET network failure', 'response refusal', 'malformed response']) {
+for (const failure of ['503 service unavailable', '401 authentication failed', 'quota usage limit', 'execution timeout', 'ECONNRESET network failure', 'response refusal']) {
     test(`a singleton ${failure} hard-stops without refetch or later source work while retaining its already reviewed tail`, async t => {
         const f = await fixture(t, { count: 160, handler: (call, state) => {
             if (call.review && call.count === 80) return reviewFor(call.input.subtitles.filter(entry => ![5, 19].includes(entry.index)));
             if (call.review && call.count === 2) return reviewFor(call.input.subtitles.filter(entry => entry.index !== 5));
             if (call.review && call.count === 1) {
                 if (failure === 'response refusal') return { refusal: true };
-                if (failure === 'malformed response') return { approvedIndexes: null, corrections: [], terms: [] };
                 throw new Error('Owned synthetic ' + failure);
             }
             return state.normalResponse(call);
@@ -211,7 +210,7 @@ for (const failure of ['503 service unavailable', '401 authentication failed', '
         assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, indexes(80).filter(index => index !== 5));
         assertIdentity(result, f.transcript, indexes(80).filter(index => index !== 5));
         if (failure === 'response refusal') assert.equal(result.subtitleDiagnostic.refusalSource, 'response-field');
-        else if (failure !== 'malformed response') assert(result.subtitleError.includes(failure));
+        else assert(result.subtitleError.includes(failure));
         await f.drained();
     });
 }
@@ -245,13 +244,14 @@ const invalid = {
     'unknown empty-result field': () => ({ subtitles: [], terms: [], unexpected: true }),
     'invalid empty-result terms': () => ({ subtitles: [], terms: [{ source: '合成駅' }] })
 };
-for (const phase of ['draft', 'review']) for (const [name, respond] of Object.entries(invalid)) test(`a ${phase} ${name} is not treated as a recoverable omitted index`, async t => {
+for (const phase of ['draft', 'review']) for (const [name, respond] of Object.entries(invalid)) test(`a ${phase} ${name} gets one bounded format repair per batch then leaves unverified source pending`, async t => {
     const f = await fixture(t, { count: 160, handler: (call, state) => call.review === (phase === 'review') ? respond(call.input.subtitles) : state.normalResponse(call) });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.equal(f.calls.length, phase === 'draft' ? 1 : 2);
+    assert.equal(result.subtitleRepairStatus, 'partial');
+    assert.equal(f.calls.length, phase === 'draft' ? 4 : 6);
     assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
-    assert(!f.calls.some(call => call.start >= 80)); await f.drained();
+    assert(f.calls.some(call => call.start >= 80));
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true); await f.drained();
 });
 
 test('empty review recovery cannot omit required draft name confirmation', async t => {
@@ -262,8 +262,8 @@ test('empty review recovery cannot omit required draft name confirmation', async
         return state.normalResponse(call);
     } });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.match(result.subtitleError, /인명·호칭.*누락/);
+    assert.equal(result.subtitleRepairStatus, 'partial');
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
-    assert.equal(f.calls.length, 6); await f.drained();
+    assert.equal(f.calls.length, 11); await f.drained();
 });

@@ -251,11 +251,10 @@ const invalid = {
   'empty array': () => ({ subtitles: [], terms: [] }),
   'absent array': () => ({ terms: [] })
 };
-for (const phase of ['draft', 'review']) for (const [name, makeInvalid] of Object.entries(invalid)) test(`a ${phase} ${name} ${['duplicate', 'excess', 'out-of-range', 'unsafe subtitle formatting', 'empty text', 'empty array'].includes(name)
-  ? 'retains only validated rows after bounded corrections' : 'fails without any missing-cue requests'}`, async t => {
+for (const phase of ['draft', 'review']) for (const [name, makeInvalid] of Object.entries(invalid)) test(`a ${phase} ${name} retains only validated rows after bounded corrections`, async t => {
   const f = await fixture(t, { respond: item => item.review === (phase === 'review') ? makeInvalid(item.input.subtitles) : undefined });
   const result = await f.run();
-  const recoverable = ['duplicate', 'excess', 'out-of-range', 'unsafe subtitle formatting', 'empty text', 'empty array'].includes(name);
+  const recoverable = true;
   assert.equal(result.subtitleRepairStatus, recoverable ? 'partial' : 'failed');
   if (recoverable) {
     assert(f.requests.length > (phase === 'draft' ? 1 : 2) && f.requests.length <= 66, 'only the bounded shared correction budget is available');
@@ -392,7 +391,9 @@ test('conflicting terminology from an otherwise valid supplement cannot replace 
     if (!item.review) return responseFor(item.input.subtitles, { terms: [{ source: '合成駅', translation: '다른 역' }] });
   } });
   const result = await f.run();
-  assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.requests.length, 2);
+  assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(f.requests.length, 4);
+  assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+  assert.equal(result.subtitleTranslationProgress.processingComplete, true);
   assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
 });
 

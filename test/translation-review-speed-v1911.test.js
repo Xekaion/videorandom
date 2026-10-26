@@ -224,9 +224,9 @@ test('sparse approval still requires explicit review confirmation for draft prop
         return result;
     } });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.match(result.subtitleError, /인명·호칭 표기 확인이 누락/);
-    assert.equal(f.calls.length, 2);
+    assert.equal(result.subtitleRepairStatus, 'partial');
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(f.calls.length, 3);
     assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
     await f.drained();
 });
@@ -238,9 +238,9 @@ test('sparse corrections cannot change a proper name confirmed by a previous dur
         return result;
     } });
     const result = await f.run();
-    assert.equal(result.subtitleRepairStatus, 'failed');
-    assert.match(result.subtitleError, /표기가 앞 구간과 일치하지 않습니다/);
-    assert.equal(f.calls.length, 4);
+    assert.equal(result.subtitleRepairStatus, 'partial');
+    assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(f.calls.length, 5);
     assert.equal(result.subtitleTranslationPartial.length, 80);
     await f.drained();
 });

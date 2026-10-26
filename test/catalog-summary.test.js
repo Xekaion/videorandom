@@ -103,10 +103,15 @@ test('summary list API is opt-in and full detail, default full list and export p
       subtitlePendingCount: metadata.subtitlePendingCount,
       subtitleTranslationSourceFingerprint: metadata.subtitleTranslationSourceFingerprint };
     assert.match(derived.subtitleTranslationSourceFingerprint, /^[a-f0-9]{64}$/);
-    assert.deepEqual(full.find(result => result.id === record.id), { ...record, ...derived, health: recordHealth(record) });
+    const { recovery, ...fullRecord } = full.find(result => result.id === record.id);
+    assert.deepEqual(fullRecord, { ...record, ...derived, health: recordHealth(record) });
+    assert.equal(recovery.code, 'SUBTITLE_CUES_PENDING');
+    assert.equal(recovery.action.kind, 'repair-subtitles');
+    assert.equal(recovery.automatic, false);
+    assert.deepEqual(metadata.recovery, recovery, 'compact and full views expose the same computed recovery plan');
     const detailResponse = await f.request(`/results/${record.id}`);
     assert.equal(detailResponse.status, 200);
-    assert.deepEqual(await detailResponse.json(), { ...record, ...derived, health: recordHealth(record) });
+    assert.deepEqual(await detailResponse.json(), { ...record, ...derived, health: recordHealth(record), recovery });
     const persisted = JSON.parse(await fs.readFile(path.join(f.dataDir, 'results', record.id + '.json'), 'utf8'));
     assert.deepEqual(persisted, record, 'detail hydration and compact listing do not rewrite persisted data');
   }
@@ -132,6 +137,7 @@ test('editing a full detail response preserves derived subtitle identity without
   const persisted = JSON.parse(await fs.readFile(path.join(f.dataDir, 'results', id + '.json'), 'utf8'));
   assert.equal(persisted.subtitleTranslatedCount, undefined);
   assert.equal(persisted.subtitleTranslationSourceFingerprint, undefined);
+  assert.equal(persisted.recovery, undefined, 'the live recovery plan is presentation metadata, not saved analysis');
   assert.deepEqual(persisted.transcript, f.records[0].transcript);
 });
 

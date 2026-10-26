@@ -271,7 +271,8 @@ for (const failure of ['response refusal', '401 authentication failed', 'quota u
             throw new Error('Owned synthetic ' + failure);
         } });
         const result = await f.run();
-        assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.calls.length, 2);
+        assert.equal(result.subtitleRepairStatus, failure === 'invalid root shape' ? 'partial' : 'failed');
+        assert.equal(f.calls.length, failure === 'invalid root shape' ? 3 : 2);
         assert.equal(result.subtitleTranslation, undefined); assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
         assert.notEqual(result.subtitleTranslationProgress?.translationComplete, true);
         await f.drained();

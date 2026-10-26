@@ -1,6 +1,6 @@
 {
   "name": "videorandom",
-  "version": "1.9.27",
+  "version": "1.9.28",
   "description": "Video Roulette - Premium Random Video Picker for Windows",
   "main": "server.js",
   "bin": "server.js",

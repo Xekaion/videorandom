@@ -17,7 +17,7 @@
     autoPick: null, queue: null, queueBusy: false, queuePolling: false, queueLoadError: false, queueUnsupported: false, queueRenderKey: '', queueIssueDetails: new Map(), queueIssuesBusy: false, queueIssueAction: '', queueIssueRevision: 0, queueRevision: 0, autoTimer: null, autoSettingsTimer: null, settingsRevision: 0, noticeRevision: 0, fastSave: null, fastNoticeRevision: null,
     autoPolling: false, autoBusy: false, autoResuming: false, autoResumeError: '', autoTransportError: false, settingsReady: false, settingsTouched: false, settingsFields: new Set(),
     resultsReady: false, autoSavedCount: null, autoResultsLoading: false, autoResultsWanted: null,
-    winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: '', speechInfo: { jobId: '', fileKey: '', metadata: null }
+    winnerPath: '', winnerRequest: 0, winnerStatus: '', winnerError: '', speechInfo: { jobId: '', fileKey: '', metadata: null }, recoveryChecks: new Set()
   };
   const $ = id => document.getElementById(id);
   const pathKey = path => String(path || '').replace(/\//g, '\\').toLowerCase();
@@ -105,6 +105,8 @@
     return { code, repairable: true, reason: ({ ready: '저장된 분석 결과를 사용할 수 있습니다.', 'extraction-only': '로컬 추출은 이미지와 원문 자막을 저장합니다. 자동 요약 방식으로 다시 분석하면 줄거리도 생성합니다.', 'summary-missing': '저장된 결과에 줄거리가 없습니다. 분석 설정과 오류 안내를 확인해 다시 분석하세요.', partial: '분석 일부가 완료되지 않았습니다. 아래 안내를 확인해 다시 분석하세요.', failed: record.error || '분석에 실패했습니다. 아래 안내를 확인해 다시 분석하세요.' })[code] };
   };
   const healthLabel = record => {
+    const recovery = recoveryFor(record);
+    if (recovery && !['complete', 'processing'].includes(recovery.category)) return recovery.label;
     const completion = healthFor(record).completion;
     if (completion?.subtitleSaveFailed) return completion.translationComplete ? '번역 완료 · 자막 파일 저장 실패' : '자막 파일 저장 실패';
     if (processedSubtitleGaps(record)) return subtitleCounts(record).pending > 0
@@ -277,7 +279,11 @@
   }
 
   function primaryRecoveryAction(record) {
-    if (!record || healthFor(record).repairable === false) return null;
+    if (!record) return null;
+    const recovery = recoveryFor(record);
+    if (recovery) return recovery.action ? { ...recovery.action, serverPlan: true,
+      kind: ({ 'repair-subtitles': 'translation', 'reanalyze-source': 'analysis', 'save-subtitles': 'save' })[recovery.action.kind] || recovery.action.kind } : null;
+    if (healthFor(record).repairable === false) return null;
     const counts = subtitleCounts(record);
     if (translationNeedsRecovery(record) && counts?.total > 0) return { kind: 'translation', label: translationRepairLabel(record, true) };
     if (counts?.subtitleSaveFailed && counts.completed > 0) return { kind: 'save', label: '자막 파일 다시 저장' };
@@ -292,12 +298,106 @@
     const action = primaryRecoveryAction(record);
     const button = $('catalogDetailPrimaryRepair');
     button.classList.toggle('hidden', !action && !activity?.active);
-    button.textContent = action?.kind === 'save' ? activity?.active ? activity.label : action.label
+    button.textContent = state.recoveryChecks.has(record?.id) ? '해결 방법 확인 중…' : action?.serverPlan && !['save', 'analysis', 'translation'].includes(action.kind) ? action.label
+      : action?.kind === 'save' ? activity?.active ? activity.label : action.label
       : action ? repairButtonText(record, action.label, activity) : activity?.label || '';
     button.dataset.kind = action?.kind || '';
-    button.disabled = state.detailLoading || (action?.kind === 'save'
-      ? state.starting || isActive(state.job) || !state.config || state.subtitleFolderSaving
-      : repairButtonDisabled(record, action?.kind === 'translation'));
+    button.disabled = state.detailLoading || recoveryActionDisabled(record, action);
+  }
+
+  function recoveryFor(record) {
+    const plan = record?.recovery;
+    if (!plan || plan.version !== 1 || typeof plan.code !== 'string' || !/^[A-Z][A-Z0-9_]{1,63}$/.test(plan.code)
+        || !['category', 'label', 'reason', 'nextStep'].every(key => typeof plan[key] === 'string' && plan[key].length <= 2000)) return null;
+    const actions = ['repair-subtitles', 'reanalyze-source', 'save-subtitles', 'check-connection', 'receive-server-result',
+      'free-storage', 'open-settings', 'open-diagnostics'];
+    const action = actions.includes(plan.action?.kind) && typeof plan.action.label === 'string' && plan.action.label.length <= 100
+      ? { kind: plan.action.kind, label: plan.action.label } : null;
+    return { version: 1, code: plan.code, category: plan.category, label: plan.label, reason: plan.reason,
+      nextStep: plan.nextStep, automatic: plan.automatic === true, action };
+  }
+
+  function recoveryActionDisabled(record, action) {
+    if (!record || !action || state.recoveryChecks.has(record.id)) return true;
+    if (['open-settings', 'open-diagnostics'].includes(action.kind)) return false;
+    if (['check-connection', 'receive-server-result', 'free-storage'].includes(action.kind)) return !state.config;
+    if (action.kind === 'save') return state.starting || isActive(state.job) || !state.config || state.subtitleFolderSaving || state.subtitleDownloading;
+    return repairButtonDisabled(record, action.kind === 'translation');
+  }
+
+  function recoveryGuidance(record, { includeReason = true, includeAction = false } = {}) {
+    const recovery = recoveryFor(record);
+    if (!recovery || ['complete', 'processing'].includes(recovery.category)) return null;
+    const panel = make('div', 'catalog-recovery-guidance');
+    const badge = make('small', `catalog-recovery-mode${recovery.automatic ? ' catalog-recovery-automatic' : ''}`,
+      recovery.automatic ? '자동 복구 대기' : recovery.category === 'refusal' ? '자동 재요청 안 함' : '확인 후 조치');
+    panel.append(badge);
+    if (includeReason) {
+      const reason = make('p', 'catalog-recovery-reason', recovery.reason);
+      reason.title = recovery.reason; panel.append(reason);
+    }
+    const next = make('p', 'catalog-recovery-next', `조치: ${recovery.nextStep}`);
+    next.title = recovery.nextStep;
+    panel.append(next, make('small', 'catalog-recovery-code', recovery.code));
+    if (includeAction) {
+      const action = primaryRecoveryAction(record);
+      if (action) panel.append(recoveryButton(record, action, 'btn-mini catalog-plan-action'));
+    }
+    return panel;
+  }
+
+  function recoveryButton(record, action, className = 'catalog-detail-link catalog-plan-action') {
+    const button = make('button', className, state.recoveryChecks.has(record.id) ? '해결 방법 확인 중…'
+      : ['analysis', 'translation'].includes(action.kind) ? repairButtonText(record, action.label) : action.label);
+    button.type = 'button'; button.dataset.recoveryRecordId = String(record.id); button.dataset.recoveryKind = action.kind;
+    button.disabled = recoveryActionDisabled(record, action);
+    button.addEventListener('click', () => runRecoveryAction(record, action));
+    return button;
+  }
+
+  function openRecoveryPanel(id, record) {
+    if ($('catalogDetail').open) $('catalogDetail').close();
+    const panel = $(id);
+    if (!panel) return;
+    panel.open = true;
+    if (id === 'diagnosticsPanel') {
+      const search = $('diagnosticsSearch');
+      if (search) {
+        search.value = String(record?.name || '').slice(0, 200);
+        if (typeof Event === 'function' && typeof search.dispatchEvent === 'function') search.dispatchEvent(new Event('input', { bubbles: true }));
+        search.focus();
+      }
+    } else panel.querySelector('summary')?.focus();
+    panel.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  }
+
+  async function runRecoveryAction(record, action = primaryRecoveryAction(record)) {
+    if (recoveryActionDisabled(record, action)) return;
+    if (action.kind === 'analysis') return repairResult(record.id);
+    if (action.kind === 'translation') return repairTranslation(record.id);
+    if (action.kind === 'save') return saveSubtitlesInFolder(record.id);
+    if (action.kind === 'open-settings') return openRecoveryPanel('catalogSettings', record);
+    if (action.kind === 'open-diagnostics') return openRecoveryPanel('diagnosticsPanel', record);
+    if (!['check-connection', 'receive-server-result', 'free-storage'].includes(action.kind)) return;
+    state.recoveryChecks.add(record.id); render();
+    try {
+      const mode = $('catalogMode').value;
+      if (!['local', 'codex', 'remote'].includes(mode)) throw new Error('분석 방식을 선택해 주세요.');
+      const options = { mode, ...(mode === 'remote' ? remoteOptions() : {}) };
+      if (['check-connection', 'receive-server-result'].includes(action.kind) && options.mode !== 'remote') {
+        throw new Error('분석 서버로 보내기 방식을 선택하고 기존 서버 주소와 연결 코드를 확인해 주세요.');
+      }
+      const result = await request(`/api/analysis/results/${encodeURIComponent(record.id)}/recovery/check`, jsonOptions('POST', { options }));
+      await refresh();
+      if (result.queue) applyQueue(result.queue);
+      if (result.job) trackJob(result.job, [record.path]);
+      notice(result.message || '보관한 접수 기록과 현재 상태를 확인했습니다.');
+      if (state.detailId === record.id && $('catalogDetail').open) $('catalogDetailRepairNote').textContent = result.message || detailRepairNote(findRecord(record.id) || record);
+    } catch (error) {
+      notice(`복구 상태 확인 실패 · ${error.message}`, true);
+      if (state.detailId === record.id && $('catalogDetail').open) $('catalogDetailRepairNote').textContent = `복구 상태 확인 실패 · ${error.message}`;
+      if (action.kind !== 'free-storage') openRecoveryPanel('catalogSettings', record);
+    } finally { state.recoveryChecks.delete(record.id); render(); }
   }
 
   function subtitleCountPanel(record, activity) {
@@ -366,6 +466,8 @@
   }
 
   function detailRepairNote(record) {
+    const recovery = recoveryFor(record);
+    if (recovery) return `${recovery.reason}\n조치: ${recovery.nextStep}${recovery.automatic ? '\n자동 복구 대기 · 기존 작업을 보관하고 상태를 확인합니다.' : ''}\n진단 코드: ${recovery.code}`;
     const execution = subtitleExecutionNote(record);
     if (execution) return `${record.subtitleError || '한국어 번역이 중단되었습니다.'}\n${execution}\n저장된 원문과 검수된 번역은 보관합니다.`;
     const refusal = subtitleRefusalNote(record);
@@ -1269,6 +1371,11 @@
     });
     document.querySelectorAll('.catalog-save-retry').forEach(button => { button.disabled = state.starting || isActive(state.job)
       || state.subtitleFolderSaving || state.subtitleDownloading || !state.config; });
+    document.querySelectorAll('.catalog-plan-action').forEach(button => {
+      const record = findRecord(button.dataset.recoveryRecordId), action = primaryRecoveryAction(record);
+      button.disabled = recoveryActionDisabled(record, action);
+      if (state.recoveryChecks.has(record?.id)) button.textContent = '해결 방법 확인 중…';
+    });
     document.querySelectorAll('.catalog-enqueue-button').forEach(button => { button.disabled = state.queueBusy || state.queueUnsupported || !state.settingsReady || !state.config || state.config.tools?.available === false || modeUnavailable; });
     renderDetailActivity();
     const detail = findRecord(state.detailId);
@@ -1427,7 +1534,10 @@
         statusCell.append(warning);
       }
       if (record?.error) statusCell.title = record.error;
-      if (record && healthFor(record).repairable !== false) {
+      const recovery = recoveryFor(record);
+      const guidance = recoveryGuidance(record);
+      if (guidance) statusCell.append(guidance);
+      if (record && (recovery || healthFor(record).repairable !== false)) {
         const extra = make('details', 'catalog-extra-actions');
         extra.append(make('summary', '', '추가 작업'));
         const action = primaryRecoveryAction(record);
@@ -1439,14 +1549,15 @@
         repair.disabled = repairButtonDisabled(record);
         repair.addEventListener('click', () => repairResult(record.id));
         extra.append(repair);
-        if (action?.kind === 'analysis') {
+        if (action?.serverPlan) statusCell.append(recoveryButton(record, action));
+        if (!action?.serverPlan && action?.kind === 'analysis') {
           const primary = make('button', 'catalog-detail-link catalog-repair-button catalog-analysis-recovery', repairButtonText(record, action.label, activity));
           primary.type = 'button'; primary.dataset.repairRecordId = String(record.id); primary.disabled = repairButtonDisabled(record);
           primary.addEventListener('click', () => repairResult(record.id));
           statusCell.append(primary);
         }
         const counts = subtitleCounts(record);
-        if (counts?.subtitleSaveFailed && counts.completed > 0) {
+        if (!recovery && counts?.subtitleSaveFailed && counts.completed > 0) {
           const save = make('button', 'catalog-detail-link catalog-save-retry', '자막 파일 다시 저장');
           save.type = 'button'; save.dataset.recordId = String(record.id);
           save.title = '저장된 한국어 자막을 영상 폴더에 다시 저장합니다. 음성 인식이나 번역을 요청하지 않습니다.';
@@ -1460,7 +1571,7 @@
           translate.dataset.translationRepairId = String(record.id);
           translate.disabled = repairButtonDisabled(record, true);
           translate.addEventListener('click', () => repairTranslation(record.id));
-          if (translationNeedsRecovery(record)) {
+          if (!recovery && translationNeedsRecovery(record)) {
             translate.classList.add('catalog-subtitle-repair');
             subtitlePanel.append(translate);
           } else {
@@ -1938,8 +2049,8 @@
       const stage = counts?.subtitleSaveFailed ? '자막 파일 저장' : record.subtitleError || record.subtitleRepairStatus === 'failed' || translationNeedsRecovery(record)
         ? stageNames[record.subtitleDiagnostic?.stage] || '한국어 자막 번역' : record.summaryError || health.code === 'summary-missing' ? '줄거리 요약'
           : stageNames[record.subtitleDiagnostic?.stage] || '영상 분석';
-      const reason = counts?.subtitleSaveFailed ? record.subtitleAutoSave?.error || health.reason
-        : record.subtitleError || record.summaryError || record.error || health.reason;
+      const reason = recoveryFor(record)?.reason || (counts?.subtitleSaveFailed ? record.subtitleAutoSave?.error || health.reason
+        : record.subtitleError || record.summaryError || record.error || health.reason);
       failures.push({ record, path: record.path, name: record.name || String(record.path || '').split(/[\\/]/).pop() || '영상 이름 기록 없음',
         stage, retained, counts, reason: conciseFailure(reason) || '작업을 완료하지 못했습니다. 저장된 결과와 오류 안내를 확인해 주세요.' });
     }
@@ -1949,7 +2060,7 @@
       const knownFailure = failurePath ? failures.find(entry => pathKey(entry.path) === pathKey(failurePath))
         : failureName ? failures.find(entry => entry.name === failureName) : null;
       if (knownFailure) {
-        knownFailure.reason = conciseFailure(job.error) || knownFailure.reason;
+        if (!recoveryFor(knownFailure.record)) knownFailure.reason = conciseFailure(job.error) || knownFailure.reason;
         if (stageNames[job.failedStage]) knownFailure.stage = stageNames[job.failedStage];
       }
       else failures.push({ path: failurePath, name: failureName || '영상 이름 기록 없음', stage: stageNames[job.failedStage || job.stageKey] || '작업 처리',
@@ -2023,7 +2134,8 @@
     const storedFailureResult = entry => (entry.record?.id ? findRecord(entry.record.id) : null)
       || (entry.path ? state.records.get(pathKey(entry.path)) : null);
     const failureRenderKey = JSON.stringify([job.id, job.operation, job.source, failures.map(entry => [entry.name, entry.path, entry.stage,
-      entry.retained, entry.counts?.total, entry.counts?.completed, entry.counts?.pending, entry.reason, storedFailureResult(entry)?.id])]);
+      entry.retained, entry.counts?.total, entry.counts?.completed, entry.counts?.pending, entry.reason, recoveryFor(entry.record),
+      state.recoveryChecks.has(entry.record?.id), storedFailureResult(entry)?.id])]);
     if (failurePanel.dataset.renderKey !== failureRenderKey) {
       failurePanel.dataset.renderKey = failureRenderKey;
       const failureList = make('ul', 'catalog-job-failure-list');
@@ -2037,6 +2149,8 @@
         if (entry.counts?.total > 0 && Number.isSafeInteger(entry.counts.completed)) item.append(make('span', 'catalog-job-failure-count',
           `저장된 한국어 자막 ${entry.counts.completed.toLocaleString()} / ${entry.counts.total.toLocaleString()}구간${entry.counts.pending > 0 ? ` · 남은 ${entry.counts.pending.toLocaleString()}구간` : ''}`));
         item.append(make('p', 'catalog-job-failure-reason', entry.reason));
+        const guidance = recoveryGuidance(entry.record, { includeReason: false, includeAction: true });
+        if (guidance) item.append(guidance);
         const stored = storedFailureResult(entry);
         if (stored?.id) {
           const detail = make('button', 'btn-mini', entry.previous || entry.record?.id !== stored.id ? '기존 저장 결과 보기' : '결과·오류 상세 보기');
@@ -2555,6 +2669,7 @@
           if (savedRecord.health && typeof savedRecord.health === 'object' && !Array.isArray(savedRecord.health)) target.health = savedRecord.health;
           if (Array.isArray(savedRecord.warnings)) target.warnings = savedRecord.warnings;
           if (typeof savedRecord.savedAt === 'string') target.savedAt = savedRecord.savedAt;
+          if (Object.hasOwn(savedRecord, 'recovery')) target.recovery = savedRecord.recovery;
         }
         if (result.subtitleAutoSave) target.subtitleAutoSave = result.subtitleAutoSave;
       };
@@ -2716,10 +2831,7 @@
     $('catalogDetailPrimaryRepair').addEventListener('click', () => {
       const record = findRecord(state.detailId);
       const action = primaryRecoveryAction(record);
-      if (!action || state.starting || (action.kind === 'save' ? isActive(state.job) : repairButtonDisabled(record, action.kind === 'translation'))) return;
-      if (action.kind === 'save') return saveSubtitlesInFolder(record.id);
-      if (action.kind === 'translation') return repairTranslation(record.id);
-      return repairResult(record.id);
+      return runRecoveryAction(record, action);
     });
     $('catalogSubtitleView').addEventListener('change', () => renderTranscript());
     $('catalogSubtitleSrt').addEventListener('click', () => downloadSubtitles('srt'));

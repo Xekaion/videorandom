@@ -159,13 +159,14 @@ for (const failure of ['503 service unavailable', '401 authentication failed', '
             return state.normalResponse(call);
         } });
         const result = await f.run();
-        assert.equal(result.subtitleRepairStatus, 'failed');
+        const local = ['malformed response', 'non-array approval response'].includes(failure);
+        assert.equal(result.subtitleRepairStatus, local ? 'partial' : 'failed');
         assert.equal(result.subtitleTranslationProgress.version, 2);
-        assert.equal(result.subtitleTranslationProgress.completedCues, 79);
+        assert.equal(result.subtitleTranslationProgress.completedCues, local ? 159 : 79);
         assert(!result.subtitleTranslationProgress.cueIndexes.includes(20));
-        assert.equal(result.subtitleTranslationProgress.cueIndexes.at(-1), 79);
-        assert.equal(f.calls.length, 5, 'the failed provider request starts no replacement or later batch');
-        assert(!f.calls.some(call => call.start >= 160));
+        assert.equal(result.subtitleTranslationProgress.cueIndexes.at(-1), local ? 239 : 79);
+        assert.equal(f.calls.length, local ? 8 : 5, 'only locally invalid JSON gets one replacement and later source work');
+        assert.equal(f.calls.some(call => call.start >= 160), local);
         if (failure === 'response refusal') assert.equal(result.subtitleDiagnostic.refusalSource, 'response-field');
         else if (!['malformed response', 'non-array approval response'].includes(failure)) assert(result.subtitleError.includes(failure));
         await f.drained();
@@ -264,13 +265,14 @@ test('internal assembled terms may exceed the per-response limit while every pro
     assert.equal(saved.terms.length, 101); await f.drained();
 });
 
-test('a provider response with more than one hundred terms is still rejected before any repair', async t => {
+test('a provider response with more than one hundred terms is never accepted after one bounded repair per batch', async t => {
     const f = await fixture(t, { bad: [], handler: (call, state) => {
         const result = state.normalResponse(call);
         if (call.review) result.terms = Array.from({ length: 101 }, (_, index) => ({ source: '合成駅' + index, translation: '합성역' + index }));
         return result;
     } });
-    const result = await f.run(); assert.equal(result.subtitleRepairStatus, 'failed'); assert.equal(f.calls.length, 2);
+    const result = await f.run(); assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(f.calls.length, 6);
+    assert.equal(result.subtitleTranslationProgress.processingComplete, true);
     assert.equal(result.subtitleTranslationPartial?.length || 0, 0); await f.drained();
 });
 

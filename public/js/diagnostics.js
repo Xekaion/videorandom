@@ -16,6 +16,13 @@
     'subtitle-text': '자막 속 작업 거절 문구 감지', 'execution-error': '도구 실행 오류의 거절 표시' });
   const EXECUTION_SOURCES = Object.assign(Object.create(null), { 'local-deadline': '도구 대기 제한 초과', 'provider-error': '서비스 오류 응답',
     'process-exit': '도구 비정상 종료', 'process-error': '도구 실행 오류', cancelled: '작업 중지' });
+  const SIDECAR_STAGES = Object.assign(Object.create(null), { 'source-check': '원본 영상·폴더 확인', 'candidate-check': '자막 이름·기존 내용 확인',
+    'temporary-open': '임시 자막 파일 생성', 'temporary-write': '임시 자막 내용 쓰기', 'temporary-sync': '임시 자막 디스크 반영',
+    'temporary-close': '임시 자막 파일 닫기', 'temporary-check': '임시 자막 파일 검증', 'owned-update': '기존 생성 자막 갱신·백업',
+    'publish-link': '자막 게시 · 하드 링크', 'publish-copy': '자막 게시 · 덮어쓰기 없는 복사',
+    'publish-check': '게시된 자막 확인', 'name-selection': '사용 가능한 자막 이름 선택' });
+  const SIDECAR_PATH_CLASSES = Object.assign(Object.create(null), { 'source-file': '원본 영상', 'source-parent': '영상 폴더',
+    'subtitle-candidate': '자막 저장 대상', 'temporary-file': '임시 자막 파일', 'owned-backup': '이전 자막 백업' });
   const HEALTH_OPERATIONS = Object.assign(Object.create(null), { initialize: '저장 폴더 준비', 'load-health': '이전 저장 상태 읽기',
     'load-receipts': '수신 확인 읽기', 'load-events': '작업 로그 읽기', 'load-outbox': '전송 대기 기록 읽기', identity: 'PC 식별 정보 저장·읽기',
     append: '작업 로그 저장', enqueue: '전송 대기 기록 저장', ack: '수신 확인 저장', connection: '전송 연결 확인', pending: '전송 대기 기록 확인',
@@ -41,6 +48,9 @@
     if (CAUSE_CODES.has(value.causeCode)) item.causeCode = value.causeCode;
     if (typeof value.refusalSource === 'string' && Object.hasOwn(REFUSAL_SOURCES, value.refusalSource)) item.refusalSource = value.refusalSource;
     if (typeof value.executionSource === 'string' && Object.hasOwn(EXECUTION_SOURCES, value.executionSource)) item.executionSource = value.executionSource;
+    if (typeof value.saveStage === 'string' && Object.hasOwn(SIDECAR_STAGES, value.saveStage)) item.saveStage = value.saveStage;
+    if (typeof value.pathClass === 'string' && Object.hasOwn(SIDECAR_PATH_CLASSES, value.pathClass)) item.pathClass = value.pathClass;
+    if (Number.isSafeInteger(value.attemptedNames) && value.attemptedNames >= 0 && value.attemptedNames <= 10) item.attemptedNames = value.attemptedNames;
     if (typeof value.providerRequestedModel === 'string' && /^gpt-[a-z0-9][a-z0-9.-]{0,79}$/.test(value.providerRequestedModel)) item.providerRequestedModel = value.providerRequestedModel;
     if (['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value.providerReasoningEffort)) item.providerReasoningEffort = value.providerReasoningEffort;
     if (value.providerServiceTier === 'standard') item.providerServiceTier = 'standard';
@@ -155,6 +165,9 @@
       if (event.code) message.append(node('span', 'diagnostics-meta', safeText(event.code, 160)));
       const technicalCodes = [event.httpStatus ? `HTTP ${event.httpStatus}` : '', event.systemCode ? `시스템 ${event.systemCode}` : '', event.causeCode ? `원인 ${event.causeCode}` : ''].filter(Boolean).join(' · ');
       if (technicalCodes) message.append(node('span', 'diagnostics-meta', technicalCodes));
+      if (event.saveStage) message.append(node('span', 'diagnostics-meta', `자막 저장 동작: ${SIDECAR_STAGES[event.saveStage]}`));
+      if (event.pathClass) message.append(node('span', 'diagnostics-meta', `대상 종류: ${SIDECAR_PATH_CLASSES[event.pathClass]}`));
+      if (Number.isSafeInteger(event.attemptedNames)) message.append(node('span', 'diagnostics-meta', `확인한 자막 이름 ${event.attemptedNames} / 10개`));
       if (event.providerRequestedModel) message.append(node('span', 'diagnostics-meta', `요청 모델 ${event.providerRequestedModel}${event.providerReasoningEffort ? ` · ${event.providerReasoningEffort}` : ''}${event.providerServiceTier ? ' · Standard' : ''}`));
       if (event.executionSource) {
         const times = [Number.isSafeInteger(event.executionElapsedMs) ? `대기 ${Math.round(event.executionElapsedMs / 1000)}초` : '',

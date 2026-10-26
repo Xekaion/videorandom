@@ -1878,6 +1878,17 @@ button.catalog-file-name:hover, .catalog-detail-link:hover { color: var(--color-
 .catalog-job-failure-stage, .catalog-job-failure-count { font-size: 12px; color: #d7e1ef; margin-top: 7px; }
 .catalog-job-failure-retained { color: #9ee5c2; font-size: 12px; margin-top: 7px; }
 .catalog-job-failure-reason { font-size: 13px; color: #f5c99a; overflow-wrap: anywhere; margin: 7px 0 10px; white-space: normal; }
+.catalog-recovery-guidance { min-width: 0; margin-top: 9px; padding-top: 8px; border-top: 1px solid rgba(148,163,184,.2); text-align: left; }
+.catalog-recovery-mode { display: block; color: #f5cf91; font-size: 11px; font-weight: 700; }
+.catalog-recovery-automatic { color: #8ce7d0; }
+.catalog-recovery-reason, .catalog-recovery-next { margin: 5px 0; color: #d4deed; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.catalog-recovery-next { color: #a8d9fa; }
+#catalogRows .catalog-recovery-reason, #catalogRows .catalog-recovery-next { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+#catalogRows .catalog-recovery-reason { -webkit-line-clamp: 2; }
+#catalogRows .catalog-recovery-next { -webkit-line-clamp: 3; }
+.catalog-recovery-code { display: block; margin-top: 5px; color: #8fa5be; font-size: 10px; overflow-wrap: anywhere; }
+.catalog-plan-action { margin-top: 8px; white-space: normal; overflow-wrap: anywhere; }
+.catalog-repair-panel .catalog-section-note { white-space: pre-line; }
 .catalog-job-failure-more { margin-top: 10px; }
 .catalog-job-failure-more > summary { cursor: pointer; color: #baddff; padding: 9px 0; font-size: 13px; }
 .catalog-job-failure-more > summary:focus-visible, .catalog-job-failure-item button:focus-visible { outline: 3px solid #67e8f9; outline-offset: 3px; }

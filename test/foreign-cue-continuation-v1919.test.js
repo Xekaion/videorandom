@@ -227,7 +227,8 @@ test('an all-foreign accurate source finishes its traversal with zero approved c
 
 for (const phase of ['draft', 'review']) for (const corruption of ['wrong index', 'duplicate index', 'conflicting terms', 'subtitle refusal']) {
     const recoverable = ['wrong index', 'duplicate index'].includes(corruption);
-    test(`${phase} foreign text with a sibling ${corruption} ${recoverable ? 'isolates both unresolved cues' : 'still stops without correction'}`, async t => {
+    test(`${phase} foreign text with a sibling ${corruption} ${recoverable ? 'isolates both unresolved cues'
+        : corruption === 'conflicting terms' ? 'quarantines its metadata batch after one bounded format repair' : 'still stops without correction'}`, async t => {
         const f = await fixture(t, { count: 80, bad: [0], phase, handler: call => {
             if (call.review !== (phase === 'review')) return undefined;
             const subtitles = call.indexes.map(index => ({ index: index === 1 && corruption === 'wrong index' ? 99999
@@ -241,6 +242,24 @@ for (const phase of ['draft', 'review']) for (const corruption of ['wrong index'
         if (recoverable) {
             assertAcceptedExcept(result, f.transcript, [0, 1]);
             assert(f.calls.length > (phase === 'draft' ? 1 : 2), 'only unresolved source rows receive bounded correction');
+            await f.drained(); return;
+        }
+        if (corruption === 'conflicting terms') {
+            assert.equal(result.subtitleRepairStatus, 'partial'); assert.equal(result.subtitleError, null);
+            assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+            assert.equal(result.subtitleTranslationProgress.processingComplete, true);
+            assert.equal(result.subtitleTranslationProgress.processedCues, 80);
+            assert.equal(result.subtitleTranslationProgress.completedCues, 0);
+            assert.equal(result.subtitleTranslationProgress.totalCues, 80);
+            assert.equal(result.subtitleTranslationProgress.translationComplete, false);
+            assert.equal(result.subtitleTranslationPartial?.length || 0, 0);
+            assert.equal(result.subtitleTranslation, undefined); assert.equal(result.subtitleLanguage, undefined);
+            assert.deepEqual(f.calls.map(call => [call.review, call.count]), phase === 'draft'
+                ? [[false, 80], [false, 80]] : [[false, 80], [true, 80], [true, 80]],
+            'only one local metadata repair is allowed; unverified terms never approve their neighboring Korean cues');
+            assert(f.diagnostics.some(event => event.code === 'SUBTITLE_BATCH_INVALID' && event.level === 'warning'));
+            assert.deepEqual(result.transcript, f.transcript);
+            assert.throws(() => subtitleText(result, { language: 'ko', partial: true }), 'no unchecked Korean SRT can be produced');
             await f.drained(); return;
         }
         assert.equal(result.subtitleRepairStatus, 'failed'); assert.notEqual(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');

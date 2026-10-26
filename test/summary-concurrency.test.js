@@ -141,7 +141,7 @@ test('a failed chunk cancels its sibling, retains the first error and never star
     await f.assertDrained();
 });
 
-test('a malformed chunk cancels its sibling without consuming a later chunk', async t => {
+test('a parsed malformed chunk gets one bounded repair then drains its sibling without consuming a later chunk', async t => {
     const ready = deferred(); let started = 0;
     const f = await fixture(t, { handler: async call => {
         if (++started === 2) ready.resolve();
@@ -151,7 +151,8 @@ test('a malformed chunk cancels its sibling without consuming a later chunk', as
     } });
     const result = await f.run();
     assert.equal(result.error, 'Codex 구간 요약 형식이 올바르지 않습니다.');
-    assert.equal(f.mocked.calls.filter(call => call.args[0] === 'exec').length, 2);
+    assert.equal(f.mocked.calls.filter(call => call.args[0] === 'exec').length, 3);
+    assert.equal(result.analysisDiagnostic.code, 'SUMMARY_INVALID');
     await f.assertDrained();
 });
 

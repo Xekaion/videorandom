@@ -402,7 +402,9 @@ test('new chunk name drift keeps the validated prefix while concise valid cues a
   const partial = await mocked.provider.analyzeExtracted(record, { dataDir, subtitleLanguage: 'ko' });
   assert.equal(partial.subtitleTranslationPartial.length, 80);
   assert.equal(partial.subtitleLanguage, undefined);
-  assert.match(partial.subtitleError, /표기가 앞 구간과 일치하지 않/);
+  assert.equal(partial.subtitleError, null);
+  assert.equal(partial.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
+  assert.equal(partial.subtitleTranslationProgress.processingComplete, true);
   const shortFixture = await fixture(t, { transcript: [{ start: 1, end: 9, text: '明日の会議では現在の計画について最初から最後まで詳しく説明し質問にも一つずつ順番に答える予定です。' }] });
   const short = mockedProvider(call => (call.schema.properties.subtitles || call.schema.properties.approvedIndexes) ? { subtitles: [{ index: 0, text: '네.' }], terms: [] } : summary());
   const retained = await short.provider.analyzeExtracted(shortFixture.record, { dataDir: shortFixture.dataDir, subtitleLanguage: 'ko' });
