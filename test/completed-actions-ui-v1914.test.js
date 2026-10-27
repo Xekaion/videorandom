@@ -98,7 +98,7 @@ test('sixteen fully finished summary rows show completion with only optional clo
     assertNoDefaultRepair(row);
     const extra = moreActions(row); assert(extra); assert(hasClass(extra, 'catalog-extra-actions'));
     assert.equal(Boolean(extra.open), false);
-    assert(namedButton(extra, /^다시 분석$/));
+    assert(namedButton(extra, /^원문부터 다시 분석$/));
     assert(namedButton(extra, /^한국어 자막 다시 번역$/));
     assert.match(textOf(row), /4 \/ 4구간/);
   }
@@ -112,7 +112,7 @@ test('opening additional row actions alone submits nothing and exposes the two d
   assertNoDefaultRepair(row);
   extra.open = true; await extra.dispatch('toggle');
   const visible = visibleButtons(row).map(button => button.textContent);
-  assert(visible.includes('다시 분석')); assert(visible.includes('한국어 자막 다시 번역'));
+  assert(visible.includes('원문부터 다시 분석')); assert(visible.includes('한국어 자막 다시 번역'));
   assert.equal(posts(ui).length, 0);
 });
 
@@ -120,7 +120,7 @@ for (const translationOnly of [false, true]) test(`an explicit additional ${tran
   const record = catalogRecord(result(`owned-extra-${translationOnly ? 'translation' : 'analysis'}`));
   const ui = await boot({ records: [record], savedSettings: settings });
   const extra = moreActions(rowFor(ui, record.id)); assert(extra); extra.open = true;
-  const button = namedButton(extra, translationOnly ? /^한국어 자막 다시 번역$/ : /^다시 분석$/); assert(button);
+  const button = namedButton(extra, translationOnly ? /^한국어 자막 다시 번역$/ : /^원문부터 다시 분석$/); assert(button);
   await button.dispatch('click');
   assert.equal(posts(ui).length, 1);
   assert.equal(posts(ui)[0].url, `/api/analysis/results/${record.id}/${translationOnly ? 'subtitles/repair' : 'repair'}`);
@@ -128,7 +128,7 @@ for (const translationOnly of [false, true]) test(`an explicit additional ${tran
   if (translationOnly) {
     assert.equal(posts(ui)[0].body.options.transcribeAudio, false);
     assert.equal(posts(ui)[0].body.options.subtitleLanguage, 'ko');
-  }
+  } else assert.equal(posts(ui)[0].body.options.transcribeAudio, true);
 });
 
 test('a finished detail view hides primary repair and leaves legacy controls behind the additional-actions disclosure', async () => {
@@ -154,7 +154,7 @@ test('unfinished Korean cues retain a primary missing-only recovery in the row a
   const rowUi = await boot({ records: [catalogRecord(record)], savedSettings: settings });
   const row = rowFor(rowUi, record.id);
   const rowRecovery = visibleButtons(row).find(button => button.textContent === '남은 8구간 번역 복구'); assert(rowRecovery);
-  assert(!visibleButtons(row).some(button => /^복구 \/ 다시 분석$|^다시 분석$/.test(button.textContent)));
+  assert(!visibleButtons(row).some(button => /^(?:복구 \/ |원문부터 )?다시 분석$/.test(button.textContent)));
   await rowRecovery.dispatch('click');
   assert.equal(posts(rowUi).length, 1);
   assert.equal(posts(rowUi)[0].url, `/api/analysis/results/${record.id}/subtitles/repair`);

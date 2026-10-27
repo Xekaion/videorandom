@@ -8,8 +8,9 @@
   const catalogSort = window.videoCatalogSort;
   const taskLabel = job => job?.operation === 'translation-only' ? '자막 번역' : job?.source === 'repair' ? '복구' : '분석';
   const verifiedPartialSources = new WeakMap();
+  const lineageRecords = new WeakSet();
   const state = {
-    scanned: [], records: new Map(), selected: new Set(), filtered: [], page: 0, detailLoading: false, transcriptLimit: 200,
+    scanned: [], records: new Map(), recordLineage: new Map(), selected: new Set(), filtered: [], page: 0, detailLoading: false, transcriptLimit: 200,
     config: null, job: null, jobReceivedAt: 0, jobConnectionError: '', pollTimer: null, starting: false, exporting: false, interruptedJobs: [], jobRecoveryError: '',
     pendingRequest: null, requestFailure: null, jobTargets: { id: '', keys: new Set() }, detailActivityPath: '',
     refreshing: false, detailId: null, detailPath: '', detailRequest: 0, saving: false, subtitleDownloading: false, subtitleFolderSaving: false, hasModePreference: false,
@@ -255,6 +256,11 @@
     if (queued) return queued.source === 'repair'
       ? queued.operation === 'translation-only' ? '자막 번역 복구 대기 중' : '복구 대기 중' : '분석 대기 중';
     return repairUsesQueue() ? `${label} · 대기 추가` : label;
+  }
+
+  function translationRepairTitle(record) {
+    const count = record?.transcript?.length ?? record?.transcriptCount ?? 0;
+    return `저장된 원문 ${count.toLocaleString()}구간과 시간을 그대로 사용해 한국어 번역만 복구합니다. 원문 구간 수는 늘어나지 않습니다. 원문이 부족하면 원문부터 다시 분석을 선택하세요.`;
   }
 
   async function enqueueRepair(record, operation, options) {
@@ -1075,9 +1081,10 @@
 
   function mergeRecords(records) {
     if (!Array.isArray(records)) return;
-    const related = new Map([...state.records.values(), ...records].filter(record => record?.id).map(record => [record.id, record]));
+    const related = new Map();
     const sourceCount = record => record?.transcript?.length ?? record?.transcriptCount ?? 0;
     const translatedCount = record => {
+      if (lineageRecords.has(record)) return record.translatedCount;
       const total = sourceCount(record);
       if (Number.isSafeInteger(record?.subtitleTranslatedCount) && record.subtitleTranslatedCount >= 0
         && record.subtitleTranslatedCount <= total && typeof record.subtitleTranslationSourceFingerprint === 'string'
@@ -1095,7 +1102,26 @@
       const values = [result?.savedAt, result?.analyzedAt, result?.editedAt].map(value => Date.parse(value || '')).filter(Number.isFinite);
       return values.length ? Math.max(...values) : 0;
     };
+    for (const record of [...state.recordLineage.values(), ...state.records.values(), ...records]) if (record?.id) {
+      const previous = related.get(record.id);
+      if (!previous || savedTime(record) > savedTime(previous)
+        || savedTime(record) === savedTime(previous) && (!Array.isArray(previous.transcript) || Array.isArray(record.transcript))) related.set(record.id, record);
+    }
     const sourceHash = record => record?.subtitleTranslationSourceFingerprint || record?.subtitleTranslationProgress?.sourceFingerprint;
+    const validSource = record => {
+      if (lineageRecords.has(record)) return record.validSource;
+      const count = sourceCount(record);
+      if (!Number.isSafeInteger(count) || count < 1 || count > 50000) return false;
+      if (!Array.isArray(record.transcript)) return record.catalogView === 'summary'
+        && typeof sourceHash(record) === 'string' && /^[a-f0-9]{64}$/i.test(sourceHash(record));
+      let lastStart = -1;
+      return record.transcript.every(cue => {
+        if (!cue || !Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.start < 0
+          || cue.start < lastStart || cue.end <= cue.start || typeof cue.text !== 'string' || !cue.text.trim()) return false;
+        lastStart = cue.start;
+        return true;
+      });
+    };
     const sameSource = (left, right) => {
       if (!sourceCount(left) || sourceCount(left) !== sourceCount(right)) return false;
       if (Array.isArray(left.transcript) && Array.isArray(right.transcript)) return JSON.stringify(left.transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))
@@ -1122,6 +1148,53 @@
       }
       return false;
     };
+    const sourceReanalysisBase = record => {
+      const visited = new Set();
+      while (record && !visited.has(record.id)) {
+        visited.add(record.id);
+        if (record.operation !== 'translation-only') return record.sourceReanalysis === true && validSource(record) ? record : null;
+        const parent = related.get(record.repairOf);
+        if (!parent || pathKey(parent.path) !== pathKey(record.path) || !directTranslationUpdate(record, parent)) return null;
+        record = parent;
+      }
+      return null;
+    };
+    const ancestry = record => {
+      const ancestors = new Set();
+      while (record?.repairOf && !ancestors.has(record.repairOf)) {
+        const parent = related.get(record.repairOf);
+        if (!parent || pathKey(parent.path) !== pathKey(record.path) || savedTime(parent) > savedTime(record)) break;
+        ancestors.add(parent.id);
+        record = parent;
+      }
+      return ancestors;
+    };
+    const sourceReanalysisSupersedes = (next, previous) => {
+      if (!next || !previous || next.id === previous.id || pathKey(next.path) !== pathKey(previous.path)
+        || savedTime(next) <= savedTime(previous)) return false;
+      const base = sourceReanalysisBase(next);
+      if (!base || !base.repairOf) return false;
+      const ancestors = ancestry(base);
+      if (ancestors.has(previous.id)) return true;
+      const previousBase = sourceReanalysisBase(previous);
+      if (!previousBase || savedTime(base) < savedTime(previousBase)) return false;
+      return [...ancestry(previousBase)].some(id => ancestors.has(id));
+    };
+    // Retain relationship/count and summary-comparison metadata between polls.
+    // Full source/translation arrays are not duplicated in this history.
+    for (const record of records) if (record?.id && record.path) {
+      const previous = state.recordLineage.get(record.id);
+      if (previous && savedTime(previous) > savedTime(record)) continue;
+      const metadata = { id: record.id, path: record.path, repairOf: record.repairOf,
+        sourceReanalysis: record.sourceReanalysis === true, operation: record.operation,
+        subtitleRepairStatus: record.subtitleRepairStatus, summary: record.summary, plot: record.plot,
+        savedAt: record.savedAt, analyzedAt: record.analyzedAt, editedAt: record.editedAt,
+        transcriptCount: sourceCount(record), subtitleTranslationSourceFingerprint: sourceHash(record),
+        translatedCount: translatedCount(record), validSource: validSource(record) };
+      lineageRecords.add(metadata);
+      state.recordLineage.set(record.id, metadata);
+    }
+    while (state.recordLineage.size > 50000) state.recordLineage.delete(state.recordLineage.keys().next().value);
     records.forEach(record => {
       if (!record || !record.id || !record.path) return;
       const key = pathKey(record.path);
@@ -1165,7 +1238,13 @@
       }
       if (retainedTranslationUpdate(previous, record)) return;
       const translatedRepair = retainedTranslationUpdate(record, previous);
-      if (!previous || previous.id === record.id || translatedRepair || newerSubtitleProgress || priority(record) > priority(previous)
+      if (previous && record.sourceReanalysis === true && !validSource(record) && validSource(previous)
+          && ancestry(record).has(previous.id)) return;
+      if (previous?.sourceReanalysis === true && !validSource(previous) && validSource(record)
+          && ancestry(previous).has(record.id)) { state.records.set(key, record); return; }
+      if (sourceReanalysisSupersedes(previous, record)) return;
+      const freshSource = sourceReanalysisSupersedes(record, previous);
+      if (!previous || previous.id === record.id || freshSource || translatedRepair || newerSubtitleProgress || priority(record) > priority(previous)
           || (priority(record) === priority(previous) && savedTime(record) > savedTime(previous))) {
         state.records.set(key, record);
       }
@@ -1323,8 +1402,10 @@
     if (record.catalogView === 'summary') { openDetail(record.id); return; }
     const activity = fileActivity(record);
     renderDetailRecovery(record, activity);
-    $('catalogDetailRepair').textContent = repairButtonText(record, '복구 / 다시 분석', activity);
+    $('catalogDetailRepair').textContent = repairButtonText(record, '원문부터 다시 분석', activity);
+    $('catalogDetailRepair').title = '저장된 원문을 재사용하지 않고 영상 전체의 음성 인식과 구간 산정부터 다시 시작합니다. 기존 결과는 보관합니다.';
     $('catalogSubtitleRepair').textContent = repairButtonText(record, translationRepairLabel(record), activity);
+    $('catalogSubtitleRepair').title = translationRepairTitle(record);
     $('catalogDetailHealth').classList.toggle('catalog-activity-health', activity?.active === true);
     $('catalogDetailProgress').classList.toggle('hidden', !activity?.active);
     if (activity) {
@@ -1541,11 +1622,11 @@
         const extra = make('details', 'catalog-extra-actions');
         extra.append(make('summary', '', '추가 작업'));
         const action = primaryRecoveryAction(record);
-        const repair = make('button', 'catalog-detail-link catalog-repair-button', repairButtonText(record, '다시 분석', activity));
+        const repair = make('button', 'catalog-detail-link catalog-repair-button', repairButtonText(record, '원문부터 다시 분석', activity));
         repair.type = 'button';
         repair.dataset.repairRecordId = String(record.id);
-        repair.title = '현재 분석 설정으로 다시 분석합니다. 기존 결과와 이미지는 보존됩니다.';
-        repair.setAttribute('aria-label', `${file.name} 복구 / 다시 분석`);
+        repair.title = '저장된 원문을 재사용하지 않고 영상 전체의 음성 인식과 구간 산정부터 다시 시작합니다. 기존 결과는 보관합니다.';
+        repair.setAttribute('aria-label', `${file.name} 원문부터 다시 분석`);
         repair.disabled = repairButtonDisabled(record);
         repair.addEventListener('click', () => repairResult(record.id));
         extra.append(repair);
@@ -1567,7 +1648,7 @@
         }
         if (record.transcript?.length || record.transcriptCount > 0) {
           const translate = make('button', 'catalog-detail-link catalog-repair-button', repairButtonText(record, translationRepairLabel(record, true), activity));
-          translate.type = 'button'; translate.title = '원문과 시간은 유지하고 한국어 번역만 복구합니다.';
+          translate.type = 'button'; translate.title = translationRepairTitle(record);
           translate.dataset.translationRepairId = String(record.id);
           translate.disabled = repairButtonDisabled(record, true);
           translate.addEventListener('click', () => repairTranslation(record.id));
@@ -1942,6 +2023,7 @@
     if (repairButtonDisabled(record)) return;
     try {
       const options = analysisOptions();
+      options.transcribeAudio = options.mode !== 'local';
       if (repairUsesQueue()) return await enqueueRepair(record, 'analysis', options);
       state.starting = true;
       state.requestFailure = null;
@@ -1949,7 +2031,7 @@
       render();
       notice(options.mode === 'local'
         ? '로컬 이미지·원문 자막을 다시 추출합니다. 자동 요약·한국어 번역 자막을 생성하려면 이 PC에서 분석 또는 분석 서버 방식을 선택하세요. 기존 결과와 이미지는 보존됩니다.'
-        : '현재 분석 설정으로 복구를 시작합니다. 이전에 저장한 결과와 이미지는 보존됩니다.');
+        : '영상 전체의 음성을 새로 인식해 원문 구간부터 다시 산정합니다. 저장된 원문과 자막을 입력으로 재사용하지 않으며 이전 결과는 보관합니다.');
       const result = await request(`/api/analysis/results/${encodeURIComponent(id)}/repair`, jsonOptions('POST', { options }));
       state.pendingRequest = null;
       trackJob(result.job || result, [record.path]);
@@ -2387,7 +2469,7 @@
     renderDetailRecovery(record, fileActivity(record));
     $('catalogDetailRepair').disabled = repairButtonDisabled(record);
     $('catalogSubtitleRepair').disabled = repairButtonDisabled(record, true) || !record.transcript?.length;
-    $('catalogSubtitleRepair').title = record.transcript?.length ? '저장된 원문과 시간으로 한국어 자막만 번역합니다. 음성 인식과 줄거리는 다시 생성하지 않습니다.' : '저장된 원문 대사가 있어야 번역만 복구할 수 있습니다.';
+    $('catalogSubtitleRepair').title = record.transcript?.length ? translationRepairTitle(record) : '저장된 원문 대사가 있어야 번역만 복구할 수 있습니다.';
     const refusal = subtitleRefusalNote(record);
     const execution = subtitleExecutionNote(record);
     const warnings = [...(Array.isArray(record.warnings) ? record.warnings : []), ...(record.error ? [record.error] : []), ...(record.subtitleError ? [record.subtitleError] : []), ...(refusal ? [refusal] : []), ...(execution ? [execution] : [])];
