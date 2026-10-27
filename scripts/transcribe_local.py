@@ -834,7 +834,7 @@ def word_time_overlap(left, right):
     return overlap > 0.001 and overlap / min(left['end'] - left['start'], right['end'] - right['start']) > 0.35
 
 
-def merge_novel_recovery_words(result, candidate):
+def _merge_novel_recovery_words_linear(result, candidate):
     """Keep valid new words even when their decoding cue contains old context."""
     result, novel, blocked = list(result), [], False
     for word in candidate['words']:
@@ -876,6 +876,172 @@ def merge_novel_recovery_words(result, candidate):
     for words in buckets.values():
         result.extend(rebuild_word_cues(words, [candidate], max(word['end'] for word in words)))
     return result, len(novel), blocked
+
+
+def recovery_index_eligible(cues):
+    """Index ordinary decoded lists only; retain legacy handling otherwise."""
+    if not isinstance(cues, (list, tuple)):
+        return False
+    for cue in cues:
+        if not isinstance(cue, dict) or not finite(cue.get('start')) or not finite(cue.get('end')) \
+                or cue['end'] <= cue['start']:
+            return False
+        words = cue.get('words') or []
+        if not isinstance(words, (list, tuple)):
+            return False
+        if any(not isinstance(word, dict) or not finite(word.get('start')) or not finite(word.get('end'))
+               or word['end'] <= word['start'] for word in words):
+            return False
+    return True
+
+
+class RecoveryCueIndex:
+    """Mutable time envelopes with stable source-order leaves.
+
+    Leaves keep the original insertion order even when a merged cue removes
+    several predecessors and appends replacements. Bounds conservatively
+    include both native cue and word times; exact predicates still decide at
+    each leaf. Tombstones avoid shifting every later subtitle on each merge.
+    """
+    def __init__(self, cues):
+        self.cues = list(cues)
+        self.size = 1
+        while self.size < len(self.cues):
+            self.size *= 2
+        self._rebuild()
+
+    def _rebuild(self):
+        self.starts = [math.inf] * (self.size * 2)
+        self.ends = [-math.inf] * (self.size * 2)
+        self.minimum_ends = [math.inf] * (self.size * 2)
+        self.maximum_ends = [-math.inf] * (self.size * 2)
+        self.counts = [0] * (self.size * 2)
+        for index, cue in enumerate(self.cues):
+            self._leaf(index, cue)
+        for node in range(self.size - 1, 0, -1):
+            self._combine(node)
+
+    def _leaf(self, index, cue):
+        node = self.size + index
+        self.starts[node], self.ends[node] = math.inf, -math.inf
+        self.minimum_ends[node], self.maximum_ends[node] = math.inf, -math.inf
+        self.counts[node] = 0
+        if cue is not None:
+            words = cue.get('words') or []
+            self.starts[node] = min([cue['start']] + [word['start'] for word in words])
+            self.ends[node] = max([cue['end']] + [word['end'] for word in words])
+            self.minimum_ends[node] = self.maximum_ends[node] = cue['end']
+            self.counts[node] = 1
+
+    def _combine(self, node):
+        left, right = node * 2, node * 2 + 1
+        self.starts[node] = min(self.starts[left], self.starts[right])
+        self.ends[node] = max(self.ends[left], self.ends[right])
+        self.minimum_ends[node] = min(self.minimum_ends[left], self.minimum_ends[right])
+        self.maximum_ends[node] = max(self.maximum_ends[left], self.maximum_ends[right])
+        self.counts[node] = self.counts[left] + self.counts[right]
+
+    def replace(self, index, cue):
+        self.cues[index] = cue
+        self._leaf(index, cue)
+        node = (self.size + index) // 2
+        while node:
+            self._combine(node)
+            node //= 2
+
+    def remove(self, index):
+        cue = self.cues[index]
+        self.replace(index, None)
+        return cue
+
+    def extend(self, cues):
+        for cue in cues:
+            index = len(self.cues)
+            if index == self.size:
+                self.size *= 2
+                self._rebuild()
+            self.cues.append(cue)
+            self.replace(index, cue)
+
+    def overlapping(self, start, end):
+        pending = [1]
+        while pending:
+            node = pending.pop()
+            if not self.counts[node] or self.ends[node] <= start or self.starts[node] >= end:
+                continue
+            if node < self.size:
+                pending.extend((node * 2 + 1, node * 2))
+            else:
+                yield node - self.size
+
+    def ends_at_or_before(self, point):
+        count, pending = 0, [1]
+        while pending:
+            node = pending.pop()
+            if not self.counts[node] or self.minimum_ends[node] > point:
+                continue
+            if self.maximum_ends[node] <= point:
+                count += self.counts[node]
+            else:
+                pending.extend((node * 2, node * 2 + 1))
+        return count
+
+    def fits(self, candidate, excluded):
+        return not any(index != excluded and min(candidate['end'], self.cues[index]['end'])
+                       - max(candidate['start'], self.cues[index]['start']) > 0.02
+                       for index in self.overlapping(candidate['start'], candidate['end']))
+
+    def values(self):
+        return [cue for cue in self.cues if cue is not None]
+
+
+def _merge_novel_recovery_words_indexed(result, candidate):
+    novel, blocked = [], False
+    for word in candidate['words']:
+        conflict = False
+        for index in result.overlapping(word['start'], word['end']):
+            old = result.cues[index]
+            existing = old.get('words') or [{'start': old['start'], 'end': old['end']}]
+            if any(word_time_overlap(word, previous) for previous in existing):
+                conflict = True
+                break
+            if (not old.get('words') and min(old['end'], word['end'])
+                    - max(old['start'], word['start']) > 0.001):
+                flags = list(dict.fromkeys(old.get('qualityFlags', []) + ['recovery_alignment_conflict']))
+                result.replace(index, {**old, 'qualityFlags': flags})
+                conflict, blocked = True, True
+                break
+        if not conflict:
+            novel.append(word)
+    if not novel:
+        return 0, blocked
+    outside = []
+    for word in novel:
+        touching = [index for index in result.overlapping(word['start'], word['end'])
+                    if result.cues[index].get('words') and min(result.cues[index]['end'], word['end'])
+                    - max(result.cues[index]['start'], word['start']) > 0.001]
+        if touching:
+            old_cues = [result.remove(index) for index in reversed(touching)]
+            words = [previous for old in old_cues for previous in old['words']] + [word]
+            result.extend(rebuild_word_cues(words, old_cues + [candidate],
+                                           max(old['end'] for old in old_cues + [candidate])))
+        else:
+            outside.append(word)
+    buckets = {}
+    for word in outside:
+        position = result.ends_at_or_before(word['start'])
+        buckets.setdefault(position, []).append(word)
+    for words in buckets.values():
+        result.extend(rebuild_word_cues(words, [candidate], max(word['end'] for word in words)))
+    return len(novel), blocked
+
+
+def merge_novel_recovery_words(result, candidate):
+    if not recovery_index_eligible(result) or not recovery_index_eligible([candidate]):
+        return _merge_novel_recovery_words_linear(result, candidate)
+    indexed = RecoveryCueIndex(result)
+    added, blocked = _merge_novel_recovery_words_indexed(indexed, candidate)
+    return indexed.values(), added, blocked
 
 
 def transcript_key(text):
@@ -1000,7 +1166,7 @@ def concordant_rechecks(original, candidates):
     return result, [cue for index, cue in enumerate(candidates) if index not in used], len(used)
 
 
-def merge_recovery(original, candidates):
+def _merge_recovery_linear(original, candidates):
     """Keep established dialogue unless a better aligned recheck replaces it."""
     result, candidates, accepted = concordant_rechecks(original, candidates)
     for candidate in candidates:
@@ -1020,7 +1186,7 @@ def merge_recovery(original, candidates):
                 accepted += 1
                 continue
         if candidate.get('words'):
-            result, added, blocked = merge_novel_recovery_words(result, candidate)
+            result, added, blocked = _merge_novel_recovery_words_linear(result, candidate)
             if added or blocked:
                 accepted += added
                 continue
@@ -1029,6 +1195,41 @@ def merge_recovery(original, candidates):
         result.append(candidate)
         accepted += 1
     return sorted(result, key=lambda cue: (cue['start'], cue['end'])), accepted
+
+
+def merge_recovery(original, candidates):
+    """Preserve recovery decisions while avoiding scans of distant subtitles."""
+    if not recovery_index_eligible(original) or not recovery_index_eligible(candidates):
+        return _merge_recovery_linear(original, candidates)
+    result, candidates, accepted = concordant_rechecks(original, candidates)
+    indexed = RecoveryCueIndex(result)
+    for candidate in candidates:
+        if needs_review(candidate):
+            continue
+        overlaps = []
+        for index in indexed.overlapping(candidate['start'], candidate['end']):
+            cue = indexed.cues[index]
+            overlap = max(0.0, min(cue['end'], candidate['end']) - max(cue['start'], candidate['start']))
+            if overlap > 0.15 and overlap / min(cue['end'] - cue['start'], candidate['end'] - candidate['start']) > 0.35:
+                overlaps.append((index, cue, overlap))
+        if len(overlaps) == 1:
+            index, old, overlap = overlaps[0]
+            if (recheck_improves(old, candidate) and overlap / (old['end'] - old['start']) >= 0.7
+                    and indexed.fits(candidate, index)):
+                indexed.replace(index, {**candidate, 'qualityFlags': list(dict.fromkeys(
+                    candidate.get('qualityFlags', []) + ['rechecked_confidence']))})
+                accepted += 1
+                continue
+        if candidate.get('words'):
+            added, blocked = _merge_novel_recovery_words_indexed(indexed, candidate)
+            if added or blocked:
+                accepted += added
+                continue
+        if overlaps:
+            continue
+        indexed.extend([candidate])
+        accepted += 1
+    return sorted(indexed.values(), key=lambda cue: (cue['start'], cue['end'])), accepted
 
 
 def choose_language(model, audio, duration, language, sample_rate, speech=None):
@@ -1454,6 +1655,24 @@ def load_whisper_model(model_name, cache, *, device='cpu', compute_type='int8', 
         return construct('cpu', 'int8'), 'cpu', 'int8'
 
 
+def load_model_and_audio(model_name, cache, audio_path, *, audio_loader, model_loader=None, **model_options):
+    """Overlap independent CPU audio decode with the unchanged model setup.
+
+    Model construction, CUDA setup and warmup stay on the calling thread.
+    A failed model remains the first failure, as in the original serial path;
+    every started decode is drained before returning or raising.
+    """
+    load_model = model_loader or load_whisper_model
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix='videorandom-audio') as executor:
+        decoded = executor.submit(audio_loader, os.path.abspath(audio_path), sampling_rate=SAMPLE_RATE)
+        try:
+            model, device, compute_type = load_model(model_name, cache, **model_options)
+        except BaseException:
+            decoded.cancel()
+            raise
+        return model, device, compute_type, decoded.result()
+
+
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
@@ -1466,9 +1685,9 @@ def main():
     # Resolve before loading a model so a missing batch API fails actionably.
     turbo_factory = batched_pipeline_class() if args.profile == 'turbo' else None
     emit({'type': 'loading', 'model': model_name, 'profile': args.profile, 'device': args.device, 'computeType': args.compute_type})
-    model, device, compute_type = load_whisper_model(model_name, args.cache, device=args.device,
-        compute_type=args.compute_type, cpu_threads=args.cpu_threads, workers='1' if args.profile == 'turbo' else args.workers)
-    audio = decode_audio(os.path.abspath(args.audio), sampling_rate=SAMPLE_RATE)
+    model, device, compute_type, audio = load_model_and_audio(model_name, args.cache, args.audio,
+        audio_loader=decode_audio, device=args.device, compute_type=args.compute_type,
+        cpu_threads=args.cpu_threads, workers='1' if args.profile == 'turbo' else args.workers)
 
     def speech_detector(waveform, rate):
         options = VadOptions(threshold=0.2, min_speech_duration_ms=200,
