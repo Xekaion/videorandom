@@ -48,6 +48,7 @@
     if (state.reconnectExpired) return '새 버전 실행을 아직 확인하지 못했습니다. 프로그램 창의 실행 오류를 확인한 뒤 다시 연결해 주세요.';
     if (state.reconnecting) return '새 버전을 실행하고 있습니다. 같은 주소로 다시 연결하는 중입니다…';
     if (current.activationRequired === true) return '새 버전이 열렸지만 시작 확인을 마치지 못했습니다. 아래 원인을 확인한 뒤 시작 확인을 다시 시도해 주세요.';
+    if (state.error || (current.phase !== 'error' && text(current.error))) return '업데이트 상태를 확인하지 못했습니다. 아래 원인을 확인한 뒤 새 버전 확인을 다시 눌러 주세요.';
     const labels = {
       checking: '새 버전을 확인하고 있습니다…',
       available: '새 버전을 사용할 수 있습니다.',
@@ -69,8 +70,9 @@
     const snapshot = state.snapshot || {};
     const phase = snapshot.phase || 'idle';
     const current = version(snapshot.currentVersion), latest = version(snapshot.latestVersion);
+    const latestLabel = phase === 'error' || state.error || text(snapshot.error) ? '마지막 확인' : '최신';
     element('appUpdateVersions').textContent = current
-      ? `이 PC 실행 버전 v${current}${latest ? ` · 최신 v${latest}` : ''}` : '실행 버전을 확인하고 있습니다.';
+      ? `이 PC 실행 버전 v${current}${latest ? ` · ${latestLabel} v${latest}` : ''}` : '실행 버전을 확인하고 있습니다.';
     if (current) element('appVersion').textContent = `v${current}`;
     element('appUpdateStatus').textContent = statusText(snapshot);
     const progress = Number(snapshot.progress);

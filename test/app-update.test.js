@@ -119,7 +119,7 @@ test('staging requests the manifest on main and executable on its exact version 
     downloadAsset: options => downloadUpdateAsset({ ...options, request: transport.request })
   });
   assert.equal((await f.service.stage()).status, 'ready');
-  assert.match(transport.calls[0].url, new RegExp('^' + MANIFEST_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\?check=[a-f0-9]{32}$'));
+  assert.match(transport.calls[0].url, /^https:\/\/api\.github\.com\/repos\/Xekaion\/videorandom\/contents\/update\.json\?ref=main&check=[a-f0-9]{32}$/);
   assert.equal(transport.calls[1].url, assetUrlForVersion('1.10.7'));
   assert.equal(f.service.getStagedUpdate().version, '1.10.7');
 });

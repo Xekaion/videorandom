@@ -13,7 +13,7 @@ const bytes = Buffer.from('MZ neutral cache fixture; never executed');
 const hash = crypto.createHash('sha256').update(bytes).digest('hex');
 const manifest = version => ({ schemaVersion: 1, updateProtocol: 1, version,
   asset: { url: assetUrlForVersion(version), sha256: hash, sizeBytes: bytes.length } });
-const noncePattern = new RegExp('^' + MANIFEST_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\?check=[a-f0-9]{32}$');
+const noncePattern = /^https:\/\/api\.github\.com\/repos\/Xekaion\/videorandom\/contents\/update\.json\?ref=main&check=[a-f0-9]{32}$/;
 
 function transport(resolve) {
   const calls = [];
