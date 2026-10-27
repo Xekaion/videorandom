@@ -1,8 +1,7 @@
 """Stream ASR with full-audio processing and an independent coverage audit."""
 import argparse
 from bisect import bisect_left, bisect_right
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout, wait as wait_futures, FIRST_COMPLETED
 import gc
 import json
 import math
@@ -92,11 +91,11 @@ def gpu_out_of_memory(error):
 
 
 def decode_windows(model, audio, windows, options, sample_rate, state, emitter, waiting=None):
-    """Use the ordinary decoder unchanged; keep at most two windows in flight.
+    """Keep two ordinary decoders busy, emitting only in source order.
 
-    No batching API is used: its ignored fallback/no-speech options would change
-    recognition. Each thread has its own transcribe generator and alignment
-    state. Only the caller emits/commits decoded cues, in original window order.
+    At most four finished successor windows can wait for a slow predecessor.
+    Decoding settings, ownership, and alignment remain unchanged. Completed
+    work is retained on OOM, and only failed windows are retried serially once.
     """
     def decode(window):
         start, end, _, _ = window
@@ -106,8 +105,6 @@ def decode_windows(model, audio, windows, options, sample_rate, state, emitter, 
 
     if state['workers'] < 2 or len(windows) < 2:
         for index, window in enumerate(windows):
-            # Keep streaming behavior in serial mode, including early source
-            # checkpoints. A failed serial decode is surfaced, never skipped.
             start, end, _, _ = window
             segments, _ = model.transcribe(audio[round(start * sample_rate):round(end * sample_rate)], **options)
             yield index, window, segments
@@ -123,51 +120,80 @@ def decode_windows(model, audio, windows, options, sample_rate, state, emitter, 
                 if waiting:
                     waiting(index)
 
-    cursor, pending = 0, deque()
+    cursor, next_output = 0, 0
+    active, ready = {}, {}
+    failure_seen = False
+    # Four successor results plus the currently owned window. This also bounds
+    # submitted work when the consumer pauses at a checkpoint or output yield.
+    max_outstanding = 5
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix='videorandom-asr') as executor:
-        while cursor < min(2, len(windows)):
-            pending.append((cursor, executor.submit(decode, windows[cursor])))
-            cursor += 1
-        while pending:
-            index, future = pending.popleft()
+        def fill():
+            nonlocal cursor
+            while not failure_seen and cursor < len(windows) and len(active) < 2 \
+                    and len(active) + len(ready) < max_outstanding:
+                active[cursor] = executor.submit(decode, windows[cursor])
+                cursor += 1
+
+        def collect(index):
+            nonlocal failure_seen
+            future = active.pop(index)
             try:
-                segments = settle(future, index)
+                ready[index] = (settle(future, index), None)
             except Exception as error:
+                failure_seen = True
+                if gpu_out_of_memory(error):
+                    error.__traceback__ = None
+                ready[index] = (None, error)
+
+        fill()
+        while next_output < len(windows):
+            if next_output not in ready:
+                # Prefer an already finished owner. Refill before yielding it,
+                # just as before; otherwise observe whichever worker finishes.
+                owner = active.get(next_output)
+                if owner is not None and owner.done():
+                    collect(next_output)
+                else:
+                    completed, _ = wait_futures(active.values(), timeout=10, return_when=FIRST_COMPLETED)
+                    if not completed:
+                        if waiting:
+                            waiting(next_output)
+                        continue
+                    for index in sorted(index for index, future in active.items() if future in completed):
+                        collect(index)
+                fill()
+                if next_output not in ready:
+                    continue
+            segments, error = ready.pop(next_output)
+            if error is not None:
                 if not gpu_out_of_memory(error):
-                    for _, other in pending:
-                        other.cancel()
-                    raise
-                # Futures retain exception tracebacks. Release decoder frames
-                # (which can own encoder buffers) before the lower-memory retry.
+                    for future in active.values():
+                        future.cancel()
+                    raise error
+                # Drain every started decoder before a serial retry. No work
+                # is submitted after observing a failure, even out of order.
+                for index in sorted(list(active)):
+                    collect(index)
                 error.__traceback__ = None
-                # Let all in-flight GPU work settle before any serial retry.
-                # Retain successful work, and retry failed windows only once.
-                fallback = [(index, None)]
-                for other_index, other in pending:
-                    try:
-                        fallback.append((other_index, settle(other, other_index)))
-                    except Exception as other_error:
-                        if not gpu_out_of_memory(other_error):
-                            raise
+                for _, other_error in ready.values():
+                    if other_error is not None and not gpu_out_of_memory(other_error):
+                        raise other_error
+                    if other_error is not None:
                         other_error.__traceback__ = None
-                        fallback.append((other_index, None))
-                pending.clear()
                 state.update(workers=1, oomFallback=True)
                 emitter({'type': 'warning', 'message': 'GPU 병렬 처리의 메모리가 부족해 남은 구간을 한 번에 하나씩 처리합니다. '
                          '완료된 구간은 유지하며 같은 모델과 인식 설정을 사용합니다.'})
                 gc.collect()
-                for retry_index, saved in fallback:
-                    yield retry_index, windows[retry_index], decode(windows[retry_index]) if saved is None else saved
-                for remaining in range(cursor, len(windows)):
-                    yield remaining, windows[remaining], decode(windows[remaining])
+                yield next_output, windows[next_output], decode(windows[next_output])
+                for index in range(next_output + 1, cursor):
+                    saved, failed = ready.pop(index)
+                    yield index, windows[index], decode(windows[index]) if failed is not None else saved
+                for index in range(cursor, len(windows)):
+                    yield index, windows[index], decode(windows[index])
                 return
-            if cursor < len(windows):
-                # Refill the completed GPU slot before handing this result to
-                # CPU cue processing and checkpoint output. Pending decodes
-                # remain bounded at two; the caller owns one finished result.
-                pending.append((cursor, executor.submit(decode, windows[cursor])))
-                cursor += 1
-            yield index, windows[index], segments
+            fill()
+            yield next_output, windows[next_output], segments
+            next_output += 1
 
 
 def batched_pipeline_class():
@@ -509,16 +535,55 @@ def very_quiet_stationary_noise(audio, start, end, sample_rate):
     return stationary and noise_like
 
 
+class SpeechOverlapIndex:
+    """Index only finite interval bounds; preserve the exact strict predicate.
+
+    The VAD union is normally ordered and disjoint. Prefix maxima also support
+    overlapping or unordered finite input without changing endpoint decisions.
+    Non-finite/malformed bounds use the original predicate instead of assuming
+    that Python's min/max comparisons follow ordinary interval algebra.
+    """
+    def __init__(self, speech):
+        self.speech = speech
+        self.starts, self.ends = [], []
+        self.indexed = False
+        try:
+            # A legacy one-shot iterator has observable consumption across
+            # queries. Leave it on the original path rather than exhaust it.
+            if iter(speech) is speech:
+                return
+            self.indexed = all(finite(start) and finite(end) for start, end in speech)
+        except (TypeError, ValueError):
+            return
+        if not self.indexed:
+            return
+        maximum = -math.inf
+        for start, end in sorted((start, end) for start, end in speech if end > start):
+            self.starts.append(start)
+            maximum = max(maximum, end)
+            self.ends.append(maximum)
+
+    def overlaps(self, start, end):
+        if not self.indexed or not finite(start) or not finite(end):
+            return any(max(start, left) < min(end, right) for left, right in self.speech)
+        if start >= end:
+            return False
+        index = bisect_left(self.starts, end) - 1
+        return index >= 0 and self.ends[index] > start
+
+
 def prune_non_speech_artifacts(cues, audio, speech, sample_rate):
     kept, removed = [], []
+    speech_index = None
     for cue in cues:
         # Only low-confidence cues can be removed. Do not repeatedly search
         # the full speech union for dialogue that will be kept in any case.
         if not low_confidence(cue):
             kept.append(cue)
             continue
-        intersects_speech = any(max(cue['start'] - 0.08, left) < min(cue['end'] + 0.08, right)
-                                for left, right in speech)
+        if speech_index is None:
+            speech_index = SpeechOverlapIndex(speech)
+        intersects_speech = speech_index.overlaps(cue['start'] - 0.08, cue['end'] + 0.08)
         if (not intersects_speech
                 and very_quiet_stationary_noise(audio, cue['start'], cue['end'], sample_rate)):
             removed.append({'start': cue['start'], 'end': cue['end'], 'reason': 'very_quiet_non_speech'})
@@ -595,9 +660,26 @@ def cues_from_segment(segment, offset, duration, ownership=None, word_timestamps
 
 def reconcile_window_boundaries(cues):
     """Deduplicate matching observations from adjacent decoding windows only."""
-    kept, by_window = [], {}
+    kept, by_window, text_indexes = [], {}, {}
     def text_key(text):
         return ''.join(text.split())
+    def matching_previous(window, kind, text):
+        # Keep only equal-text observations in the expensive timing check.
+        # Build lazily so unused malformed legacy metadata retains its old
+        # behavior; out-of-order insertion invalidates only that window.
+        indexes = text_indexes.setdefault(window, {})
+        if kind not in indexes:
+            index = {}
+            try:
+                for item in by_window.get(window, ()):
+                    observations = item.get('words', []) if kind == 'word' else (item,)
+                    for observation in observations:
+                        index.setdefault(text_key(observation[kind]), []).append(observation)
+            except (KeyError, TypeError, AttributeError):
+                index = None
+            indexes[kind] = index
+        index = indexes[kind]
+        return None if index is None else index.get(text_key(text), ())
     def same_observation(left, right, boundary):
         if not left['start'] <= boundary <= left['end'] or not right['start'] <= boundary <= right['end']:
             return False
@@ -613,23 +695,36 @@ def reconcile_window_boundaries(cues):
         if words:
             filtered = []
             for word in words:
-                duplicate = any(text_key(word['word']) == text_key(old['word'])
-                    and same_observation(word, old, boundary)
-                    and abs(word['start'] - old['start']) <= 0.4 and abs(word['end'] - old['end']) <= 0.4
-                    for item in previous for old in item.get('words', []))
+                candidates = matching_previous(window - 1, 'word', word['word'])
+                if candidates is None:
+                    duplicate = any(text_key(word['word']) == text_key(old['word'])
+                        and same_observation(word, old, boundary)
+                        and abs(word['start'] - old['start']) <= 0.4 and abs(word['end'] - old['end']) <= 0.4
+                        for item in previous for old in item.get('words', []))
+                else:
+                    duplicate = any(same_observation(word, old, boundary)
+                        and abs(word['start'] - old['start']) <= 0.4 and abs(word['end'] - old['end']) <= 0.4
+                        for old in candidates)
                 if not duplicate:
                     filtered.append(word)
             if not filtered:
                 continue
             cue.update(words=filtered, start=filtered[0]['start'], end=max(word['end'] for word in filtered),
                        text=''.join(word['word'] for word in filtered).strip())
-        elif any(text_key(cue['text']) == text_key(old['text']) and same_observation(cue, old, boundary)
-                 for old in previous):
-            continue
+        else:
+            candidates = matching_previous(window - 1, 'text', cue['text'])
+            if candidates is None:
+                duplicate = any(text_key(cue['text']) == text_key(old['text']) and same_observation(cue, old, boundary)
+                                for old in previous)
+            else:
+                duplicate = any(same_observation(cue, old, boundary) for old in candidates)
+            if duplicate:
+                continue
         kept.append(cue)
         # A missing window was historically distinct from explicit window 0
         # when matching previous observations; retain that distinction.
         by_window.setdefault(cue.get('_window'), []).append(cue)
+        text_indexes.pop(cue.get('_window'), None)
     return sorted([{key: value for key, value in cue.items() if not key.startswith('_')}
                    for cue in kept], key=lambda cue: (cue['start'], cue['end']))
 
