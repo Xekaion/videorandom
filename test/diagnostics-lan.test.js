@@ -77,7 +77,8 @@ test('partial provider results are errors even when the remote job completed and
   const result = await sendRemoteAnalysis(record, { remoteUrl: f.remoteUrl, connectionCode: code, dataDir: clientDir, operation: 'translation-only',
     subtitleLanguage: 'ko', subtitleQuality: 'fast', diagnosticClient: { clientId: 'owned-client', clientName: 'Owned PC', clientVersion: '1.9.2', clientJobId: 'owned-local-job' },
     onDiagnostic: event => accepted.push(event) });
-  assert.equal(accepted[0].event, 'accepted'); assert.ok(accepted[0].serverJobId);
+  const acceptedEvent = accepted.find(event => event.event === 'accepted');
+  assert.ok(acceptedEvent?.serverJobId);
   assert.equal(result.subtitleDiagnostic.expectedCues, 20);
   const events = (await f.diagnosticsStore.query()).events;
   const terminal = events.find(event => event.event === 'completed');
@@ -85,7 +86,10 @@ test('partial provider results are errors even when the remote job completed and
   assert.equal(terminal.expectedCues, 20); assert.equal(terminal.clientJobId, 'owned-local-job'); assert.equal(terminal.recordId, record.id);
   assert.equal(terminal.operation, 'translation-only');
   assert.equal(JSON.parse(await fs.readFile(path.join(f.dataDir, 'remote', 'jobs', terminal.jobId, 'terminal.json'), 'utf8')).operation, 'translation-only');
-  assert.equal((await f.diagnosticsStore.query({ jobId: 'owned-local-job' })).events.length, events.length);
+  assert.equal((await f.diagnosticsStore.query({ jobId: 'owned-local-job' })).events.length,
+    events.filter(event => event.clientJobId === 'owned-local-job').length);
+  assert.ok(events.some(event => event.code === 'LAN_UPLOAD_STARTED' && !event.clientJobId),
+    'preacceptance upload facts do not fabricate a client identity before metadata validation');
   assert.ok(events.find(event => event.event === 'stage_changed' && event.stage === 'translation_review'));
   await f.host.stop();
   const beforeRestart = (await f.diagnosticsStore.query()).stats.total;

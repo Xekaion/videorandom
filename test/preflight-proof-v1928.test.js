@@ -125,9 +125,13 @@ test('an upload error cannot inherit stale preflight proof or be POSTed twice', 
     : { error: Object.assign(new Error('Owned ambiguous upload acceptance'), { code: 'ECONNRESET', analysisTransport: { ...PROOF } }) });
   const record = { ...source(), transcript: [{ id: 'owned-cue', start: 1, end: 3, text: '次の列車です。' }] };
   await assert.rejects(send(record, { operation: 'translation-only' }), error => {
-    assert.equal(error.code, 'ECONNRESET'); assert.equal(error.analysisTransport, undefined); return true;
+    assert.equal(error.code, 'LAN_UPLOAD_INTERRUPTED'); assert.equal(error.systemCode, 'ECONNRESET');
+    assert.equal(error.lanTransferPhase, 'upload'); assert.equal(error.lanSubmissionState, 'unconfirmed');
+    assert.equal(error.lanServerReady, true); assert.equal(error.analysisTransport, undefined);
+    assert.equal(error.remoteJob, undefined); return true;
   });
-  assert.deepEqual(calls, [{ method: 'GET', path: '/v1/status' }, { method: 'POST', path: '/v1/jobs' }]);
+  assert.deepEqual(calls, [{ method: 'GET', path: '/v1/status' }, { method: 'POST', path: '/v1/jobs' },
+    { method: 'GET', path: '/v1/status' }], 'the fresh healthy read permits only another independent file, never another POST');
 });
 
 test('an accepted-job status failure cannot become not-submitted preflight proof', async t => {

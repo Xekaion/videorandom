@@ -133,9 +133,19 @@ test('a completed LAN result stays nonterminal until its atomic recovery journal
 
 test('failed or malformed LAN terminal journals block managed exit while current clients can retain their result', async t => {
   const dataDir = await directory(t);
-  const f = await host(t, dataDir, async ({ record }) => complete(record), { journalIO: { ...fs, async rename() { throw Object.assign(new Error('owned journal failure'), { code: 'EIO' }); } } });
-  const accepted = await (await f.submit()).json();
+  let terminalWrites = 0;
+  const f = await host(t, dataDir, async ({ record }) => complete(record), { journalIO: { ...fs, async rename(from, to) {
+    // Acceptance receipts now share this injected journal I/O. Fail only the
+    // terminal publication under test, after the upload has been accepted.
+    if (path.basename(to) === 'terminal.json') {
+      terminalWrites++; throw Object.assign(new Error('owned terminal journal failure'), { code: 'EIO' });
+    }
+    return fs.rename(from, to);
+  } } });
+  const acceptedResponse = await f.submit(); assert.equal(acceptedResponse.status, 202);
+  const accepted = await acceptedResponse.json();
   assert.equal((await terminal(f, accepted.id)).result.summary, '검증용 합성 요약');
+  assert.equal(terminalWrites, 1, 'the owned failure occurs at exactly the terminal journal boundary');
   f.service.prepareUpdate();
   assert.equal(f.service.getUpdateStatus().blocked, true);
   await assert.rejects(f.service.finishUpdate(), { status: 409 });

@@ -169,6 +169,6 @@ test('uncertain upload acceptance and failed preflight are never replayed by sta
   for (const options of [{ dropUpload: true }, { dropPreflight: true }]) await t.test(Object.keys(options)[0], async t => {
     const f = await fixture(t, options);
     await assert.rejects(f.send());
-    assert.deepEqual([f.calls.statuses, f.calls.uploads, f.calls.polls], [1, options.dropUpload ? 1 : 0, 0]);
+    assert.deepEqual([f.calls.statuses, f.calls.uploads, f.calls.polls], [options.dropUpload ? 2 : 1, options.dropUpload ? 1 : 0, 0]);
   });
 });

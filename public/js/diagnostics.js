@@ -7,6 +7,14 @@
   const element = id => document.getElementById(id);
   const safeText = (value, limit = 500) => typeof value === 'string' ? value.slice(0, limit) : '';
   const integer = value => Number.isSafeInteger(value) && value >= 0 && value <= 10000000;
+  // Match the LAN multipart limit: audio 250 MiB + 20 images × 5 MiB + metadata 8 MiB + framing 1 MiB.
+  const MAX_UPLOAD_BYTES = 359 * 1024 * 1024;
+  const UPLOAD_STATES = Object.assign(Object.create(null), { receiving: '서버 자료 수신 중', accepted: '서버 작업 접수 확인 · 분석 완료와 별도',
+    rejected: '서버 자료 요청 접수 거부', interrupted: '자료 전송·수신 중단' });
+  const UPLOAD_CODE_MESSAGES = Object.assign(Object.create(null), { LAN_UPLOAD_STARTED: '서버가 분석 자료를 받기 시작했습니다.',
+    LAN_UPLOAD_ACCEPTED: '서버가 분석 작업을 접수했습니다. 분석 완료 여부는 작업 기록에서 확인하세요.',
+    LAN_UPLOAD_REJECTED: '서버가 전송한 분석 자료의 접수를 거부했습니다.',
+    LAN_UPLOAD_INTERRUPTED: '자료 전송 중 연결이 끊겨 서버 접수 여부를 확인하지 못했습니다.' });
   const SYSTEM_CODES = new Set(['ENOENT', 'ENOSPC', 'EACCES', 'EPERM', 'EROFS', 'EIO', 'EMFILE', 'ENFILE', 'ENOTDIR', 'EISDIR',
     'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS', 'EEXIST', 'ENAMETOOLONG', 'EINVAL', 'EBUSY',
     'EHOSTUNREACH', 'ENETUNREACH', 'ECONNREFUSED', 'ENOTFOUND', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'MODULE_NOT_FOUND']);
@@ -68,6 +76,15 @@
     for (const key of ['providerReconnectAttempt', 'providerReconnectLimit']) if (integer(value[key]) && value[key] <= 1000) item[key] = value[key];
     if (Number.isInteger(value.providerHttpStatus) && value.providerHttpStatus >= 100 && value.providerHttpStatus <= 599) item.providerHttpStatus = value.providerHttpStatus;
     if (SYSTEM_CODES.has(value.providerSystemCode)) item.providerSystemCode = value.providerSystemCode;
+    if (typeof value.uploadRequestId === 'string' && /^[a-f0-9]{32}$/.test(value.uploadRequestId)) item.uploadRequestId = value.uploadRequestId;
+    if (typeof value.uploadState === 'string' && Object.hasOwn(UPLOAD_STATES, value.uploadState)) item.uploadState = value.uploadState;
+    for (const key of ['uploadExpectedBytes', 'uploadReceivedBytes']) {
+      if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= MAX_UPLOAD_BYTES) item[key] = value[key];
+    }
+    if (Number.isSafeInteger(value.uploadElapsedMs) && value.uploadElapsedMs >= 0 && value.uploadElapsedMs <= 604800000) item.uploadElapsedMs = value.uploadElapsedMs;
+    if (value.lanTransferPhase === 'upload') item.lanTransferPhase = value.lanTransferPhase;
+    if (value.lanSubmissionState === 'unconfirmed') item.lanSubmissionState = value.lanSubmissionState;
+    if (typeof value.lanServerReady === 'boolean') item.lanServerReady = value.lanServerReady;
     if (Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100) item.percent = value.percent;
     return item;
   }
@@ -192,7 +209,22 @@
       if (signals.length) message.append(node('span', 'diagnostics-meta', `대기 중 관측한 기술 신호: ${signals.join(' · ')}`));
       if (event.providerDeadlineScope) message.append(node('span', 'diagnostics-meta', '자막 번역 요청 대기 제한 적용'));
       if (typeof event.providerProcessStopped === 'boolean') message.append(node('span', 'diagnostics-meta', event.providerProcessStopped ? '도구 종료 확인됨' : '도구 종료 미확인'));
-      if (event.message) message.append(node('p', '', safeText(event.message, 1000)));
+      if (event.lanTransferPhase) message.append(node('span', 'diagnostics-meta', '자료 전송 단계: 분석 자료 업로드'));
+      if (event.uploadRequestId) message.append(node('span', 'diagnostics-meta', `전송 요청 ID ${event.uploadRequestId}`));
+      if (event.uploadState) message.append(node('span', 'diagnostics-meta', `자료 전송 상태: ${UPLOAD_STATES[event.uploadState]}`));
+      const uploadCounts = [Number.isSafeInteger(event.uploadReceivedBytes) ? `서버 수신 ${event.uploadReceivedBytes.toLocaleString('ko-KR')}바이트` : '',
+        Number.isSafeInteger(event.uploadExpectedBytes) ? `요청 크기 ${event.uploadExpectedBytes.toLocaleString('ko-KR')}바이트` : '',
+        Number.isSafeInteger(event.uploadElapsedMs) ? `전송 경과 ${(event.uploadElapsedMs / 1000).toLocaleString('ko-KR', { maximumFractionDigits: 3 })}초` : ''].filter(Boolean);
+      if (uploadCounts.length) message.append(node('span', 'diagnostics-meta', uploadCounts.join(' · ')));
+      if (event.lanSubmissionState) message.append(node('span', 'diagnostics-meta', event.uploadState === 'accepted'
+        ? '접수 상태 정보 불일치 · 서버 접수 기록 확인 필요'
+        : '서버 접수 여부 미확인 · 전송 중단만으로 서버 작업이 없다고 단정할 수 없습니다.'));
+      if (typeof event.lanServerReady === 'boolean') message.append(node('span', 'diagnostics-meta', event.lanServerReady
+        ? '서버 응답 확인 · 작업 접수 여부와 별도' : '서버 준비 상태 미확인'));
+      const fixedUploadMessage = Object.hasOwn(UPLOAD_CODE_MESSAGES, event.code || '') ? UPLOAD_CODE_MESSAGES[event.code] : '';
+      const uploadMetadata = event.uploadRequestId || event.uploadState || uploadCounts.length || event.lanTransferPhase
+        || event.lanSubmissionState || typeof event.lanServerReady === 'boolean';
+      if (fixedUploadMessage || !uploadMetadata && event.message) message.append(node('p', '', fixedUploadMessage || safeText(event.message, 1000)));
       if (REFUSAL_CODES.has(event.code)) {
         const basis = REFUSAL_SOURCES[event.refusalSource];
         message.append(node('p', 'diagnostics-meta', `판정 근거: ${basis || '미기록 · 이전 버전에서는 구분해 저장하지 않았습니다.'}${basis ? '.' : ''} 구체적인 거절 사유는 기록되지 않았습니다.`));
