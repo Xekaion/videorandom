@@ -8,6 +8,7 @@
 
   const PHASES = ['transcription', 'recovery', 'audit', 'translation', 'summary', 'completed'];
   const REQUEST_STAGES = ['translation_draft', 'translation_review', 'translation_repair'];
+  const REQUEST_ACTIVITIES = ['starting', 'connected', 'request_started', 'output_activity', 'reconnecting', 'capacity_wait'];
   const COMPUTE_TYPES = ['float32', 'float16', 'bfloat16', 'int8', 'int8_float16', 'int8_float32', 'int8_bfloat16', 'int16'];
   const seconds = value => Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
   const count = value => Number.isInteger(value) && value >= 0 && value <= 2000000;
@@ -87,8 +88,20 @@
       result.requestElapsedSeconds = value.requestElapsedSeconds;
       if (seconds(value.requestExpectedSeconds) && value.requestExpectedSeconds > 0) result.requestExpectedSeconds = value.requestExpectedSeconds;
       if (result.requestElapsedSeconds > requestDelaySeconds(result)) result.requestDelayed = true;
+      if (REQUEST_ACTIVITIES.includes(value.requestActivity)) {
+        result.requestActivity = value.requestActivity;
+        if (seconds(value.requestActivityAgeSeconds)) result.requestActivityAgeSeconds = value.requestActivityAgeSeconds;
+        if (Number.isInteger(value.requestAttempt) && value.requestAttempt >= 1 && value.requestAttempt <= 100) result.requestAttempt = value.requestAttempt;
+        if (value.requestActivity === 'capacity_wait') {
+          if (seconds(value.requestRetryDelaySeconds)) result.requestRetryDelaySeconds = value.requestRetryDelaySeconds;
+        } else {
+          if (seconds(value.requestAttemptElapsedSeconds)) result.requestAttemptElapsedSeconds = value.requestAttemptElapsedSeconds;
+          if (seconds(value.requestDeadlineSeconds)) result.requestDeadlineSeconds = value.requestDeadlineSeconds;
+        }
+      }
     }
-    if ((result.sampleAgeSeconds || 0) > 120 || result.requestDelayed) clearEstimate(result);
+    if ((result.sampleAgeSeconds || 0) > 120 || result.requestDelayed
+        || ['reconnecting', 'capacity_wait'].includes(result.requestActivity) || result.requestDeadlineSeconds === 0) clearEstimate(result);
     return result;
   }
 
@@ -131,6 +144,15 @@
         details.requestStage = active.stage;
         details.activeRequestCount = requests.size;
         details.requestElapsedSeconds = (at - active.at) / 1000;
+        if (active.activity) {
+          const activity = active.activity;
+          details.requestActivity = activity.state;
+          details.requestActivityAgeSeconds = addSeconds(activity.ageSeconds, (at - activity.at) / 1000);
+          if (activity.attempt !== undefined) details.requestAttempt = activity.attempt;
+          if (activity.attemptAt !== undefined) details.requestAttemptElapsedSeconds = addSeconds(activity.attemptElapsedSeconds, (at - activity.attemptAt) / 1000);
+          if (activity.deadlineAt !== undefined) details.requestDeadlineSeconds = Math.max(0, activity.deadlineSeconds - (at - activity.deadlineAt) / 1000);
+          if (activity.retryAt !== undefined) details.requestRetryDelaySeconds = Math.max(0, activity.retrySeconds - (at - activity.retryAt) / 1000);
+        }
         const rates = (timings.get(active.stage) || []).slice().sort((a, b) => a - b);
         if (rates.length) {
           const middle = Math.floor(rates.length / 2);
@@ -169,7 +191,7 @@
       const request = { stage, units, at: clockNow() };
       requests.add(request);
       let finished = false;
-      return (success = true) => {
+      const finish = (success = true) => {
         if (finished) return;
         finished = true;
         requests.delete(request);
@@ -181,6 +203,37 @@
           timings.set(stage, rates);
         }
       };
+      // Only technical observations from this request are accepted. Heartbeats
+      // measure their age; they do not manufacture provider activity.
+      finish.updateActivity = value => {
+        if (finished || !value || typeof value !== 'object' || !REQUEST_ACTIVITIES.includes(value.requestActivity)) return false;
+        const previous = request.activity;
+        const suppliedAttempt = Number.isInteger(value.requestAttempt) && value.requestAttempt >= 1 && value.requestAttempt <= 100
+          ? value.requestAttempt : undefined;
+        if (suppliedAttempt !== undefined && previous?.attempt !== undefined && suppliedAttempt < previous.attempt) return false;
+        const at = clockNow(), attempt = suppliedAttempt ?? previous?.attempt;
+        const resetAttempt = value.requestActivity === 'starting' || (attempt !== undefined && attempt !== previous?.attempt);
+        const activity = { state: value.requestActivity, at,
+          ageSeconds: seconds(value.requestActivityAgeSeconds) ? value.requestActivityAgeSeconds : 0,
+          ...(attempt === undefined ? {} : { attempt }) };
+        if (value.requestActivity === 'capacity_wait') {
+          if (seconds(value.requestRetryDelaySeconds)) { activity.retrySeconds = value.requestRetryDelaySeconds; activity.retryAt = at; }
+        } else {
+          if (seconds(value.requestAttemptElapsedSeconds)) {
+            activity.attemptElapsedSeconds = value.requestAttemptElapsedSeconds; activity.attemptAt = at;
+          } else if (!resetAttempt && previous?.attemptAt !== undefined) {
+            activity.attemptElapsedSeconds = previous.attemptElapsedSeconds; activity.attemptAt = previous.attemptAt;
+          }
+          if (seconds(value.requestDeadlineSeconds)) {
+            activity.deadlineSeconds = value.requestDeadlineSeconds; activity.deadlineAt = at;
+          } else if (!resetAttempt && previous?.deadlineAt !== undefined) {
+            activity.deadlineSeconds = previous.deadlineSeconds; activity.deadlineAt = previous.deadlineAt;
+          }
+        }
+        request.activity = activity;
+        return true;
+      };
+      return finish;
     };
     return measure;
   }
@@ -193,6 +246,12 @@
     details.sampleAgeSeconds = addSeconds(details.sampleAgeSeconds || 0, age);
     if (seconds(details.elapsedSeconds)) details.elapsedSeconds = addSeconds(details.elapsedSeconds, age);
     if (seconds(details.requestElapsedSeconds)) details.requestElapsedSeconds = addSeconds(details.requestElapsedSeconds, age);
+    for (const key of ['requestActivityAgeSeconds', 'requestAttemptElapsedSeconds']) {
+      if (seconds(details[key])) details[key] = addSeconds(details[key], age);
+    }
+    for (const key of ['requestDeadlineSeconds', 'requestRetryDelaySeconds']) {
+      if (seconds(details[key])) details[key] = Math.max(0, details[key] - age);
+    }
     if (seconds(details.remainingSeconds) && seconds(details.requestExpectedSeconds)) {
       const extraWait = Math.max(0, requestExcessWait(details) - priorExcessWait);
       details.remainingSeconds += extraWait;
@@ -218,6 +277,27 @@
 
   function estimateText(details) {
     return `약 ${formatRemainingSeconds(Math.max(1, details.remainingSeconds))}`;
+  }
+
+  function requestPresentation(details, requestLabel) {
+    if (!requestLabel) return {};
+    const activity = ({ starting: '실행 준비 중', connected: '번역 도구 준비 확인', request_started: '요청 시작 확인',
+      output_activity: '응답 이벤트 수신', reconnecting: '재연결 중', capacity_wait: '모델 혼잡 · 재시도 대기' })[details.requestActivity];
+    const parts = [`${requestLabel} 요청 경과 ${clock(details.requestElapsedSeconds)}`];
+    if (activity) parts.push(activity);
+    else if (details.requestDelayed) parts.push('세부 연결 상태 미지원');
+    if (seconds(details.requestActivityAgeSeconds)) parts.push(`마지막 신호 ${clock(details.requestActivityAgeSeconds)} 전`);
+    if (seconds(details.requestAttemptElapsedSeconds)) parts.push(`현재 시도${details.requestAttempt ? ` ${details.requestAttempt}회` : ''} ${clock(details.requestAttemptElapsedSeconds)}`);
+    if (seconds(details.requestDeadlineSeconds)) parts.push(details.requestDeadlineSeconds > 0
+      ? `요청 제한까지 ${clock(Math.ceil(details.requestDeadlineSeconds))}` : '요청 제한 도달 · 종료 확인 중');
+    if (seconds(details.requestRetryDelaySeconds)) parts.push(details.requestRetryDelaySeconds > 0
+      ? `${clock(Math.ceil(details.requestRetryDelaySeconds))} 후 재시도` : '재시도 시점 도달 · 시작 확인 중');
+    const waitStatusText = details.requestActivity === 'capacity_wait' ? '모델 혼잡 · 재시도 대기'
+      : details.requestDeadlineSeconds === 0 ? '요청 제한 도달 · 종료 확인 중'
+      : details.requestActivity === 'reconnecting' ? '재연결 중'
+      : details.requestDelayed ? `${requestLabel} 요청 지연`
+      : (details.sampleAgeSeconds || 0) > 120 ? activity || '진행 확인 중' : undefined;
+    return { requestText: parts.join(' · '), ...(waitStatusText ? { waitStatusText } : {}) };
   }
 
   function formatProgressDetails(value) {
@@ -253,11 +333,12 @@
     const delayed = details.requestDelayed === true;
     const measurable = seconds(details.remainingSeconds) && !stale && !delayed;
     const requestLabel = ({ translation_draft: '초안 번역', translation_review: '검수', translation_repair: '누락 보완' })[details.requestStage];
-    const requestText = requestLabel ? `${requestLabel} 응답 대기 ${clock(details.requestElapsedSeconds)}` : '';
+    const request = requestPresentation(details, requestLabel), requestText = request.requestText || '';
     const result = { phase: details.phase, label, unit: keys[2], measuring: !measurable, stale, delayed, currentStageOnly: true,
       etaText: measurable ? `현재 ${label} 단계 예상 잔여 ${estimateText(details)}`
-        : delayed ? `${requestLabel} 응답 지연 · 대기 ${clock(details.requestElapsedSeconds)} · 현재 ${label} 단계 예상 시간 다시 측정 중`
+        : request.waitStatusText ? `${request.waitStatusText} · 현재 ${label} 단계 예상 시간 다시 측정 중`
         : stale ? `진행 확인 중 · 현재 ${label} 단계 예상 시간 다시 측정 중` : `현재 ${label} 단계 예상 시간 측정 중` };
+    if (request.waitStatusText) result.waitStatusText = request.waitStatusText;
     if (details[keys[1]] !== undefined) { result.completed = details[keys[0]]; result.total = details[keys[1]]; }
     if (requestText) {
       result.requestText = requestText;
@@ -275,7 +356,7 @@
     }
     // The formatter uses this presentation for cue/chunk phases, so avoid recursion.
     result.detailText = details.phase === 'translation' || details.phase === 'summary'
-      ? `${result.etaText}${requestText && !delayed ? ` · ${requestText}` : ''}${result.total === undefined ? '' : ` · ${result.completed.toLocaleString('ko-KR')} / ${result.total.toLocaleString('ko-KR')}구간`} · 이후 단계 별도`
+      ? `${result.etaText}${requestText ? ` · ${requestText}` : ''}${result.total === undefined ? '' : ` · ${result.completed.toLocaleString('ko-KR')} / ${result.total.toLocaleString('ko-KR')}구간`} · 이후 단계 별도`
       : formatProgressDetails(details);
     return result;
   }

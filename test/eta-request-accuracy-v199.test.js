@@ -34,7 +34,7 @@ test('unequal request sizes use per-cue timing and review wins over a following 
   assert.equal(snapshot.requestExpectedSeconds, 10, '80-cue request is twice the observed 40-cue request');
   assert(snapshot.remainingMinSeconds <= snapshot.remainingSeconds);
   assert(snapshot.remainingMaxSeconds >= snapshot.remainingSeconds);
-  assert.match(formatProgressDetails(snapshot), /검수 응답 대기 00:05/);
+  assert.match(formatProgressDetails(snapshot), /검수 요청 경과 00:05/);
   review(false); draft(false);
   assert.equal(measure(280).activeRequestCount, undefined);
 });
@@ -80,7 +80,8 @@ test('delayed review removes numeric predictions before generic 120-second stale
   const presentation = progressPresentation(delayed);
   assert.equal(presentation.delayed, true);
   assert.equal(presentation.stale, false);
-  assert.match(presentation.etaText, /검수 응답 지연.*대기 01:01.*다시 측정 중/);
+  assert.match(presentation.etaText, /검수 요청 지연.*다시 측정 중/);
+  assert.match(presentation.detailText, /검수 요청 경과 01:01.*세부 연결 상태 미지원/);
   at = 81000; third(false);
 });
 
@@ -94,7 +95,7 @@ test('a foreground repair wait takes priority over an older speculative draft', 
   const snapshot = measure(0);
   assert.equal(snapshot.requestStage, 'translation_repair');
   assert.equal(snapshot.requestElapsedSeconds, 5);
-  assert.match(progressPresentation(snapshot).requestText, /누락 보완 응답 대기 00:05/);
+  assert.match(progressPresentation(snapshot).requestText, /누락 보완 요청 경과 00:05/);
   repair(false); draft(false);
 });
 

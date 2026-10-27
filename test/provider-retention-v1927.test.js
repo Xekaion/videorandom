@@ -78,7 +78,7 @@ test('an unclassified machine provider failure retains PROVIDER_UNKNOWN and its 
   const result = await f.run();
   assert.equal(result.status, 'partial');
   await f.verify(result, 'PROVIDER_UNKNOWN', { executionSource: 'provider-error', executionElapsedMs: 771235,
-    executionDeadlineMs: 900000, providerRequestedModel: 'gpt-6-luna', providerReasoningEffort: 'low', providerServiceTier: 'standard' });
+    executionDeadlineMs: 180000, providerRequestedModel: 'gpt-6-luna', providerReasoningEffort: 'low', providerServiceTier: 'standard' });
   assert.equal(result.subtitleDiagnostic.causeCode, undefined);
   assert.equal(result.subtitleDiagnostic.providerErrorType, undefined);
   assert.equal(result.subtitleDiagnostic.httpStatus, undefined);

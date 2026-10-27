@@ -34,12 +34,12 @@ for (const status of [403, 429, 503]) {
       return reply({ error: `합성 확인 실패 HTTP ${status}` }, status);
     } });
     assert.match(versions(ui), /최신 v1\.9\.28/);
-    assert.match(ui.elements.get('appUpdateStatus').textContent, /최신 버전을 사용/);
+    assert.match(ui.elements.get('appUpdateStatus').textContent, /최신 버전을 실행 중/);
     failed = true;
     await ui.elements.get('appUpdateCheck').dispatch();
     assert.match(versions(ui), /마지막 확인 v1\.9\.28/);
     assert.doesNotMatch(versions(ui), /최신/);
-    assert.doesNotMatch(ui.elements.get('appUpdateStatus').textContent, /최신 버전을 사용/);
+    assert.doesNotMatch(ui.elements.get('appUpdateStatus').textContent, /최신 버전을 실행 중/);
     assert.match(ui.elements.get('appUpdateStatus').textContent, /확인하지 못했습니다/);
     assert.match(ui.elements.get('appUpdateError').textContent, new RegExp(`HTTP ${status}`));
     assert.equal(ui.elements.get('appUpdateError').classList.contains('hidden'), false);
@@ -49,7 +49,7 @@ for (const status of [403, 429, 503]) {
     await ui.elements.get('appUpdateCheck').dispatch();
     assert.match(versions(ui), /최신 v1\.9\.28/);
     assert.doesNotMatch(versions(ui), /마지막 확인/);
-    assert.match(ui.elements.get('appUpdateStatus').textContent, /최신 버전을 사용/);
+    assert.match(ui.elements.get('appUpdateStatus').textContent, /최신 버전을 실행 중/);
     assert.equal(ui.elements.get('appUpdateError').classList.contains('hidden'), true);
   });
 }
@@ -83,7 +83,7 @@ test('an error snapshot with no previously checked version does not invent one',
 test('a retained current snapshot carrying a failure cannot claim successful freshness', async () => {
   const ui = await boot({ snapshot: { ...current(), error: '합성 상태 조회 실패' } });
   assert.match(versions(ui), /마지막 확인 v1\.9\.28/);
-  assert.doesNotMatch(ui.elements.get('appUpdateStatus').textContent, /최신 버전을 사용/);
+  assert.doesNotMatch(ui.elements.get('appUpdateStatus').textContent, /최신 버전을 실행 중/);
   assert.match(ui.elements.get('appUpdateStatus').textContent, /확인하지 못했습니다/);
   assert.match(ui.elements.get('appUpdateError').textContent, /상태 조회 실패/);
 });
@@ -91,7 +91,7 @@ test('a retained current snapshot carrying a failure cannot claim successful fre
 for (const phase of ['upToDate', 'available', 'downloading', 'verifying', 'downloaded']) {
   test(`successful ${phase} state retains the existing latest-version display`, async () => {
     const ui = await boot({ snapshot: { ...current(), phase, latestVersion: '1.9.31', available: phase !== 'upToDate' } });
-    assert.equal(versions(ui), '이 PC 실행 버전 v1.9.28 · 최신 v1.9.31');
+    assert.equal(versions(ui), `이 PC 실행 버전 v1.9.28 · 최신 v1.9.31${phase === 'downloaded' ? ' (다운로드 완료 · 적용 전)' : ''}`);
     assert.doesNotMatch(versions(ui), /마지막 확인/);
     assert.equal(ui.elements.get('appUpdateError').classList.contains('hidden'), true);
     assert.equal(ui.calls.some(call => call.method !== 'GET'), false);

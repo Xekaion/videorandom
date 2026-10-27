@@ -54,11 +54,11 @@
       available: '새 버전을 사용할 수 있습니다.',
       downloading: '업데이트 파일을 다운로드하고 있습니다…',
       verifying: '다운로드한 파일의 버전과 무결성을 검증하고 있습니다…',
-      downloaded: '다운로드와 검증이 끝났습니다. 업데이트를 적용할 수 있습니다.',
-      waiting: '분석·자막 복구 작업이 끝난 뒤 업데이트를 적용합니다.',
+      downloaded: '다운로드와 검증이 끝났습니다. 현재 실행 버전은 아직 바뀌지 않았습니다. 업데이트 적용을 눌러 새 버전을 실행하세요.',
+      waiting: '분석·자막 복구 작업이 끝난 뒤 업데이트를 적용합니다. 그때까지 현재 버전으로 실행합니다.',
       applying: '새 버전을 실행하고 있습니다. 잠시만 기다려 주세요.',
       reconnecting: '새 버전으로 다시 연결하고 있습니다…',
-      upToDate: '최신 버전을 사용하고 있습니다.',
+      upToDate: '이 PC에서 최신 버전을 실행 중입니다.',
       error: '업데이트를 완료하지 못했습니다. 아래 원인을 확인한 뒤 다시 시도해 주세요.',
       unsupported: '이 실행 환경에서는 자동 교체를 사용할 수 없습니다. 최신 실행 파일을 내려받아 실행해 주세요.',
       idle: current.available ? '새 버전을 사용할 수 있습니다.' : '업데이트를 확인할 수 있습니다.'
@@ -71,8 +71,10 @@
     const phase = snapshot.phase || 'idle';
     const current = version(snapshot.currentVersion), latest = version(snapshot.latestVersion);
     const latestLabel = phase === 'error' || state.error || text(snapshot.error) ? '마지막 확인' : '최신';
+    const downloaded = ['downloaded', 'waiting'].includes(phase) && current && latest && current !== latest
+      && latestLabel === '최신' ? ' (다운로드 완료 · 적용 전)' : '';
     element('appUpdateVersions').textContent = current
-      ? `이 PC 실행 버전 v${current}${latest ? ` · ${latestLabel} v${latest}` : ''}` : '실행 버전을 확인하고 있습니다.';
+      ? `이 PC 실행 버전 v${current}${latest ? ` · ${latestLabel} v${latest}${downloaded}` : ''}` : '실행 버전을 확인하고 있습니다.';
     if (current) element('appVersion').textContent = `v${current}`;
     element('appUpdateStatus').textContent = statusText(snapshot);
     const progress = Number(snapshot.progress);

@@ -233,12 +233,36 @@ test('the dashboard shows one seconds-resolution ETA and preserves a live delaye
   ui.displayJob(job);
   assert.equal(ui.elements.get('catalogJobEta').textContent, '약 4분 00초');
   assert.equal(ui.elements.get('catalogJobEta').textContent.includes('~'), false);
-  assert.match(ui.elements.get('catalogJobPhase').textContent, /검수 응답 대기 00:05/);
+  assert.match(ui.elements.get('catalogJobPhase').textContent, /검수 요청 경과 00:05/);
   ui.advance(60000); ui.displayJob(job);
-  assert.equal(ui.elements.get('catalogJobEta').textContent, '검수 응답 지연');
-  assert.match(ui.elements.get('catalogJobPhase').textContent, /검수 응답 대기 01:05/);
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '검수 요청 지연');
+  assert.match(ui.elements.get('catalogJobPhase').textContent, /검수 요청 경과 01:05.*세부 연결 상태 미지원/);
   assert.equal(ui.elements.get('catalogJobEta').classList.contains('catalog-eta-stale'), true);
   assert.equal(ui.elements.get('catalogJobPercent').textContent, '70%', 'waiting never advances durable progress');
+});
+
+test('the dashboard distinguishes a current attempt, reconnect, and capacity backoff without claiming generation', () => {
+  const ui = boot();
+  ui.sandbox.videoAnalysisProgress = progress;
+  const job = { id: 'synthetic-observed-wait', status: 'running', total: 1, completed: 0, percent: 70,
+    phaseProgress: { phase: 'translation', completedCues: 80, totalCues: 1321, elapsedSeconds: 420,
+      sampleAgeSeconds: 400, requestStage: 'translation_draft', activeRequestCount: 1, requestElapsedSeconds: 420,
+      requestActivity: 'request_started', requestActivityAgeSeconds: 400, requestAttempt: 2,
+      requestAttemptElapsedSeconds: 410, requestDeadlineSeconds: 490 } };
+  ui.state.job = job; ui.state.jobReceivedAt = ui.now();
+  ui.displayJob(job);
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '초안 번역 요청 지연');
+  assert.match(ui.elements.get('catalogJobPhase').textContent,
+    /초안 번역 요청 경과 07:00.*요청 시작 확인.*마지막 신호 06:40 전.*현재 시도 2회 06:50.*요청 제한까지 08:10/);
+  assert.doesNotMatch(ui.elements.get('catalogJobPhase').textContent, /생성 중|연결됨/);
+  job.phaseProgress.requestActivity = 'reconnecting';
+  ui.displayJob(job);
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '재연결 중');
+  job.phaseProgress.requestActivity = 'capacity_wait'; job.phaseProgress.requestRetryDelaySeconds = 30;
+  ui.displayJob(job);
+  assert.equal(ui.elements.get('catalogJobEta').textContent, '모델 혼잡 · 재시도 대기');
+  assert.match(ui.elements.get('catalogJobPhase').textContent, /00:30 후 재시도/);
+  assert.doesNotMatch(ui.elements.get('catalogJobPhase').textContent, /현재 시도|요청 제한까지/);
 });
 
 test('queue failures retain prior rows and a successful reconnect clears the transport message', async () => {

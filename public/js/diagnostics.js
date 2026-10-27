@@ -16,6 +16,11 @@
     'subtitle-text': '자막 속 작업 거절 문구 감지', 'execution-error': '도구 실행 오류의 거절 표시' });
   const EXECUTION_SOURCES = Object.assign(Object.create(null), { 'local-deadline': '도구 대기 제한 초과', 'provider-error': '서비스 오류 응답',
     'process-exit': '도구 비정상 종료', 'process-error': '도구 실행 오류', cancelled: '작업 중지' });
+  const PROVIDER_ACTIVITIES = Object.assign(Object.create(null), { starting: '도구 시작 요청', spawned: '도구 실행 시작',
+    'thread-started': '서비스 연결 이벤트 수신', 'turn-started': '서비스 요청 시작 이벤트 수신',
+    'message-observed': '응답 메시지 이벤트 수신', 'turn-completed': '응답 종료 이벤트 수신',
+    reconnecting: '도구 재연결 중', 'provider-error': '서비스 오류 이벤트 수신',
+    completed: '도구 정상 종료 확인', failed: '도구 실패 상태', cancelled: '도구 중지 상태' });
   const SIDECAR_STAGES = Object.assign(Object.create(null), { 'source-check': '원본 영상·폴더 확인', 'candidate-check': '자막 이름·기존 내용 확인',
     'temporary-open': '임시 자막 파일 생성', 'temporary-write': '임시 자막 내용 쓰기', 'temporary-sync': '임시 자막 디스크 반영',
     'temporary-close': '임시 자막 파일 닫기', 'temporary-check': '임시 자막 파일 검증', 'owned-update': '기존 생성 자막 갱신·백업',
@@ -29,7 +34,7 @@
     send: '진단 기록 전송', acknowledgement: '진단 기록 수신 확인' });
   const openAndVisible = () => element('diagnosticsPanel').open && document.hidden !== true && document.visibilityState !== 'hidden';
   const node = (tag, className, value) => { const item = document.createElement(tag); if (className) item.className = className; if (value !== undefined) item.textContent = String(value); return item; };
-  const stages = Object.assign(Object.create(null), { translation_draft: '한국어 번역 초안', translation_review: '한국어 번역 검수', translation: '한국어 번역',
+  const stages = Object.assign(Object.create(null), { translation_draft: '한국어 번역 초안', translation_review: '한국어 번역 검수', translation_repair: '한국어 번역 누락 보완', translation: '한국어 번역',
     transcription: '원문 음성 인식', recovery: '원문 재검수', summary: '줄거리 요약', upload: '자료 전송', saving: '결과 저장' });
   const eventNames = Object.assign(Object.create(null), { started: '시작', validated: '검증 통과', committed: '검수 구간 보관', error: '오류',
     job_started: '작업 시작', job_completed: '작업 종료', job_failed: '작업 실패', result_saved: '결과 저장', client_connected: 'PC 연결 확인' });
@@ -55,7 +60,11 @@
     if (['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value.providerReasoningEffort)) item.providerReasoningEffort = value.providerReasoningEffort;
     if (value.providerServiceTier === 'standard') item.providerServiceTier = 'standard';
     if (['capacity', 'timeout', 'authentication', 'quota', 'unavailable', 'network', 'refusal'].includes(value.providerErrorType)) item.providerErrorType = value.providerErrorType;
-    for (const key of ['executionElapsedMs', 'executionDeadlineMs']) if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 604800000) item[key] = value[key];
+    for (const key of ['executionElapsedMs', 'executionDeadlineMs', 'providerActivityAtMs', 'providerActivityAgeMs']) if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 604800000) item[key] = value[key];
+    if (typeof value.providerActivity === 'string' && Object.hasOwn(PROVIDER_ACTIVITIES, value.providerActivity)) item.providerActivity = value.providerActivity;
+    if (Number.isSafeInteger(value.providerAttempt) && value.providerAttempt >= 1 && value.providerAttempt <= 1000) item.providerAttempt = value.providerAttempt;
+    if (value.providerDeadlineScope === 'translation-request') item.providerDeadlineScope = value.providerDeadlineScope;
+    if (typeof value.providerProcessStopped === 'boolean') item.providerProcessStopped = value.providerProcessStopped;
     for (const key of ['providerReconnectAttempt', 'providerReconnectLimit']) if (integer(value[key]) && value[key] <= 1000) item[key] = value[key];
     if (Number.isInteger(value.providerHttpStatus) && value.providerHttpStatus >= 100 && value.providerHttpStatus <= 599) item.providerHttpStatus = value.providerHttpStatus;
     if (SYSTEM_CODES.has(value.providerSystemCode)) item.providerSystemCode = value.providerSystemCode;
@@ -169,14 +178,20 @@
       if (event.pathClass) message.append(node('span', 'diagnostics-meta', `대상 종류: ${SIDECAR_PATH_CLASSES[event.pathClass]}`));
       if (Number.isSafeInteger(event.attemptedNames)) message.append(node('span', 'diagnostics-meta', `확인한 자막 이름 ${event.attemptedNames} / 10개`));
       if (event.providerRequestedModel) message.append(node('span', 'diagnostics-meta', `요청 모델 ${event.providerRequestedModel}${event.providerReasoningEffort ? ` · ${event.providerReasoningEffort}` : ''}${event.providerServiceTier ? ' · Standard' : ''}`));
-      if (event.executionSource) {
+      if (event.executionSource || event.providerActivity || event.providerAttempt || event.providerDeadlineScope) {
         const times = [Number.isSafeInteger(event.executionElapsedMs) ? `대기 ${Math.round(event.executionElapsedMs / 1000)}초` : '',
           Number.isSafeInteger(event.executionDeadlineMs) ? `제한 ${Math.round(event.executionDeadlineMs / 1000)}초` : ''].filter(Boolean).join(' / ');
-        message.append(node('span', 'diagnostics-meta', `${EXECUTION_SOURCES[event.executionSource]}${times ? ` · ${times}` : ''}`));
-        const signals = [event.providerHttpStatus ? `HTTP ${event.providerHttpStatus}` : '', event.providerSystemCode || '',
-          integer(event.providerReconnectAttempt) ? `도구 재연결 ${event.providerReconnectAttempt}${integer(event.providerReconnectLimit) ? `/${event.providerReconnectLimit}` : ''}` : ''].filter(Boolean);
-        if (signals.length) message.append(node('span', 'diagnostics-meta', `대기 중 관측한 기술 신호: ${signals.join(' · ')}`));
+        const parts = [event.executionSource ? EXECUTION_SOURCES[event.executionSource] : '기록 시점 요청 상태',
+          event.providerAttempt ? `요청 시도 ${event.providerAttempt}회` : '', times].filter(Boolean);
+        message.append(node('span', 'diagnostics-meta', parts.join(' · ')));
       }
+      if (event.providerActivity) message.append(node('span', 'diagnostics-meta',
+        `관측한 상태: ${PROVIDER_ACTIVITIES[event.providerActivity]}${Number.isSafeInteger(event.providerActivityAgeMs) ? ` · 기록 시점 마지막 신호 후 ${Math.floor(event.providerActivityAgeMs / 1000)}초` : ''}`));
+      const signals = [event.providerHttpStatus ? `HTTP ${event.providerHttpStatus}` : '', event.providerSystemCode || '',
+        integer(event.providerReconnectAttempt) ? `도구 재연결 ${event.providerReconnectAttempt}${integer(event.providerReconnectLimit) ? `/${event.providerReconnectLimit}` : ''}` : ''].filter(Boolean);
+      if (signals.length) message.append(node('span', 'diagnostics-meta', `대기 중 관측한 기술 신호: ${signals.join(' · ')}`));
+      if (event.providerDeadlineScope) message.append(node('span', 'diagnostics-meta', '자막 번역 요청 대기 제한 적용'));
+      if (typeof event.providerProcessStopped === 'boolean') message.append(node('span', 'diagnostics-meta', event.providerProcessStopped ? '도구 종료 확인됨' : '도구 종료 미확인'));
       if (event.message) message.append(node('p', '', safeText(event.message, 1000)));
       if (REFUSAL_CODES.has(event.code)) {
         const basis = REFUSAL_SOURCES[event.refusalSource];

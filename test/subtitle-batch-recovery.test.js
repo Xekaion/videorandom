@@ -415,6 +415,7 @@ test('supplement and failure diagnostics retain only technical counters and cano
   const allowed = new Set(['source', 'level', 'event', 'stage', 'totalCues', 'completedCues', 'expectedCues', 'returnedCues', 'startCue', 'endCue', 'code', 'message', 'httpStatus',
     'executionSource', 'executionElapsedMs', 'executionDeadlineMs', 'providerErrorType', 'providerSystemCode',
     'providerReconnectAttempt', 'providerReconnectLimit', 'providerHttpStatus',
+    'providerActivity', 'providerActivityAtMs', 'providerActivityAgeMs', 'providerAttempt', 'providerDeadlineScope', 'providerProcessStopped',
     'providerRequestedModel', 'providerReasoningEffort', 'providerServiceTier']);
   for (const event of [...diagnostics, result.subtitleDiagnostic]) assert.ok(Object.keys(event).every(key => allowed.has(key)), JSON.stringify(event));
   const serialized = JSON.stringify([...diagnostics, result.subtitleDiagnostic]);

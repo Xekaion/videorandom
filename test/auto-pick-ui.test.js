@@ -35,7 +35,7 @@ class Element {
   focus() {}
 }
 
-async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, autoResumeStatus = 200, autoResumeResponse, delayAutoResume = false, savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, translationRepairResponse, translationRepairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
+async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, autoResumeStatus = 200, autoResumeResponse, delayAutoResume = false, savedSettings, initialQueue, initialActiveJob = null, initialConnection = null, records = [], delayConfig = false, delayRemote = false, delayRepair = false, delayFolderSave = false, remoteReady = true, remoteVersion, remoteCapabilities = ['timed-subtitles-v1', 'subtitle-quality-v3'], remoteSuperseded = false, jobResponse, manualResponse, repairResponse, repairStatus = 202, translationRepairResponse, translationRepairStatus = 202, subtitleResponse, subtitleStatus = 200, folderSaveResponse, folderSaveStatus = 200, browserCrypto = crypto.webcrypto, providerStatus = { codex: { available: true, loggedIn: true }, speech: { available: true } } } = {}) {
   const elements = new Map();
   for (const match of fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8').matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element());
   elements.get('catalogMode').value = 'local'; elements.get('catalogFrameCount').value = '10';
@@ -66,7 +66,7 @@ async function boot({ interruptedJobs = [], resumeResponse, resumeStatus = 202, 
       else if (url.endsWith('/remote/check')) {
         await remoteGate;
         if (remoteReady && !remoteSuperseded) connection = { ...body, remembered: true };
-        result = remoteSuperseded ? { ready: remoteReady } : { ready: remoteReady, capabilities: remoteCapabilities, connection: plain(connection) };
+        result = remoteSuperseded ? { ready: remoteReady } : { ready: remoteReady, appVersion: remoteVersion, capabilities: remoteCapabilities, connection: plain(connection) };
       }
       else if (url === '/api/analysis/connection' && method === 'DELETE') { connection = null; result = { remoteUrl: '', connectionCode: '', remembered: false }; }
       else if (/\/results\/[^/]+\/subtitles\/repair$/.test(url)) {

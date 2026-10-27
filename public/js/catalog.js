@@ -1848,7 +1848,9 @@
           $('catalogRemoteStatus').classList.add('catalog-error');
           return;
         }
-        $('catalogRemoteStatus').textContent = '연결 완료 · 이 PC에 저장했습니다. 다음 실행과 업데이트에도 자동으로 연결합니다.';
+        const serverVersion = typeof result.appVersion === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(result.appVersion)
+          ? `분석 서버 실행 v${result.appVersion} (연결 확인 시점)` : '분석 서버 실행 버전 미확인';
+        $('catalogRemoteStatus').textContent = `연결 완료 · ${serverVersion} · 연결 정보를 이 PC에 저장했습니다. 다음 실행과 업데이트에도 자동으로 연결합니다.`;
         await syncAutoPick({ resume: true });
       } else $('catalogRemoteStatus').textContent = '확인한 연결을 저장했습니다. 새로 입력한 연결은 연결 확인을 눌러 주세요.';
     } catch (error) {
@@ -2193,7 +2195,8 @@
     const remainingLabel = Number.isFinite(remaining) && remaining >= 0
       ? `약 ${window.videoAnalysisProgress?.formatRemainingSeconds?.(Math.max(1, remaining)) || `${Math.max(1, Math.ceil(remaining))}초`}` : '';
     $('catalogJobEta').textContent = active ? state.jobConnectionError ? '연결 확인 중'
-      : presentation?.delayed ? `${presentation.requestLabel || '번역'} 응답 지연`
+      : presentation?.waitStatusText ? presentation.waitStatusText
+      : presentation?.delayed ? `${presentation.requestLabel || '번역'} 요청 지연`
       : presentation?.stale ? '진행 확인 중' : presentation?.remainingText || remainingLabel || '처리 속도 측정 중'
       : saveFailed ? '자막 저장 확인 필요' : retainedTranslation ? '기존 자막 보관 · 최근 요청 실패' : sourceReviewOnly ? '번역 완료 · 원어 확인 필요' : processedGapsOnly ? '처리 완료 · 일부 자막 확인 필요'
       : translationIncomplete || partialResults || job.status === 'failed' ? '중단 · 확인 필요' : job.status === 'cancelled' ? '중지됨' : '완료';
