@@ -155,18 +155,54 @@ test('a directory created after an owned canonical backup is preserved together 
   await noTemporaryFiles(f.root);
 });
 
-for (const occupied of [false, true]) test(`EISDIR without a confirmed non-file collision remains a failure (${occupied ? 'regular file exists' : 'name absent'})`, async t => {
-  const f = await fixture(t);
+for (const occupied of [false, true]) test(`hard-link EISDIR uses exclusive copy only at an alternate (${occupied ? 'regular file exists' : 'name absent'})`, async t => {
+  const f = await fixture(t, { partial: true });
   if (occupied) await fs.writeFile(f.normal, 'Preserved foreign subtitles');
-  const calls = [];
+  const calls = [], copies = [];
   const result = await saveKoreanSubtitle(f.record, { io: { ...fs, link: async (_, destination) => {
     calls.push(destination); throw failure('EISDIR');
+  }, copyFile: async (source, destination, flags) => {
+    copies.push(destination); assert.equal(flags, COPYFILE_EXCL); return fs.copyFile(source, destination, flags);
   } } });
-  assert.equal(result.status, 'failed'); assert.equal(result.code, 'EISDIR'); assert.equal(result.systemCode, 'EISDIR');
-  assert.deepEqual(calls, [f.normal]);
+  assert.equal(result.status, 'saved'); assert.equal(result.partial, true); assert.equal(result.path, f.alternate);
+  assert.deepEqual(calls, [f.normal]); assert.deepEqual(copies, [f.alternate]);
+  assert.deepEqual(await fs.readFile(f.alternate), f.bytes);
   if (occupied) assert.equal(await fs.readFile(f.normal, 'utf8'), 'Preserved foreign subtitles');
   else await assert.rejects(fs.lstat(f.normal), { code: 'ENOENT' });
-  await assert.rejects(fs.lstat(f.alternate), { code: 'ENOENT' }); await noTemporaryFiles(f.root);
+  await noTemporaryFiles(f.root);
+});
+
+test('hard-link EISDIR does not overwrite an alternate occupied before exclusive copy', async t => {
+  const f = await fixture(t); let collided = false;
+  const result = await saveKoreanSubtitle(f.record, { io: { ...fs,
+    link: async () => { throw failure('EISDIR'); },
+    copyFile: async (source, destination, flags) => {
+      assert.equal(flags, COPYFILE_EXCL);
+      if (!collided) { collided = true; await fs.writeFile(destination, 'Other subtitles', { flag: 'wx' }); }
+      return fs.copyFile(source, destination, flags);
+    }
+  } });
+  assert.equal(result.status, 'saved'); assert.equal(result.path, f.candidates[2]);
+  assert.equal(await fs.readFile(f.alternate, 'utf8'), 'Other subtitles');
+  assert.deepEqual(await fs.readFile(result.path), f.bytes); await noTemporaryFiles(f.root);
+});
+
+test('a different file substituted at the temporary path cannot be copied or removed after hard-link EISDIR', async t => {
+  const f = await fixture(t), moved = path.join(f.root, 'moved-by-other-process.tmp');
+  let substituted;
+  const result = await saveKoreanSubtitle(f.record, { io: { ...fs,
+    link: async source => {
+      substituted = source;
+      await fs.rename(source, moved);
+      await fs.writeFile(source, 'Other file', { flag: 'wx' });
+      throw failure('EISDIR');
+    },
+    copyFile: async () => { assert.fail('An unowned temporary path must not be copied'); }
+  } });
+  assert.equal(result.status, 'failed'); assert.equal(result.code, 'UNSAFE_PATH');
+  assert.equal(await fs.readFile(substituted, 'utf8'), 'Other file');
+  assert.deepEqual(await fs.readFile(moved), f.bytes);
+  await assert.rejects(fs.lstat(f.alternate), { code: 'ENOENT' });
 });
 
 test('EISDIR while creating the random temporary file is not treated as a candidate name collision', async t => {

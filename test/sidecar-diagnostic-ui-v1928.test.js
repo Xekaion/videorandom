@@ -66,7 +66,7 @@ test('all sidecar operation enums survive sanitizer, durable event storage and K
   assert.equal(text.includes(PRIVATE), false);
 });
 
-test('EISDIR at temporary creation and at destination publication remains distinguishable through the complete diagnostic boundary', async t => {
+test('EISDIR at temporary creation and at alternate exclusive copy remains distinguishable through the complete diagnostic boundary', async t => {
   const f = await fixture(t), video = path.join(f.dataDir, 'neutral-source.mp4');
   await fs.writeFile(video, 'Owned synthetic source metadata. No media decoding.');
   const transcript = [{ id: 'neutral', start: 0, end: 1, text: 'Synthetic train notice.' }];
@@ -74,16 +74,30 @@ test('EISDIR at temporary creation and at destination publication remains distin
     subtitleTranslation: [{ ...transcript[0], text: '합성 열차 안내입니다.' }] };
   const failure = () => Object.assign(new Error(PRIVATE), { code: 'EISDIR' });
   for (const temporary of [true, false]) {
+    const expected = temporary
+      ? { saveStage: 'temporary-open', pathClass: 'temporary-file', attemptedNames: 1 }
+      : { saveStage: 'publish-copy', pathClass: 'subtitle-candidate', attemptedNames: 2 };
     const save = await saveKoreanSubtitle(record, { io: { ...fs, open: async (filename, flags, ...args) => {
       if (temporary && flags === 'wx') throw failure(); return fs.open(filename, flags, ...args);
-    }, link: async () => { throw failure(); } } });
+    }, link: async () => { throw failure(); }, copyFile: async (_source, _destination, flags) => {
+      assert.equal(flags, syncFs.constants.COPYFILE_EXCL); throw failure();
+    } } });
     assert.equal(save.code, 'EISDIR'); assert.equal(save.status, 'failed');
+    assert.deepEqual(sanitizeSidecarDiagnostic(save), expected);
     await f.store.append({ ...save, id: temporary ? 'temporary' : 'publication', code: 'SIDECAR_SAVE_FAILED',
       videoName: 'neutral-source.mp4', event: 'error', level: 'error', stage: 'saving', stack: PRIVATE, connectionCode: PRIVATE });
   }
-  const ui = await boot({ response: await f.store.query() }); await ui.open(true);
+  const recovered = await saveKoreanSubtitle(record, { io: { ...fs, link: async () => { throw failure(); } } });
+  assert.equal(recovered.status, 'saved');
+  assert.deepEqual(sanitizeSidecarDiagnostic(recovered), {}, 'recovered publication has no stale failure details');
+  const query = await f.store.query();
+  assert.equal(query.events.length, 2);
+  assert.deepEqual(sanitizeSidecarDiagnostic(query.events.find(item => item.saveStage === 'publish-copy')),
+    { saveStage: 'publish-copy', pathClass: 'subtitle-candidate', attemptedNames: 2 });
+  const ui = await boot({ response: query }); await ui.open(true);
   const text = textOf(ui.elements.get('diagnosticsRows'));
-  assert(text.includes('임시 자막 파일 생성')); assert(text.includes('자막 게시 · 하드 링크'));
+  assert(text.includes('임시 자막 파일 생성')); assert(text.includes('자막 게시 · 덮어쓰기 없는 복사'));
+  assert(text.includes('확인한 자막 이름 1 / 10개')); assert(text.includes('확인한 자막 이름 2 / 10개'));
   assert(text.includes('대상 종류: 임시 자막 파일')); assert(text.includes('대상 종류: 자막 저장 대상'));
   assert(text.includes('시스템 EISDIR')); assert.equal(text.includes(PRIVATE), false);
 });

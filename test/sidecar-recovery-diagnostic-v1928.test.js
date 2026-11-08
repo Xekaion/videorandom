@@ -88,11 +88,16 @@ for (const [method, stage, code] of [['writeFile', 'temporary-write', 'ENOSPC'],
   });
 }
 
-test('unconfirmed EISDIR at hard-link publication stays failed at that exact operation without a blind retry', async t => {
-  const f = await fixture(t), attempts = [];
-  const result = await saveKoreanSubtitle(f.record, { io: { ...fs, link: async (_, candidate) => { attempts.push(candidate); throw error('EISDIR'); } } });
-  metadata(result, { saveStage: 'publish-link', pathClass: 'subtitle-candidate', attemptedNames: 1 });
-  assert.deepEqual(attempts, [f.candidates[0]]); await noTemps(f.root);
+for (const code of ['EISDIR', 'ENOSPC']) test(`hard-link EISDIR does not hide a real ${code} error on the exclusive copy fallback`, async t => {
+  const f = await fixture(t), attempts = [], copies = [];
+  const result = await saveKoreanSubtitle(f.record, { io: { ...fs,
+    link: async (_, candidate) => { attempts.push(candidate); throw error('EISDIR'); },
+    copyFile: async (_, candidate) => { copies.push(candidate); throw error(code); }
+  } });
+  metadata(result, { saveStage: 'publish-copy', pathClass: 'subtitle-candidate', attemptedNames: 2 });
+  assert.equal(result.systemCode, code);
+  assert.deepEqual(attempts, [f.candidates[0]]); assert.deepEqual(copies, [f.candidates[1]]);
+  await noTemps(f.root);
 });
 
 test('exclusive-copy failure records the actual alternate attempt after preserving an occupied directory', async t => {
