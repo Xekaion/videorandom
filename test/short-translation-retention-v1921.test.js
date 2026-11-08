@@ -124,8 +124,18 @@ test('a 2,215-cue translation keeps all nine concise final cues after explicit r
     assert.equal(result.subtitleTranslationProgress.translationComplete, true);
     assert.equal(result.subtitleTranslationProgress.complete, true);
     assert.equal(result.subtitleTranslation.length, 2215);
-    assert.equal(f.calls.length, 56, '28 source batches each receive one draft and one review, with no length correction');
-    assert.deepEqual(f.calls.at(-1).input.omissionCheckIndexes, finalIndexes);
+    assert.equal(f.calls.length, 140, '70 source batches each receive one draft and one review, with no length correction');
+    const allIndexes = f.transcript.map((_, index) => index);
+    for (const review of [false, true]) {
+        const calls = f.calls.filter(call => call.review === review);
+        assert(calls.every(call => call.count <= 32));
+        assert.deepEqual(calls.flatMap(call => call.indexes), allIndexes);
+    }
+    assert.deepEqual(f.calls.filter(call => call.review && call.input.omissionCheckIndexes?.length)
+        .map(call => call.input.omissionCheckIndexes), [finalIndexes.slice(0, 2), finalIndexes.slice(2)],
+    'all nine concise cues receive explicit review across the final two batches');
+    assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]),
+        f.transcript.map(cue => [cue.id, cue.start, cue.end]));
     for (const index of finalIndexes) assert.deepEqual(result.subtitleTranslation[index], {
         id: f.transcript[index].id, start: f.transcript[index].start, end: f.transcript[index].end, text: shortKorean });
     await f.drained();

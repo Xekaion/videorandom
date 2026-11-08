@@ -91,6 +91,8 @@ test('mixed queued repairs wait behind active work and execute FIFO using their 
     return { ...file, status: 'completed', summary: 'Synthetic train summary', frames: [], transcript: [], warnings: [] };
   } });
   const active = await f.request('/jobs', { files: [f.files[0]], options: localOptions });
+  // The job is visible before the engine has necessarily entered its gate.
+  await until(() => f.calls.length === 1);
   assert.equal((await enqueue(f, 1)).status, 202);
   assert.equal((await enqueue(f, 2, 'translation-only')).status, 202);
   const queue = (await f.request('/queue')).data;

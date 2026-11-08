@@ -104,10 +104,10 @@ function assertPending(result, source, missing) {
     assertIdentity(result, source, accepted);
 }
 
-for (const shape of ['compact', 'legacy']) test(`1819 cues recover a successful empty ${shape} review after 240 reviewed source cues and reach the exact final cue`, async t => {
+for (const shape of ['compact', 'legacy']) test(`1819 cues recover a successful empty ${shape} review after 256 reviewed source cues and reach the exact final cue`, async t => {
     let empty = false;
     const f = await fixture(t, { count: 1819, handler: (call, state) => {
-        if (!empty && call.review && call.start === 240 && call.count === 80) {
+        if (!empty && call.review && call.start === 256 && call.count === 32) {
             empty = true;
             return shape === 'compact' ? { approvedIndexes: [], corrections: [], terms: [] } : { subtitles: [], terms: [] };
         }
@@ -117,10 +117,9 @@ for (const shape of ['compact', 'legacy']) test(`1819 cues recover a successful 
     const result = await f.run();
     assertComplete(result, original);
     assert.deepEqual(f.transcript, original);
-    const corrections = f.calls.filter(call => call.review && call.start >= 240 && call.start < 320 && call.count < 80);
-    assert.deepEqual(corrections.map(call => call.indexes), [indexes(20).map(index => index + 240), indexes(20).map(index => index + 260),
-        indexes(20).map(index => index + 280), indexes(20).map(index => index + 300)]);
-    assert(f.commits.some(progress => progress.completedCues === 240));
+    const corrections = f.calls.filter(call => call.review && call.start >= 256 && call.start < 288 && call.count < 32);
+    assert.deepEqual(corrections.map(call => call.indexes), [indexes(20).map(index => index + 256), indexes(12).map(index => index + 276)]);
+    assert(f.commits.some(progress => progress.completedCues === 256));
     assert(f.calls.some(call => call.review && call.indexes.at(-1) === 1818));
     await f.drained();
 });
@@ -129,7 +128,7 @@ for (const profile of ['fast', 'turbo', 'accurate']) test(`2000 ${profile} cues 
     let initial = false, supplemental = false;
     const f = await fixture(t, { count: 2000, profile, handler: (call, state) => {
         const final = profile === 'accurate' ? call.review : !call.review;
-        if (final && call.start === 0 && call.count === 80 && !initial) {
+        if (final && call.start === 0 && call.count === 32 && !initial) {
             initial = true;
             return responseFor(call.input.subtitles.filter(entry => ![5, 19].includes(entry.index)));
         }
@@ -137,7 +136,7 @@ for (const profile of ['fast', 'turbo', 'accurate']) test(`2000 ${profile} cues 
         return state.normalResponse(call);
     } });
     const result = await f.run(); assertComplete(result, f.transcript);
-    const corrections = f.calls.filter(call => call.start < 80 && call.count < 80);
+    const corrections = f.calls.filter(call => call.start < 32 && call.count < 32);
     assert.deepEqual(corrections.map(call => call.indexes), [[5, 19], [5]]);
     assert(f.calls.some(call => call.indexes.at(-1) === 1999));
     await f.drained();
@@ -164,30 +163,31 @@ test('2000 accurate cues retain an unresolved empty singleton, continue the fina
 test('a 64-request bounded accurate draft gap reviews only explicit available draft indexes and preserves the 2000-cue tail', async t => {
     let fixed = false;
     const f = await fixture(t, { count: 2000, handler: (call, state) => {
-        if (!fixed && !call.review && call.start < 80) return responseFor(call.input.subtitles.slice(0, 1));
+        if (!fixed && !call.review && call.start < 96) return responseFor(call.input.subtitles.slice(0, 1));
         if (call.review) {
             assert.deepEqual(call.input.draftSubtitles.map(cue => cue.index), call.indexes);
             for (const cue of call.input.draftSubtitles) assert.equal(unwrapped(cue.text), textFor(cue.index), 'a source hole cannot shift subsequent draft text');
         }
         return state.normalResponse(call);
     } });
-    const first = await f.run(); assertPending(first, f.transcript, indexes(15).map(index => index + 65));
-    const repairs = f.calls.filter(call => !call.review && call.start < 80 && call.count < 80);
+    const missing = indexes(29).map(index => index + 67);
+    const first = await f.run(); assertPending(first, f.transcript, missing);
+    const repairs = f.calls.filter(call => !call.review && call.start < 96 && call.count < 32);
     assert.equal(repairs.length, 64);
-    assert.deepEqual(f.calls.find(call => call.review).indexes, indexes(65));
+    assert.deepEqual(f.calls.find(call => call.review && call.start === 64).indexes, [64, 65, 66]);
     assert(f.calls.some(call => call.review && call.indexes.at(-1) === 1999));
     assert(f.diagnostics.some(event => event.code === 'SUBTITLE_REPAIR_LIMIT' && event.level === 'warning'));
     f.calls.length = 0; fixed = true;
     const completed = await f.run(); assertComplete(completed, f.transcript);
-    assert.deepEqual(f.calls.map(call => call.indexes), [indexes(15).map(index => index + 65), indexes(15).map(index => index + 65)]);
+    assert.deepEqual(f.calls.map(call => call.indexes), [missing, missing]);
     await f.drained();
 });
 
-test('successful empty reviews consume at most64 corrections, leave every unchecked cue pending, and continue later source batches', async t => {
-    const f = await fixture(t, { count: 2000, handler: (call, state) => call.review && call.start < 80
+test('successful empty reviews consume at most 64 corrections, leave every unchecked cue pending, and continue later source batches', async t => {
+    const f = await fixture(t, { count: 2000, handler: (call, state) => call.review && call.start < 96
         ? { approvedIndexes: [], corrections: [], terms: [] } : state.normalResponse(call) });
-    const result = await f.run(); assertPending(result, f.transcript, indexes(80));
-    assert.equal(f.calls.filter(call => call.review && call.start < 80 && call.count < 80).length, 64);
+    const result = await f.run(); assertPending(result, f.transcript, indexes(96));
+    assert.equal(f.calls.filter(call => call.review && call.start < 96 && call.count < 32).length, 64);
     assert(f.calls.some(call => call.review && call.indexes.at(-1) === 1999));
     assert(f.diagnostics.some(event => event.code === 'SUBTITLE_REPAIR_LIMIT'));
     await f.drained();

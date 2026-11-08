@@ -228,8 +228,10 @@ for (const failure of ['response refusal', 'quota usage limit', '401 authenticat
 test('missing corrections use exactly sixty-four requests while later strict tail cues remain durable', async t => {
     const f = await fixture(t, { count: 1360, handler: call => {
         const result = answer(call);
-        if (!call.review && call.start === 0 && call.count === 80) result.subtitles.pop();
-        if (call.review && call.count === 80) result.subtitles = result.subtitles.filter(cue => cue.index === 1359);
+        if (!call.review && call.start === 0 && call.count === 32) result.subtitles.pop();
+        if (call.review && (call.count === 32 || call.start === 1344 && call.count === 16)) {
+            result.subtitles = result.subtitles.filter(cue => cue.index === 1359);
+        }
         return result;
     } });
     const result = await f.run();
@@ -237,19 +239,19 @@ test('missing corrections use exactly sixty-four requests while later strict tai
     assert.equal(result.subtitleDiagnostic.code, 'SUBTITLE_CUES_PENDING');
     assert.equal(result.subtitleTranslationProgress.processingComplete, true);
     assert.equal(result.subtitleTranslationProgress.processedCues, 1360);
-    const repairs = f.calls.filter(call => call.count <= 20);
+    const repairs = f.calls.filter(call => call.count < 32 && !(call.start === 1344 && call.count === 16));
     assert.equal(repairs.length, 64, 'one missing draft repair and sixty-three review repairs share one operation budget');
     assert(repairs.every(call => call.count <= 20));
-    assert.equal(f.calls.length, 98, 'all seventeen source batches still receive a draft and independent review');
+    assert.equal(f.calls.length, 150, 'all forty-three source batches still receive a draft and independent review');
     assert(f.calls.some(call => call.review && call.indexes.includes(1359)), 'budget exhaustion does not stop later source review');
     assert(f.diagnostics.some(event => event.code === 'SUBTITLE_REPAIR_LIMIT' && event.level === 'warning'));
-    const confirmed = [...Array.from({ length: 1260 }, (_, index) => index), 1359];
-    assert.equal(result.subtitleTranslationPartial.length, 1261);
+    const confirmed = [...Array.from({ length: 1012 }, (_, index) => index), 1359];
+    assert.equal(result.subtitleTranslationPartial.length, 1013);
     assert.equal(result.subtitleTranslationProgress.version, 2);
     assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, confirmed);
     assert.equal(result.subtitleTranslationProgress.complete, false);
     assert.equal(result.subtitleTranslationProgress.translationComplete, false);
-    assert.equal(result.subtitleDiagnostic.expectedCues, 99);
+    assert.equal(result.subtitleDiagnostic.expectedCues, 347);
     assert.equal(result.subtitleTranslation, undefined);
     assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]),
         confirmed.map(index => f.transcript[index]).map(cue => [cue.id, cue.start, cue.end]));

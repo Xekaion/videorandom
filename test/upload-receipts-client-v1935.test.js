@@ -33,7 +33,14 @@ async function fixture(t, options = {}) {
     if (req.url === '/v1/jobs' && req.method === 'POST') {
       calls.posts++; uploadId = req.headers['x-videorandom-upload-id']; expectedBytes = Number(req.headers['content-length']);
       if (options.postStatus) {
-        res.writeHead(options.postStatus, { 'Content-Length': '100' }); res.flushHeaders(); setImmediate(() => res.destroy()); return;
+        res.writeHead(options.postStatus, { 'Content-Length': '100' });
+        // Flush a real response fragment before dropping the body. Closing on
+        // setImmediate can abort the POST before its headers reach the client.
+        res.write('owned partial response', () => {
+          const timer = setTimeout(() => res.destroy(), 40);
+          res.once('close', () => clearTimeout(timer));
+        });
+        return;
       }
       for await (const ignored of req) { /* This is inert synthetic multipart. */ }
       res.destroy(); return;

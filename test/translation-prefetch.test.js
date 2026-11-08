@@ -256,13 +256,14 @@ test('prefetched missing cues are repaired only after the previous review is dur
 test('a non-clean warmup keeps the first following batch fully serial before any lookahead starts', async t => {
     const f = await fixture(t, { count: 1819, handler: call => {
         const result = response(call);
-        if (call.review && call.start === 0 && call.count === 80) result.subtitles.pop();
+        if (call.review && call.start === 0 && call.count === 32) result.subtitles.pop();
         return result;
     } });
     const result = await f.run();
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
     assert.deepEqual(f.calls.slice(0, 5).map(call => [call.start, call.count, call.review]),
-        [[0, 80, false], [0, 80, true], [79, 1, true], [80, 80, false], [80, 80, true]]);
+        [[0, 32, false], [0, 32, true], [31, 1, true], [32, 32, false], [32, 32, true]]);
+    assert.equal(f.peak, 2, 'later clean batches still overlap');
     assert.equal(result.subtitleTranslation.length, 1819);
     await f.assertDrained();
 });
@@ -383,7 +384,14 @@ for (const count of [480, 1819]) test(`synthetic ${count}-cue latency comparison
     const serialStart = performance.now(); const oldResult = await serial.run(); const serialElapsed = performance.now() - serialStart;
     const poolStart = performance.now(); const result = await pooled.run(); const pooledElapsed = performance.now() - poolStart;
     assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
-    assert.equal(serial.calls.length, Math.ceil(count / 80) * 2); assert.equal(pooled.calls.length, serial.calls.length);
+    const batchSize = count === 1819 ? 32 : 80;
+    const plannedRequests = Array.from({ length: Math.ceil(count / batchSize) }, (_, index) =>
+        [index * batchSize, Math.min(batchSize, count - index * batchSize)]);
+    assert.equal(serial.calls.length, plannedRequests.length * 2); assert.equal(pooled.calls.length, serial.calls.length);
+    for (const review of [false, true]) {
+        assert.deepEqual(serial.calls.filter(call => call.review === review).map(call => [call.start, call.count]), plannedRequests);
+        assert.deepEqual(pooled.calls.filter(call => call.review === review).map(call => [call.start, call.count]), plannedRequests);
+    }
     assert.deepEqual(result.subtitleTranslation, oldResult.subtitleTranslation);
     assert.deepEqual(pooled.transcript, serial.transcript); assert.equal(serial.peak, 1); assert.equal(pooled.peak, 2); assert.equal(pooled.peakReviews, 1);
     t.diagnostic(`Owned synthetic ${count}-cue translation, 12 ms/request: serial ${serialElapsed.toFixed(1)} ms; draft lookahead ${pooledElapsed.toFixed(1)} ms; same ${pooled.calls.length} requests. No real provider or video was processed.`);

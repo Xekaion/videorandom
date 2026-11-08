@@ -311,23 +311,23 @@ for (const phase of ['draft', 'review']) for (const source of ['response-field',
     const f = await fixture(t, { count: 1819, respond: item => {
       assert.equal(item.start, 240, 'the saved prefix is not sent again and no later batch starts');
       if (item.review !== (phase === 'review')) return;
-      const response = responseFor(item.input.subtitles.slice(0, 37));
+      const response = responseFor(item.input.subtitles.slice(0, 17));
       if (source === 'response-field') response.refusal = privateReason;
-      else response.subtitles[36].text = '죄송하지만 해당 요청을 도와드릴 수 없습니다.';
+      else response.subtitles[16].text = '죄송하지만 해당 요청을 도와드릴 수 없습니다.';
       return response;
     } });
     const old = await seedPrefix(f, 4, 240);
     const result = await f.run({ onDiagnostic: event => events.push(event) });
     assert.equal(result.subtitleRepairStatus, 'failed');
     assert.equal(f.requests.length, phase === 'draft' ? 1 : 2, 'detection cannot trigger supplements, length repair or another request');
-    assert.ok(f.requests.every(item => item.start === 240 && item.count === 80));
+    assert.ok(f.requests.every(item => item.start === 240 && item.count === 32));
     const diagnostic = result.subtitleDiagnostic;
     assert.equal(diagnostic.code, source === 'response-field' ? 'SUBTITLE_PROVIDER_REFUSAL' : 'SUBTITLE_REFUSAL_TEXT_DETECTED');
     assert.equal(diagnostic.refusalSource, source);
     assert.equal(diagnostic.stage, `translation_${phase}`);
     assert.equal(diagnostic.totalCues, 1819); assert.equal(diagnostic.completedCues, 240);
-    assert.equal(diagnostic.startCue, 241); assert.equal(diagnostic.endCue, 320);
-    assert.equal(diagnostic.expectedCues, 80); assert.equal(diagnostic.returnedCues, 37);
+    assert.equal(diagnostic.startCue, 241); assert.equal(diagnostic.endCue, 272);
+    assert.equal(diagnostic.expectedCues, 32); assert.equal(diagnostic.returnedCues, 17);
     assert.equal(result.subtitleTranslationPartial.length, 240);
     assert.ok(result.subtitleTranslationPartial.every(cue => cue.text === RETAINED));
     assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), f.source.slice(0, 240).map(cue => [cue.id, cue.start, cue.end]));

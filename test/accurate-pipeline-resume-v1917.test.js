@@ -264,21 +264,27 @@ test('resumed lookahead still replaces only a newly stale term draft once and re
 });
 
 test('mock latency comparison after an earlier gap preserves all requests, reviews and exact output', async t => {
+    const count = 1120, batchSize = 32;
     const handler = async (call, state) => {
         await delay(15);
         const result = state.normalResponse(call);
-        if (call.review && call.start === 0 && call.count === 80) result.approvedIndexes.pop();
+        if (call.review && call.start === 0 && call.count === batchSize) result.approvedIndexes.pop();
         return result;
     };
-    const serial = await fixture(t, { count: 1120, pipeline: false, handler });
-    const resumed = await fixture(t, { count: 1120, handler });
+    const serial = await fixture(t, { count, pipeline: false, handler });
+    const resumed = await fixture(t, { count, handler });
     const serialStart = performance.now(), oldResult = await serial.run(), serialElapsed = performance.now() - serialStart;
     const resumedStart = performance.now(), result = await resumed.run(), resumedElapsed = performance.now() - resumedStart;
     assertComplete(oldResult, serial.transcript); assertComplete(result, resumed.transcript);
     assert.deepEqual(result.subtitleTranslation, oldResult.subtitleTranslation);
     assert.deepEqual(resumed.transcript, serial.transcript);
-    assert.equal(serial.calls.length, 29); assert.equal(resumed.calls.length, serial.calls.length);
+    assert.equal(serial.calls.length, 2 * Math.ceil(count / batchSize) + 1); assert.equal(resumed.calls.length, serial.calls.length);
+    for (const review of [false, true]) {
+        assert.deepEqual(resumed.calls.filter(call => call.review === review).map(call => call.indexes),
+            serial.calls.filter(call => call.review === review).map(call => call.indexes));
+    }
+    assert.deepEqual(resumed.calls.filter(call => call.review && call.count === 1).map(call => call.indexes), [[batchSize - 1]]);
     assert.equal(serial.peak, 1); assert.equal(resumed.peak, 2); assert.equal(resumed.peakReviews, 1);
-    t.diagnostic(`Owned synthetic 1,120-cue translation, recovered first-batch gap, 15 ms/request: pipeline off ${serialElapsed.toFixed(1)} ms; resumed pipeline ${resumedElapsed.toFixed(1)} ms; ${(serialElapsed / resumedElapsed).toFixed(2)}x. Same 29 mocked requests and two passes. This is not actual provider, ASR or whole-video speed.`);
+    t.diagnostic(`Owned synthetic 1,120-cue translation, recovered first-batch gap, 15 ms/request: pipeline off ${serialElapsed.toFixed(1)} ms; resumed pipeline ${resumedElapsed.toFixed(1)} ms; ${(serialElapsed / resumedElapsed).toFixed(2)}x. Same ${resumed.calls.length} mocked requests and two passes. This is not actual provider, ASR or whole-video speed.`);
     await serial.drained(); await resumed.drained();
 });

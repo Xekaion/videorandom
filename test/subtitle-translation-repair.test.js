@@ -266,6 +266,7 @@ test('successful translation of a previously failed analysis becomes partial and
 
 test('an 1819-cue service repair resumes 160 reviewed v4 cues, fills one short response, and writes the complete timed SRT', { timeout: 30000 }, async t => {
   const total = 1819, duration = total * 2 + 2;
+  const longBatchSize = 32, firstReviewAccepted = 13;
   const source = Array.from({ length: total }, (_, index) => ({ id: `owned-train-cue-${index}`,
     start: index * 2 + 0.125, end: index * 2 + 1.375,
     text: '合成の列車が到着します。安全のためにホームの内側で待ち、案内と出発時間を確認してください。' }));
@@ -317,8 +318,8 @@ test('an 1819-cue service repair resumes 160 reviewed v4 cues, fills one short r
           assert.equal(schema.properties.subtitles.maxItems, indices.length);
           assert.deepEqual(schema.properties.subtitles.items.properties.index.enum, indices);
         }
-        const shortened = review && indices[0] === 160 && indices.length === 80;
-        const returned = shortened ? indices.slice(0, 37) : indices;
+        const shortened = review && indices[0] === prefix.length && indices.length === longBatchSize;
+        const returned = shortened ? indices.slice(0, firstReviewAccepted) : indices;
         requests.push({ indices, review, shortened });
         const response = { subtitles: returned.map(index => ({ index,
           text: korean(review ? shortened ? '처음 검수 보존' : '최종 검수' : '검수 전 초안', index) })), terms: [] };
@@ -349,13 +350,17 @@ test('an 1819-cue service repair resumes 160 reviewed v4 cues, fills one short r
   assert.equal(record.subtitleTranslationProgress.translationComplete, true);
   assert.equal(record.subtitleTranslation.length, total);
   assert.deepEqual(record.subtitleTranslation.slice(0, 160), prefix);
-  assert.deepEqual(record.subtitleTranslation.slice(160, 197).map(cue => cue.text),
-    Array.from({ length: 37 }, (_, offset) => korean('처음 검수 보존', offset + 160)));
+  const firstMissing = prefix.length + firstReviewAccepted;
+  assert.deepEqual(record.subtitleTranslation.slice(prefix.length, firstMissing).map(cue => cue.text),
+    Array.from({ length: firstReviewAccepted }, (_, offset) => korean('처음 검수 보존', offset + prefix.length)));
   assert.deepEqual(record.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), source.map(cue => [cue.id, cue.start, cue.end]));
-  assert.equal(requests.length, 45, '21 full draft/review pairs plus exactly three missing-review groups');
-  assert.deepEqual(requests.slice(0, 5).map(request => [request.review, request.indices[0], request.indices.length]),
-    [[false, 160, 80], [true, 160, 80], [true, 197, 20], [true, 217, 20], [true, 237, 3]]);
-  assert.equal(requests.slice(2).some(request => request.indices.some(index => index >= 160 && index < 197)), false,
+  assert.equal(requests.length, 2 * Math.ceil((total - prefix.length) / longBatchSize) + 1,
+    'every long-job draft/review pair plus exactly one missing-review group');
+  assert.equal(requests.filter(request => request.shortened).length, 1);
+  assert(requests.every(request => request.indices.length <= longBatchSize));
+  assert.deepEqual(requests.slice(0, 3).map(request => [request.review, request.indices[0], request.indices.length]),
+    [[false, prefix.length, longBatchSize], [true, prefix.length, longBatchSize], [true, firstMissing, longBatchSize - firstReviewAccepted]]);
+  assert.equal(requests.slice(2).some(request => request.indices.some(index => index >= prefix.length && index < firstMissing)), false,
     'already validated review items must not be regenerated');
   for (const key of preserved) assert.deepEqual(record[key], f.original[key], key);
   assert.deepEqual(record.analysisProvenance.analysis, f.original.analysisProvenance.analysis);

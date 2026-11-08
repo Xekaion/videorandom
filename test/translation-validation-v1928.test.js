@@ -141,12 +141,19 @@ test('a later format repair cannot replace text that already reached its reviewe
 });
 
 test('whole-batch metadata repairs share the existing 64-request ceiling across the entire source', async t => {
-    const count = 5281, batches = Math.ceil(count / 80);
+    const batchWidth = 32, repairLimit = 64, batches = repairLimit + 3;
+    const count = (batches - 1) * batchWidth + 1;
     const f = await fixture(t, call => invalid['term shape'](call), { count });
     const result = await f.run(); assert.equal(result.subtitleRepairStatus, 'partial');
     assert.equal(result.subtitleTranslationProgress.processedCues, count);
     assert.equal(result.subtitleTranslationProgress.completedCues, 0);
-    assert.equal(f.calls.length, batches + 64);
+    assert.equal(f.calls.length, batches + repairLimit);
+    for (let batch = 0, request = 0; batch < batches; batch++) {
+        const start = batch * batchWidth;
+        const indexes = Array.from({ length: Math.min(batchWidth, count - start) }, (_, offset) => start + offset);
+        assert.deepEqual(f.calls[request++].indexes, indexes);
+        if (batch < repairLimit) assert.deepEqual(f.calls[request++].indexes, indexes);
+    }
     assert.equal(f.calls.at(-1).indexes.at(-1), count - 1);
     assert(f.calls.every(call => !call.review), 'no malformed draft can acquire a default review approval');
     await f.drained();

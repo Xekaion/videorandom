@@ -204,9 +204,9 @@ test('foreign-content corrections share the operation-wide 64-request ceiling an
     const bad = Array.from({ length: 1440 }, (_, index) => index);
     const f = await fixture(t, { count: 1601, bad, phase: 'draft' });
     const result = await f.run(); assertAcceptedExcept(result, f.transcript, bad);
-    const corrections = f.calls.filter(call => !call.review && call.count === 20);
-    assert.equal(corrections.length, 64); assert(corrections.every(call => call.indexes.every(index => index < 1280)));
-    assert(f.calls.some(call => !call.review && call.start === 1360 && call.count === 80), 'normal source batches continue after the repair budget is exhausted');
+    const corrections = f.calls.filter(call => !call.review && call.start < 1440 && call.count < 32);
+    assert.equal(corrections.length, 64); assert(corrections.every(call => call.indexes.every(index => index < 1024)));
+    assert(f.calls.some(call => !call.review && call.start === 1344 && call.count === 32), 'normal source batches continue after the repair budget is exhausted');
     assert.equal(result.subtitleTranslationPartial.at(-1).id, 'owned-foreign-1600');
     assert(f.diagnostics.some(event => event.code === 'SUBTITLE_REPAIR_LIMIT')); await f.drained();
 });

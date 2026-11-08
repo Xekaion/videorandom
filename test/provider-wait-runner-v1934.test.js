@@ -139,27 +139,33 @@ for (const reviewTimeout of [false, true]) test(`an owned ${reviewTimeout ? 'rev
   assert(f.calls.every(call => call.closed));
 });
 
-test('a timed-out targeted draft correction keeps valid rows, attempts each half once and continues the tail', async t => {
+test('a timed-out targeted draft correction keeps valid rows and resumes only remaining gaps after bounded late attempts', async t => {
   let recoveringFromSavedGap = false;
   const f = await fixture(t, async call => {
     if (recoveringFromSavedGap) await call.respond();
     else if (!call.review && call.start === 0 && call.count === 80) {
       await call.respond(answer => ({ ...answer, subtitles: answer.subtitles.filter(cue => cue.index < 10 || cue.index >= 30) }));
-    } else if (!call.review && ((call.start === 10 && call.count === 20) || (call.start === 20 && call.count === 10))) {
+    } else if (!call.review && ((call.start === 10 && call.count === 20) || (call.start === 20 && [10, 8].includes(call.count))
+        || (call.start === 28 && call.count === 2))) {
       return;
     } else await call.respond();
   }, { count: 101, provider: { translationRequestTimeoutMs: 170 } });
   const source = structuredClone(f.record.transcript);
   const result = await f.run();
   const firstDrafts = f.calls.filter(call => !call.review && call.start < 80);
-  assert.deepEqual(firstDrafts.map(call => [call.start, call.count, call.kills.length]), [[0, 80, 0], [10, 20, 1], [10, 10, 0], [20, 10, 1]]);
+  assert.deepEqual(firstDrafts.map(call => [call.start, call.count, call.kills.length]),
+    [[0, 80, 0], [10, 20, 1], [10, 10, 0], [20, 10, 1], [20, 8, 1], [28, 2, 1]]);
+  assert(f.calls.indexOf(f.calls.find(call => call.review && call.indexes.includes(100))) < f.calls.indexOf(firstDrafts.at(-2)),
+    'independent healthy tail is reviewed before the bounded late attempts');
   const accepted = [...cueRange(0, 20), ...cueRange(30, 101)];
   assertTraversedGap(result, source, accepted);
   const deadlines = f.diagnostics.filter(event => event.code === 'SUBTITLE_BATCH_DEADLINE');
   assert.deepEqual(deadlines.map(event => [event.startCue, event.endCue, event.expectedCues, event.event, event.level,
     event.providerDeadlineScope, event.providerProcessStopped]), [
     [11, 30, 20, 'stage', 'warning', 'translation-request', true],
-    [21, 30, 10, 'stage', 'warning', 'translation-request', true]
+    [21, 30, 10, 'stage', 'warning', 'translation-request', true],
+    [21, 28, 8, 'stage', 'warning', 'translation-request', true],
+    [29, 30, 2, 'stage', 'warning', 'translation-request', true]
   ]);
   assert.doesNotMatch(JSON.stringify(deadlines), /PRIVATE_PROVIDER_ID|列車|열차|"text"|thread_id/);
   assert.deepEqual(f.calls.filter(call => call.review).flatMap(call => call.indexes), accepted, 'provisional drafts are never committed without their review');
@@ -220,17 +226,25 @@ test('two independently stalled source batches are bounded and do not claim the 
   assert.equal(classifyQueueRecord(result, { catalogSaved: true }).canContinue, true);
 });
 
-test('the shared extra request budget can leave a later deadline sparse without blocking healthy following batches', async t => {
+test('the immediate recovery budget does not cap a healthy final sweep of the exact remaining IDs', async t => {
   const f = await fixture(t, async call => {
     if (!call.review && call.start < 240 && call.count === 80) return;
     await call.respond();
   }, { count: 321, provider: { translationRequestTimeoutMs: 175 } });
   const result = await f.run();
-  const retries = f.calls.filter(call => !call.review && call.start < 240 && call.count < 80);
-  assert.equal(retries.length, 8);
-  assert.deepEqual(retries.flatMap(call => call.indexes), cueRange(0, 160));
-  assert(f.calls.some(call => call.review && call.indexes.includes(320)));
-  assertTraversedGap(result, f.record.transcript, [...cueRange(0, 160), ...cueRange(240, 321)]);
+  const tailReview = f.calls.findIndex(call => call.review && call.indexes.includes(320));
+  assert(tailReview >= 0);
+  const immediate = f.calls.slice(0, tailReview).filter(call => !call.review && call.start < 240 && call.count < 80);
+  assert.equal(immediate.length, 8);
+  assert.deepEqual(immediate.flatMap(call => call.indexes), cueRange(0, 160));
+  const late = f.calls.slice(tailReview + 1);
+  const lateDrafts = late.filter(call => !call.review), lateReviews = late.filter(call => call.review);
+  assert.equal(lateDrafts.length, 10);
+  assert(lateDrafts.every(call => call.count === 8));
+  assert.deepEqual(lateDrafts.flatMap(call => call.indexes), cueRange(160, 240));
+  assert.deepEqual(lateReviews.map(call => call.indexes), lateDrafts.map(call => call.indexes));
+  assert.equal(result.subtitleTranslationProgress.complete, true);
+  assertCueIdentity(result, f.record.transcript, cueRange(0, 321));
 });
 
 test('a late hard failure from an overlapping draft wins over a verified local review deadline', async t => {
