@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { catalogRecord } = require('../lib/catalog-record');
+const { catalogRecord, subtitleMetadata } = require('../lib/catalog-record');
 
 // Neutral in-memory records exercise the actual catalog script. The only
 // injection exposes its merge function/state to this test's isolated VM.
@@ -43,6 +43,7 @@ function records() {
 function compact(record) {
   return { ...catalogRecord(record), ...(record.sourceReanalysis === true ? { sourceReanalysis: true } : {}) };
 }
+const full = record => ({ ...record, ...subtitleMetadata(record) });
 const selected = ui => [...ui.sandbox.ownedCatalogState.records.values()][0];
 const rowButton = (ui, id, translation = false) => nodes(rowFor(ui, id)).find(node => node.tag === 'button'
   && (translation ? node.dataset.translationRepairId === id : node.dataset.repairRecordId === id));
@@ -112,6 +113,67 @@ for (const reverse of [false, true]) for (const summary of [false, true]) {
     assert.equal(selected(ui).id, old.id);
   });
 }
+
+function interruptedPrefix(old, evidence = 'streaming') {
+  const prefix = { ...result('owned-interrupted-prefix', { total: 60, completed: 15, sourceReview: true }),
+    path: old.path, name: old.name, duration: old.duration, sourceReanalysis: true, repairOf: old.id, savedAt: freshAt,
+    transcriptSource: evidence === 'streaming' ? 'audio:faster-whisper large-v3 (partial) + embedded:ja'
+      : 'audio:faster-whisper large-v3' };
+  if (evidence === 'quality') prefix.transcriptionQuality = { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3',
+    duration: old.duration, processedUntil: 300, complete: false, processingComplete: false,
+    audit: { complete: false, unresolved: [] } };
+  return prefix;
+}
+
+for (const project of [full, compact]) for (const reverse of [false, true]) for (const evidence of ['streaming', 'quality']) {
+  test(`an explicitly interrupted nonempty prefix does not replace saved source (${project.name}, ${reverse}, ${evidence})`, async () => {
+    const { old } = records(), prefix = interruptedPrefix(old, evidence);
+    assert.equal(project(prefix).sourceProcessingIncomplete, true);
+    const ui = await boot({ records: (reverse ? [prefix, old] : [old, prefix]).map(project), savedSettings: settings });
+    assert.equal(selected(ui).id, old.id);
+    ui.sandbox.ownedMergeRecords([project(prefix)]);
+    assert.equal(selected(ui).id, old.id, 'a later prefix-only update cannot displace the saved source');
+  });
+}
+
+test('a translation-only descendant cannot promote an interrupted source across polling or sibling lineage', async () => {
+  const { old, fresh } = records();
+  const prefix = interruptedPrefix(old);
+  const child = { ...result('owned-prefix-translation', { total: 60, completed: 30, sourceReview: true }),
+    path: old.path, name: old.name, operation: 'translation-only', repairOf: prefix.id, sourceReanalysis: true,
+    subtitleRepairStatus: 'partial', savedAt: translatedAt };
+  const ui = await boot({ records: [old, fresh, prefix].map(compact), savedSettings: settings });
+  assert.equal(selected(ui).id, fresh.id, 'a healthy sibling is not replaced by the interrupted attempt');
+  ui.sandbox.ownedMergeRecords([compact(child)]);
+  assert.equal(selected(ui).id, fresh.id, 'the base attempt’s incomplete processing survives compact lineage');
+  const reverse = await boot({ records: [child, prefix, fresh, old].map(compact), savedSettings: settings });
+  assert.equal(selected(reverse).id, fresh.id);
+});
+
+test('a fully scanned shorter source is selected even if it still has audit or translation warnings', async () => {
+  const { old } = records();
+  const fresh = interruptedPrefix(old, 'quality');
+  fresh.transcriptionQuality.processingComplete = true;
+  fresh.transcriptionQuality.processedUntil = old.duration;
+  fresh.subtitleError = 'Synthetic translation not yet finished';
+  assert.equal(compact(fresh).sourceProcessingIncomplete, undefined);
+  for (const list of [[old, fresh], [fresh, old]]) {
+    const ui = await boot({ records: list.map(compact), savedSettings: settings });
+    assert.equal(selected(ui).id, fresh.id);
+    assert.equal(selected(ui).transcriptCount, 60, 'cue count and audit uncertainty do not veto a complete scan');
+  }
+});
+
+test('lineage metadata does not resurrect an old result removed from the saved selection', async () => {
+  const { old } = records(), prefix = interruptedPrefix(old);
+  const ui = await boot({ records: [old, prefix].map(compact), savedSettings: settings });
+  assert.equal(selected(ui).id, old.id);
+  const { records: selection, recordLineage } = ui.sandbox.ownedCatalogState;
+  assert(recordLineage.has(old.id));
+  selection.delete(old.path.toLowerCase()); // Authoritative saved-results refresh drops missing IDs before merge.
+  ui.sandbox.ownedMergeRecords([compact(prefix)]);
+  assert.equal(selected(ui).id, prefix.id);
+});
 
 for (const invalid of ['missing-marker', 'wrong-parent', 'wrong-path', 'older-time', 'malformed-cue', 'empty-count-proof']) {
   test(`fresh-source priority rejects ${invalid}`, async () => {

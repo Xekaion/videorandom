@@ -211,19 +211,38 @@ test('a verified prefetched draft deadline keeps the overlapping review and reco
   assert(f.calls.every(call => call.closed));
 });
 
-test('two independently stalled source batches are bounded and do not claim the unvisited tail was processed', async t => {
+test('two empty source batches trigger bounded fresh probes and do not claim the rest was processed', async t => {
   const f = await fixture(t, () => {}, { count: 241, provider: { translationRequestTimeoutMs: 90 } });
   const result = await f.run();
   const fullBatches = f.calls.filter(call => call.count === 80);
   assert.deepEqual(fullBatches.map(call => call.start), [0, 80]);
   assert(f.calls.length > fullBatches.length, 'a smaller request was tried before concluding there was no progress');
   assert(f.calls.length <= fullBatches.length + 8, 'timeouts cannot exhaust an unbounded series of extra calls');
-  assert(f.calls.every(call => call.indexes.every(index => index < 160) && call.closed && call.kills.length === 1));
+  assert.deepEqual(f.calls.filter(call => call.start >= 160).map(call => [call.start, call.count]), [[160, 16], [176, 8]]);
+  assert(f.calls.every(call => call.indexes.every(index => index < 184) && call.closed && call.kills.length === 1));
   assert.equal(result.subtitleDiagnostic.code, 'PROVIDER_REQUEST_DEADLINE');
   assert.equal(result.subtitleDiagnostic.providerProcessStopped, true);
   assert.equal(result.subtitleTranslationProgress.completedCues, 0);
   assert.notEqual(result.subtitleTranslationProgress.processingComplete, true);
   assert.equal(classifyQueueRecord(result, { catalogSaved: true }).canContinue, true);
+});
+
+test('a healthy forward probe after consecutive timeouts saves the tail and recovers earlier holes', async t => {
+  let forwardReached = false;
+  const f = await fixture(t, async call => {
+    if (call.start < 160 && !forwardReached) return;
+    if (call.start >= 160) forwardReached = true;
+    await call.respond();
+  }, { count: 193, provider: { translationRequestTimeoutMs: 140 } });
+  const result = await f.run();
+  assert.deepEqual(f.calls.filter(call => !call.review && call.start >= 160).map(call => [call.start, call.count]), [[160, 16], [176, 17]]);
+  const tailReview = f.calls.findIndex(call => call.review && call.indexes.includes(192));
+  assert(tailReview > 0);
+  const remaining = f.calls.slice(tailReview + 1).filter(call => !call.review);
+  assert(remaining.every(call => call.count <= 8));
+  assert.deepEqual(remaining.flatMap(call => call.indexes), cueRange(0, 160));
+  assert.equal(result.subtitleTranslationProgress.complete, true);
+  assertCueIdentity(result, f.record.transcript, cueRange(0, 193));
 });
 
 test('the immediate recovery budget does not cap a healthy final sweep of the exact remaining IDs', async t => {

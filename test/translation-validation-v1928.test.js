@@ -236,7 +236,11 @@ test('parsed chunk summary validation cannot block the translation of valid time
     const result = await f.run(); assert.equal(result.summaryError, 'Codex 구간 요약 형식이 올바르지 않습니다.');
     assert.equal(result.analysisDiagnostic.code, 'SUMMARY_INVALID');
     assert.equal(result.subtitleLanguage, 'ko'); assert.equal(result.subtitleTranslation.length, 801);
-    assert(f.calls.some(call => call.review && call.indexes.at(-1) === 800));
+    const requests = f.calls.filter(call => !call.summary);
+    const expectedBatches = Array.from({ length: 26 }, (_, batch) =>
+        Array.from({ length: Math.min(32, 801 - batch * 32) }, (_, index) => batch * 32 + index));
+    assert.deepEqual(requests.filter(call => !call.review).map(call => call.indexes), expectedBatches);
+    assert.deepEqual(requests.filter(call => call.review).map(call => call.indexes), expectedBatches);
     assert(f.calls.filter(call => call.summary).length <= 4, 'only the two started chunks and their one normal repair may run');
     await f.drained();
 });

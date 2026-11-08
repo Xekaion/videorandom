@@ -12,6 +12,15 @@ test('long transcripts proactively use 32 cue requests without changing the shor
     assert.equal(subtitleBatchAt(source(960), pending, 0).length, 32);
 });
 
+test('a two-hour recording still uses small requests when it has only 672 source cues', () => {
+    const transcript = source(672);
+    const pending = Array.from({ length: 100 }, (_, index) => 500 + index);
+    assert.equal(subtitleBatchAt(transcript, pending, 0, 3599.9).length, 80);
+    assert.equal(subtitleBatchAt(transcript, pending, 0, 3600).length, 32);
+    assert.deepEqual(subtitleBatchAt(transcript, pending, 0, 7200).map(cue => cue.index), pending.slice(0, 32));
+    assert.equal(subtitleBatchAt(transcript, pending, 0, Infinity).length, 80);
+});
+
 test('the text cap splits requests before the cue count limit, without truncating source text', () => {
     const pending = [7, 16, 29, 55, 79, 104, 220, 701];
     const text = 'あ'.repeat(1600);

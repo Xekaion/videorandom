@@ -1102,6 +1102,7 @@
       const values = [result?.savedAt, result?.analyzedAt, result?.editedAt].map(value => Date.parse(value || '')).filter(Number.isFinite);
       return values.length ? Math.max(...values) : 0;
     };
+    const incompleteSourceProcessing = record => record?.sourceProcessingIncomplete === true;
     for (const record of [...state.recordLineage.values(), ...state.records.values(), ...records]) if (record?.id) {
       const previous = related.get(record.id);
       if (!previous || savedTime(record) > savedTime(previous)
@@ -1148,11 +1149,12 @@
       }
       return false;
     };
-    const sourceReanalysisBase = record => {
+    const sourceReanalysisBase = (record, allowIncomplete = false) => {
       const visited = new Set();
       while (record && !visited.has(record.id)) {
         visited.add(record.id);
-        if (record.operation !== 'translation-only') return record.sourceReanalysis === true && validSource(record) ? record : null;
+        if (record.operation !== 'translation-only') return record.sourceReanalysis === true && validSource(record)
+          && (allowIncomplete || !incompleteSourceProcessing(record)) ? record : null;
         const parent = related.get(record.repairOf);
         if (!parent || pathKey(parent.path) !== pathKey(record.path) || !directTranslationUpdate(record, parent)) return null;
         record = parent;
@@ -1180,6 +1182,15 @@
       if (!previousBase || savedTime(base) < savedTime(previousBase)) return false;
       return [...ancestry(previousBase)].some(id => ancestors.has(id));
     };
+    const interruptedSourceWouldReplace = (attempt, previous) => {
+      if (!attempt || !previous || attempt.id === previous.id || pathKey(attempt.path) !== pathKey(previous.path)
+          || !validSource(previous) || incompleteSourceProcessing(previous)) return false;
+      const base = sourceReanalysisBase(attempt, true);
+      if (!base?.repairOf || !incompleteSourceProcessing(base)
+          || incompleteSourceProcessing(sourceReanalysisBase(previous, true))) return false;
+      const ancestors = ancestry(base);
+      return ancestors.has(previous.id) || [...ancestry(previous)].some(id => ancestors.has(id));
+    };
     // Retain relationship/count and summary-comparison metadata between polls.
     // Full source/translation arrays are not duplicated in this history.
     for (const record of records) if (record?.id && record.path) {
@@ -1187,6 +1198,7 @@
       if (previous && savedTime(previous) > savedTime(record)) continue;
       const metadata = { id: record.id, path: record.path, repairOf: record.repairOf,
         sourceReanalysis: record.sourceReanalysis === true, operation: record.operation,
+        sourceProcessingIncomplete: incompleteSourceProcessing(record),
         subtitleRepairStatus: record.subtitleRepairStatus, summary: record.summary, plot: record.plot,
         savedAt: record.savedAt, analyzedAt: record.analyzedAt, editedAt: record.editedAt,
         transcriptCount: sourceCount(record), subtitleTranslationSourceFingerprint: sourceHash(record),
@@ -1238,6 +1250,11 @@
       }
       if (retainedTranslationUpdate(previous, record)) return;
       const translatedRepair = retainedTranslationUpdate(record, previous);
+      // A valid prefix can still be from a stopped recognition pass. Keep
+      // usable related source data selected, including across translation-only
+      // descendants. Only currently saved records are selection candidates.
+      if (interruptedSourceWouldReplace(record, previous)) return;
+      if (interruptedSourceWouldReplace(previous, record)) { state.records.set(key, record); return; }
       if (previous && record.sourceReanalysis === true && !validSource(record) && validSource(previous)
           && ancestry(record).has(previous.id)) return;
       if (previous?.sourceReanalysis === true && !validSource(previous) && validSource(record)

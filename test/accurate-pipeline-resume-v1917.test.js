@@ -1,4 +1,4 @@
-const test = require('node:test');
+const nodeTest = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -7,6 +7,10 @@ const crypto = require('node:crypto');
 const { EventEmitter, getEventListeners } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { createNoKeyProvider, TRANSLATION_PROMPT_VERSION } = require('../lib/no-key-provider');
+
+// These fixtures coordinate mocked requests by exact source-batch boundaries.
+// A future batching regression should fail the test, not leave a gate waiting.
+const test = (name, run) => nodeTest(name, { timeout: 30_000 }, run);
 
 const sourceText = '合成の列車が到着します。安全のためにホームの内側で待ち、案内と出発時間を確認してください。';
 const koreanText = '합성 열차가 도착합니다. 안전을 위해 승강장 안쪽에서 기다리고 안내와 출발 시간을 확인하세요.';
@@ -19,15 +23,18 @@ const deferred = () => { let resolve; const promise = new Promise(done => { reso
 async function fixture(t, { count = 640, pipeline = true, handler } = {}) {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-pipeline-resume-v1917-'));
     t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
-    const transcript = indexes(count).map(index => ({ id: `owned-resume-${index}`, start: index * 7 + 0.5,
-        end: index * 7 + 5.5, text: sourceText }));
-    const duration = count * 7 + 6;
+    // Both the 640-cue default and the 800-cue gate fixture exercise ordinary
+    // 80-cue batches. The explicitly long 1,120-cue fixture still uses 32.
+    const transcript = indexes(count).map(index => ({ id: `owned-resume-${index}`, start: index * 4 + 0.5,
+        end: index * 4 + 3.5, text: sourceText }));
+    const duration = count * 4 + 1;
     const record = { id: 'owned-pipeline-resume-v1917', name: 'owned-synthetic-train.mp4', summary: '보관한 합성 열차 안내',
         transcript, duration, warnings: [], frames: [], transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
         transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
             complete: true, duration, processedUntil: duration, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
     const calls = [], commits = [], diagnostics = [], controller = new AbortController();
+    t.signal.addEventListener('abort', () => controller.abort(), { once: true });
     let active = 0, peak = 0, activeReviews = 0, peakReviews = 0;
     const normalResponse = call => call.review ? { approvedIndexes: call.indexes.slice(), corrections: [], terms: [] }
         : { subtitles: call.indexes.map(index => ({ index, text: textFor(index) })), terms: [] };

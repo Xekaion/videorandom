@@ -368,18 +368,20 @@ for (const phase of ['draft', 'review']) test(`cancellation after a ${phase} res
 });
 
 test('the operation-wide supplementary budget stays at 64 while later explicitly reviewed source cues are still preserved', async t => {
-  const f = await fixture(t, { count: 721, respond: item => item.count === 80 ? responseFor(item.input.subtitles.slice(0, 1)) : undefined });
+  // The duration is over an hour even though the source has fewer than 960 cues.
+  const f = await fixture(t, { count: 721, respond: item => item.count === 32 ? responseFor(item.input.subtitles.slice(0, 1)) : undefined });
   const result = await f.run();
   assert.equal(result.subtitleRepairStatus, 'partial');
   assert.equal(result.subtitleDiagnostic?.code, 'SUBTITLE_CUES_PENDING');
-  assert.equal(f.requests.filter(item => item.start < 640 && item.count <= 20).length, 64);
-  assert.deepEqual(f.requests.filter(item => item.start >= 640).map(item => [item.start, item.count, item.review]),
-    [[640, 80, false], [640, 1, true], [720, 1, false], [720, 1, true]]);
-  assert.equal(f.requests.length, 84);
-  assert.equal(result.subtitleTranslationPartial.length, 642);
+  assert.equal(f.requests.filter(item => item.start < 512 && item.count <= 20).length, 64);
+  const remainingBatchStarts = [512, 544, 576, 608, 640, 672];
+  assert.deepEqual(f.requests.filter(item => item.start >= 512).map(item => [item.start, item.count, item.review]),
+    [...remainingBatchStarts.flatMap(start => [[start, 32, false], [start, 1, true]]), [704, 17, false], [704, 17, true]]);
+  assert.equal(f.requests.length, 110);
+  assert.equal(result.subtitleTranslationPartial.length, 535);
   const saved = JSON.parse(await fs.readFile(path.join(f.dataDir, 'checkpoints', `${f.record.id}-ko.json`), 'utf8'));
-  assert.equal(saved.completedCues, 642); assert.equal(saved.reviewPasses, 2); assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION);
-  const indexes = [...Array.from({ length: 641 }, (_, index) => index), 720];
+  assert.equal(saved.completedCues, 535); assert.equal(saved.reviewPasses, 2); assert.equal(saved.translationVersion, TRANSLATION_PROMPT_VERSION);
+  const indexes = [...Array.from({ length: 512 }, (_, index) => index), ...remainingBatchStarts, ...Array.from({ length: 17 }, (_, index) => 704 + index)];
   assert.deepEqual(result.subtitleTranslationProgress.cueIndexes, indexes);
   assert.deepEqual(result.subtitleTranslationPartial.map(cue => [cue.id, cue.start, cue.end]), indexes.map(index =>
     [f.source[index].id, f.source[index].start, f.source[index].end]));

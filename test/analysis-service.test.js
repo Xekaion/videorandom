@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const express = require('express');
 const { createAnalysisService, validateOptions } = require('../lib/analysis-service');
+const { httpFixtureResponse } = require('./http-json-fixture');
 
 async function fixture(t, analyze, { subtitleWriter } = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'videorandom-service-'));
@@ -31,7 +32,8 @@ async function fixture(t, analyze, { subtitleWriter } = {}) {
     await fs.rm(dataDir, { recursive: true, force: true });
   });
   const base = `http://127.0.0.1:${server.address().port}/api/analysis`;
-  const request = (url, body, method = body === undefined ? 'GET' : 'POST') => fetch(base + url, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const request = (url, body, method = body === undefined ? 'GET' : 'POST') => httpFixtureResponse(base + url,
+    { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   return { service, request, filePath, dataDir, engine, exporter };
 }
 

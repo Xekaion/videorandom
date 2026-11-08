@@ -274,11 +274,45 @@ test('current speech workers report owning-window progress without context-segme
             { type: 'complete', segments: 2 }
         ].map(event => JSON.stringify(event)).join('\n') + '\n');
     });
-    const progress = [];
-    await provider(mocked.spawnImpl).transcribeLocalAudio(audioPath, { dataDir, subtitleQuality: 'accurate', onProgress: (...args) => progress.push(args) });
+    const progress = [], diagnostics = [];
+    await provider(mocked.spawnImpl).transcribeLocalAudio(audioPath, { dataDir, subtitleQuality: 'accurate', sourceDurationSeconds: 120,
+        onProgress: (...args) => progress.push(args), onDiagnostic: event => diagnostics.push(event) });
     assert.deepEqual(progress.map(([, percent]) => percent), [35, 40.28, 45.56]);
     assert.deepEqual(progress.map(([, , details]) => details.completedSeconds), [0, 20, 40]);
     assert.ok(progress.every(([stage, , details]) => stage === 'transcription' && details.totalSeconds === 100));
+    const terminal = diagnostics.find(event => event.event === 'completed');
+    assert.equal(terminal.sourceDurationSeconds, 120);
+    assert.equal(terminal.sourceAudioSeconds, 100);
+    assert.equal(terminal.sourceProcessedSeconds, 40, 'legacy completion does not fabricate full-range coverage');
+    assert.equal(terminal.sourceLastCueEndSeconds, 42);
+    assert.equal(terminal.sourceProcessingComplete, false);
+});
+
+test('speech diagnostics keep processed duration separate from last cue and source audit', async t => {
+    const { dataDir } = await fixture(t);
+    const audioPath = path.join(dataDir, 'owned-source-coverage.flac');
+    await fs.promises.writeFile(audioPath, 'owned mock audio');
+    const events = [];
+    const mocked = mockSpawn(call => {
+        call.child.stdout.write([
+            { type: 'info', profile: 'accurate', duration: 7100, language: 'ja' },
+            { type: 'segment', start: 7079, end: 7080, text: 'owned-private-cue-marker' },
+            { type: 'complete', segments: 1, quality: { profile: 'accurate', durationSeconds: 7100, processedSeconds: 7100,
+                processingComplete: true, complete: false, audit: { complete: false, unresolvedCount: 3, unresolved: [] } } }
+        ].map(event => JSON.stringify(event)).join('\n') + '\n');
+    });
+    await provider(mocked.spawnImpl).transcribeLocalAudio(audioPath, { dataDir, subtitleQuality: 'accurate', sourceDurationSeconds: 7200,
+        onDiagnostic: event => events.push(event) });
+    const terminal = events.find(event => event.event === 'completed');
+    assert.equal(terminal.completedCues, 1);
+    assert.equal(terminal.sourceDurationSeconds, 7200);
+    assert.equal(terminal.sourceAudioSeconds, 7100);
+    assert.equal(terminal.sourceProcessedSeconds, 7100);
+    assert.equal(terminal.sourceLastCueEndSeconds, 7080);
+    assert.equal(terminal.sourceProcessingComplete, true);
+    assert.equal(terminal.sourceAuditComplete, false);
+    assert.equal(terminal.sourceAuditUnresolvedCount, 3);
+    assert.doesNotMatch(JSON.stringify(events), /owned-private-cue-marker|owned-source-coverage/);
 });
 
 test('speech ETA uses observed phase work and never claims remaining whole-analysis time', async t => {

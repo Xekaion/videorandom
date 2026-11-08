@@ -9,6 +9,8 @@
   const integer = value => Number.isSafeInteger(value) && value >= 0 && value <= 10000000;
   // Match the LAN multipart limit: audio 250 MiB + 20 images × 5 MiB + metadata 8 MiB + framing 1 MiB.
   const MAX_UPLOAD_BYTES = 359 * 1024 * 1024;
+  const SOURCE_SECONDS_LABELS = { sourceDurationSeconds: '영상 길이', sourceAudioSeconds: '디코딩된 음성 길이',
+    sourceProcessedSeconds: '처리한 음성 길이', sourceLastCueEndSeconds: '마지막 대사 종료 시각' };
   const UPLOAD_STATES = Object.assign(Object.create(null), { receiving: '서버 자료 수신 중', accepted: '서버 작업 접수 확인 · 분석 완료와 별도',
     rejected: '서버 자료 요청 접수 거부', interrupted: '자료 전송·수신 중단' });
   const UPLOAD_CODE_MESSAGES = Object.assign(Object.create(null), { LAN_UPLOAD_STARTED: '서버가 분석 자료를 받기 시작했습니다.',
@@ -56,6 +58,15 @@
       if (text) item[key] = text;
     }
     for (const key of ['totalCues', 'completedCues', 'expectedCues', 'returnedCues', 'startCue', 'endCue']) if (integer(value[key])) item[key] = value[key];
+    if (item.stage === 'transcription') {
+      for (const key of Object.keys(SOURCE_SECONDS_LABELS)) {
+        if (Number.isFinite(value[key]) && value[key] >= 0 && value[key] <= 7 * 86400) item[key] = value[key];
+      }
+      for (const key of ['sourceProcessingComplete', 'sourceAuditComplete']) {
+        if (typeof value[key] === 'boolean') item[key] = value[key];
+      }
+      if (integer(value.sourceAuditUnresolvedCount) && value.sourceAuditUnresolvedCount <= 1000000) item.sourceAuditUnresolvedCount = value.sourceAuditUnresolvedCount;
+    }
     if (Number.isInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) item.httpStatus = value.httpStatus;
     if (SYSTEM_CODES.has(value.systemCode)) item.systemCode = value.systemCode;
     if (CAUSE_CODES.has(value.causeCode)) item.causeCode = value.causeCode;
@@ -182,7 +193,18 @@
       if (event.stage) progress.append(node('span', 'diagnostics-meta', stages[event.stage] || safeText(event.stage, 200)));
       if (event.operation) progress.append(node('span', 'diagnostics-meta', event.operation === 'translation-only' ? '한국어 번역만 복구' : event.operation === 'analysis' ? '영상 분석' : safeText(event.operation, 80)));
       if (Number.isFinite(event.percent) && event.percent >= 0 && event.percent <= 100) progress.append(node('span', 'diagnostics-meta', `${Math.round(event.percent)}%`));
-      if (integer(event.completedCues) && integer(event.totalCues)) progress.append(node('span', '', `번역 ${event.completedCues.toLocaleString()} / ${event.totalCues.toLocaleString()}구간`));
+      if (event.stage === 'transcription') {
+        if (integer(event.completedCues)) progress.append(node('span', '', `인식된 원문 ${event.completedCues.toLocaleString('ko-KR')}구간`));
+        for (const [key, label] of Object.entries(SOURCE_SECONDS_LABELS)) {
+          if (Number.isFinite(event[key])) progress.append(node('span', 'diagnostics-meta', `${label}: ${event[key].toLocaleString('ko-KR', { maximumFractionDigits: 3 })}초`));
+        }
+        if (typeof event.sourceProcessingComplete === 'boolean') progress.append(node('span', 'diagnostics-meta',
+          `디코딩된 음성 전체 처리: ${event.sourceProcessingComplete ? '확인됨' : '완료 확인 안 됨'}`));
+        if (typeof event.sourceAuditComplete === 'boolean') progress.append(node('span', 'diagnostics-meta',
+          `음성 누락 검사: ${event.sourceAuditComplete ? '통과' : '확인 필요'}`));
+        if (integer(event.sourceAuditUnresolvedCount)) progress.append(node('span', 'diagnostics-meta',
+          `확인이 필요한 구간: ${event.sourceAuditUnresolvedCount.toLocaleString('ko-KR')}개`));
+      } else if (integer(event.completedCues) && integer(event.totalCues)) progress.append(node('span', '', `번역 ${event.completedCues.toLocaleString()} / ${event.totalCues.toLocaleString()}구간`));
       if (integer(event.expectedCues) || integer(event.returnedCues)) progress.append(node('span', integer(event.expectedCues) && integer(event.returnedCues) && event.expectedCues !== event.returnedCues ? 'diagnostics-meta diagnostics-count-mismatch' : 'diagnostics-meta',
         `요청 ${integer(event.expectedCues) ? event.expectedCues.toLocaleString() : '미확인'} · 응답 ${integer(event.returnedCues) ? event.returnedCues.toLocaleString() : '미확인'}구간`));
       if (integer(event.startCue) && integer(event.endCue)) progress.append(node('span', 'diagnostics-meta', `번역 구간 ${event.startCue.toLocaleString()}–${event.endCue.toLocaleString()}`));
