@@ -101,6 +101,23 @@ async function autoPair(f) {
   await f.request('/auto-pick', { filePath: f.files[1], options }); f.held.release();
 }
 
+test('damaged AAC audio remains file-scoped and the next automatic video runs once', async t => {
+  const f = await fixture(t, { firstResult(file) {
+    const record = complete(file);
+    Object.assign(record, { status: 'partial', transcript: [], transcriptSource: 'none',
+      error: '영상 처리 실패: Invalid data found when processing input\n[aac @ 0000] Reserved bit set.\nRematrix is needed between 32 channels and mono\nError reinitializing filters!',
+      analysisDiagnostic: { code: 'MEDIA_INPUT_INVALID', stage: 'audio', event: 'error', level: 'error' } });
+    for (const key of ['subtitleLanguage', 'subtitleTranslation', 'subtitleTranslationProgress', 'transcriptionQuality']) delete record[key];
+    return record;
+  } });
+  await autoPair(f);
+  assert.equal((await quiet(f)).paused, false);
+  assert.deepEqual(f.calls.map(call => call.path), f.files.slice(0, 2));
+  const issue = (await queue(f)).fileIssues.items.find(issue => issue.path === f.files[0]);
+  assert.equal(issue.code, 'MEDIA_INPUT_INVALID');
+  assert.equal((await f.journal()).entries.length, 0);
+});
+
 test('a durable per-video subtitle failure preserves exact partial counts and runs next automatic video once', async t => {
   const f = await fixture(t); await autoPair(f);
   assert.equal((await quiet(f)).paused, false);

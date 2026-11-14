@@ -745,15 +745,29 @@ def recovery_windows(targets, duration, budget, maximum=30.0):
 
 
 def recovery_plan(targets, duration, maximum=30.0, context=3.0):
-    """Own each target sample once; decode context across internal core cuts."""
+    """Batch nearby targets and retain context outside short suspect spans.
+
+    Whisper pads short inputs internally. Separate subsecond gaps therefore
+    repeat encoder work and clip the surrounding utterance. Merge spans whose
+    decode contexts would overlap; target selection still admits only the
+    original suspected ranges, never words solely from the extra context.
+    """
+    if not finite(maximum) or not finite(context) or maximum <= 0 or context < 0 or context > maximum / 2:
+        raise ValueError('Invalid recovery window size or context.')
     spans = merge_intervals(targets, duration, padding=1.5)
-    cores = recovery_windows(targets, duration, duration, maximum)
-    plan, span_index = [], 0
-    for core_start, core_end in cores:
-        while span_index + 1 < len(spans) and core_start >= spans[span_index][1]:
-            span_index += 1
-        start, end = spans[span_index]
-        plan.append((max(start, core_start - context), min(end, core_end + context), core_start, core_end))
+    grouped = []
+    for start, end in spans:
+        if grouped and start - grouped[-1][1] <= 2 * context:
+            grouped[-1] = (grouped[-1][0], end)
+        else:
+            grouped.append((start, end))
+    plan = []
+    for start, end in grouped:
+        cursor = start
+        while cursor < end:
+            core_end = min(end, cursor + maximum)
+            plan.append((max(0.0, cursor - context), min(duration, core_end + context), cursor, core_end))
+            cursor = core_end
     return plan
 
 

@@ -368,7 +368,9 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(events[-1]['segments'], 3)
 
     def test_missing_speech_is_rechecked_and_recovered_with_actual_offsets(self):
-        model = Model([[segment(1, 2)], [segment(1.5, 2.5, '駅です。')]])
+        # The recovery input now starts at 0.5, retaining three seconds of
+        # context outside the padded target rather than clipping at 3.5.
+        model = Model([[segment(1, 2)], [segment(4.5, 5.5, '駅です。')]])
         cues, quality, events = self.run_audio(model, speech=[(1, 2), (5, 6)])
         self.assertEqual([(cue['start'], cue['end']) for cue in cues], [(1, 2), (5, 6)])
         self.assertEqual(cues[1]['words'][0]['start'], 5)
@@ -808,7 +810,7 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(quality['audit']['uncoveredSpeechSeconds'], 1.0)
         self.assertEqual(len(quality['audit']['unresolved']), 2)
         self.assertFalse(quality['audit']['complete'])
-        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(len(model.calls), 2)  # Both short targets share one recheck.
 
     def test_short_gap_total_is_preserved_and_accumulated_in_audit_review(self):
         raw, review = ASR.audit_gaps([(1, 2), (5, 5.2), (10, 10.2)], [(1, 2)], 20)
@@ -1072,9 +1074,9 @@ class TranscriptionTests(unittest.TestCase):
     def test_wordless_overlap_keeps_unresolved_alignment_diagnostic_in_full_audit(self):
         native = segment(4, 5.2, 'native segment')
         native['words'] = []
-        # The recheck window starts at 3.95; its native [1.2,1.65]
-        # word therefore overlaps the unsplittable original by 0.05 seconds.
-        recovery = segment(1.2, 1.65, 'new')
+        # The expanded recheck starts at zero. The actual word overlaps the
+        # unsplittable original by 0.05 seconds.
+        recovery = segment(5.15, 5.6, 'new')
         cues, quality, _ = self.run_audio(Model([[native], [recovery]]), speech=[(4, 6)])
         self.assertEqual(len(cues), 1)
         self.assertFalse(quality['audit']['complete'])
