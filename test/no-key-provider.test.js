@@ -575,7 +575,7 @@ test('desktop executable and shared Python runtime are discovered without readin
 });
 
 function fullQuality(duration = 90, extra = {}) {
-    return { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, duration, processedUntil: duration,
+    return { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, duration, processedUntil: duration,
         wordTimestamps: true, language: 'ja', languageProbability: 0.99,
         audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [], ...extra };
 }
@@ -642,7 +642,7 @@ test('accurate repair retranscribes an older recognition revision and preserves 
     });
     const result = await provider(mocked.spawnImpl).analyzeExtracted(record, { dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
     assert.equal(mocked.calls.filter(call => call.args.includes('--audio')).length, 1);
-    assert.equal(result.transcriptionQuality.recognitionRevision, 3);
+    assert.equal(result.transcriptionQuality.recognitionRevision, 4);
     assert.equal(result.transcript[0].text, 'こんにちは。');
     assert.equal(result.subtitleLanguage, 'ko', result.subtitleError);
 });

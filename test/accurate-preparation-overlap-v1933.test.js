@@ -243,7 +243,7 @@ test('valid cached accurate extraction never probes or prepares audio again', as
   for (const frame of frames) await fs.promises.writeFile(path.join(f.dataDir, 'frames', savedId, frame.filename), JPEG);
   const saved = { id: savedId, path: f.sourcePath, duration: 120, hasAudio: true, frames, transcript: SOURCE,
     transcriptSource: 'audio:faster-whisper large-v3', transcriptLanguage: 'en', status: 'completed', warnings: [],
-    transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', model: 'large-v3', profile: 'accurate', complete: true,
+    transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', model: 'large-v3', profile: 'accurate', complete: true,
       processingComplete: true, duration: 120, processedUntil: 120, audit: { complete: true, unresolved: [], speechSeconds: 2, uncoveredSpeechSeconds: 0 } } };
   const before = JSON.stringify(saved);
   const result = await f.run({ transcribeAudio: false, repairRecord: saved });

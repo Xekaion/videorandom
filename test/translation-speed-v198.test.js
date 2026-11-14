@@ -21,7 +21,7 @@ async function fixture(t, { count = 320, quality = 'accurate', environment = {},
     const duration = count * 7 + 6;
     const record = { id: 'owned-v198-translation', name: 'owned-synthetic-train.mp4', transcript, duration, warnings: [], frames: [],
         summary: '보관된 합성 열차 안내', transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
-        transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+        transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
             duration, processedUntil: duration, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
     const calls = [], commits = [], diagnostics = [], controller = new AbortController();

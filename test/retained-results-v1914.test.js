@@ -25,7 +25,7 @@ function completedRecord(video) {
     analysisMode: 'codex', summary: '합성 열차 안내', plot: '기차역에서 열차의 도착을 안내합니다.',
     labels: ['기차'], warnings: [...oldWarnings, ...keptWarnings], frames: [], transcript,
     transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3', hasAudio: true,
-    transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', recognitionRevision: 3,
+    transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', recognitionRevision: 4,
       complete: true, processingComplete: true, duration: 20, processedUntil: 20, wordTimestamps: true,
       audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false }, warnings: [] },
     subtitleLanguage: 'ko', subtitleTranslation: transcript.map((cue, index) => ({ ...cue, text: ['합성 기차역입니다.', '다음 열차입니다.'][index] })),

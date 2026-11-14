@@ -37,7 +37,7 @@ async function fixture(t, { override = {}, speechQuality = {}, handler } = {}) {
             { type: 'segment', id: 'owned-0', start: 3.25, end: 8.75, text: source },
             { type: 'progress', phase: 'transcription', completedSeconds: 90, totalSeconds: 120, percent: 75, workers: 1, batchSize: 1 },
             { type: 'complete', segments: 1, quality: { profile: 'turbo', model: 'turbo', durationSeconds: 120,
-              processedSeconds: 120, processingComplete: true, wordTimestamps: false, recognitionRevision: 3,
+              processedSeconds: 120, processingComplete: true, wordTimestamps: false, recognitionRevision: 4,
               device: 'cuda', computeType: 'int8_float16', workers: 1, batchSize: 1, audit: { complete: false, unresolved: [] }, ...speechQuality } }
           ];
           child.stdout.write(events.map(event => JSON.stringify(event)).join('\n') + '\n');
@@ -122,7 +122,7 @@ test('turbo Korean translation uses one strict pass and reuses only its exact pr
     transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper turbo',
     transcript: [{ id: 'owned-0', start: 3.25, end: 8.75, text: source }],
     transcriptionQuality: { version: 1, source: 'audio', profile: 'turbo', model: 'turbo', duration: 120, processedUntil: 120,
-      processingComplete: true, complete: true, recognitionRevision: 3, audit: { complete: false, unresolved: [] } } };
+      processingComplete: true, complete: true, recognitionRevision: 4, audit: { complete: false, unresolved: [] } } };
   const options = { dataDir: f.dataDir, subtitleQuality: 'turbo' };
   const result = await f.provider.translateKoreanOnly(record, options);
   assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);

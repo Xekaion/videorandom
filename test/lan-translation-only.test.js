@@ -12,7 +12,7 @@ const { saveKoreanSubtitle } = require('../lib/subtitle-sidecar');
 
 const appVersion = require('../package.json').version;
 const transcript = [{ id: 7, start: 1, end: 3, text: '合成テスト', words: [{ start: 1.1, end: 2.9, word: '合成テスト', probability: 0.9 }] }];
-const sourceQuality = { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: false,
+const sourceQuality = { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', complete: false,
   processingComplete: true, duration: 60, processedUntil: 60, wordTimestamps: true,
   audit: { complete: false, unresolved: [{ start: 8, end: 9, reason: 'speech_without_text' }] }, warnings: ['source check remains'] };
 const metadata = changes => ({ operation: 'translation-only', name: 'owned-neutral.mp4', ext: 'MP4', duration: 60, frames: [],

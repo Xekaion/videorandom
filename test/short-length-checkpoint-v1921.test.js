@@ -21,7 +21,7 @@ async function fixture(t, { prefix = 3, version = 7, mutate = () => {} } = {}) {
     const duration = 35;
     const record = { id: 'owned-new-short-cache', name: 'owned-synthetic-train.mp4', duration, summary: '합성 열차 안내',
         transcript, warnings: [], frames: [], transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
-        transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+        transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3',
             complete: true, duration, processedUntil: duration, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
     const sourceFingerprint = crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue =>

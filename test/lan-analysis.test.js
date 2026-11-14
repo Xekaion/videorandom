@@ -11,7 +11,7 @@ const { createLanAnalysis, sendRemoteAnalysis, checkRemoteServer, privateAddress
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const MP3 = Buffer.from('ID3tiny-transport-fixture');
 const FLAC = Buffer.from('fLaCtiny-lossless-transport-fixture');
-const quality = (changes = {}) => ({ version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, processingComplete: true,
+const quality = (changes = {}) => ({ version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, processingComplete: true,
   language: 'ja', languageProbability: 0.99, duration: 60, processedUntil: 60, wordTimestamps: true,
   audit: { complete: true, speechSeconds: 2, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [], ...changes });
 const fingerprint = transcript => crypto.createHash('sha256').update(JSON.stringify(transcript.map(cue => [cue.id ?? null, cue.start, cue.end, cue.text]))).digest('hex');
@@ -342,7 +342,7 @@ test('accurate uploads require lossless FLAC and forward quality options instead
   assert.equal(submitted.status, 202, await submitted.clone().text());
   const result = await finished(f, (await submitted.json()).id);
   assert.equal(result.result.transcriptionQuality.profile, 'accurate');
-  assert.equal(result.result.transcriptionQuality.recognitionRevision, 3);
+  assert.equal(result.result.transcriptionQuality.recognitionRevision, 4);
   assert.equal(result.result.transcriptionQuality.processingComplete, true);
   assert.equal(result.result.transcript[0].words[0].probability, 0.98);
   assert.equal(result.result.transcript[0].confidence, 0.98);
@@ -483,7 +483,7 @@ test('v3 round trip preserves completed translation and full processing separate
     dataDir: f.dataDir, audioPath, subtitleLanguage: 'ko', subtitleQuality: 'accurate' });
   assert.equal(received.record.transcriptionQuality.processingComplete, true);
   assert.equal(received.record.transcriptionQuality.audit.unresolvedCount, 303);
-  assert.equal(result.transcriptionQuality.recognitionRevision, 3);
+  assert.equal(result.transcriptionQuality.recognitionRevision, 4);
   assert.equal(result.transcriptionQuality.processingComplete, true);
   assert.equal(result.transcriptionQuality.complete, false);
   assert.equal(result.transcriptionQuality.audit.complete, false);

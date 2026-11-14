@@ -21,7 +21,7 @@ async function fixture(t, handler, { count = 161, pipeline = false, full = false
         end: index * 6 + 4.75, text: SOURCE }));
     const record = { id: 'neutral-train', name: 'neutral-train.mp4', duration, transcript, warnings: [], frames: [],
         hasAudio: true, transcriptSource: 'audio:faster-whisper large-v3', transcriptLanguage: 'ja', summary: '합성 열차 안내',
-        transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+        transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3',
             complete: true, duration, processedUntil: duration, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
     const calls = [], events = [], controller = new AbortController(); let active = 0;

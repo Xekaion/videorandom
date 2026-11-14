@@ -25,7 +25,7 @@ function syntheticRecord(index = 0, transcript = dialogue(6), translation) {
     transcriptSource: 'audio:faster-whisper large-v3', transcriptLanguage: 'ja', transcript,
     subtitleTranslation: translation || transcript.map(cue => ({ id: cue.id, start: cue.start, end: cue.end, text: `TRANSLATION_SENTINEL 합성 대사 ${cue.id}` })),
     subtitleTranslationPartial: [{ start: transcript[0].start, end: transcript[0].end, text: 'PARTIAL_TRANSLATION_SENTINEL' }],
-    transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: false,
+    transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', complete: false,
       processingComplete: true, duration: Math.max(60, transcript.length * 3), processedUntil: Math.max(60, transcript.length * 3),
       audit: { complete: false, unresolved: Array.from({ length: 200 }, (_, index) => ({ start: index / 10, end: index / 10 + 0.05, reason: 'low_confidence' })),
         unresolvedCount: 303, unresolvedByReason: { low_confidence: 303 }, unresolvedTruncated: true }, warnings: ['QUALITY_DETAIL_SENTINEL'] },

@@ -131,7 +131,7 @@ async function integration(t, handler, { count = 161, wait, pipeline = false } =
     const transcript = Array.from({ length: count }, (_, index) => ({ id: `owned-${index}`, start: index * 6 + .25, end: index * 6 + 4.75, text: sourceText }));
     const record = { id: 'owned-capacity', status: 'completed', name: 'owned.mp4', transcript, duration: count * 6 + 5,
         warnings: [], frames: [], summary: '합성 열차 안내', transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
-        transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+        transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
             duration: count * 6 + 5, processedUntil: count * 6 + 5, wordTimestamps: true, language: 'ja',
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
     const calls = [], events = [], waits = [], stages = [], commits = [], controller = new AbortController();

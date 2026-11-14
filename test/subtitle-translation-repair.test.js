@@ -40,12 +40,12 @@ async function fixture(t, { seed = {}, knownSource = true } = {}) {
     analyzedAt, savedAt: '2026-10-10T10:12:13.000Z', transcriptSource: 'audio:faster-whisper large-v3', transcriptLanguage: 'ja',
     transcript: structuredClone(cues), frames: [{ timestamp: 6, filename: 'frame-01.jpg', caption: '합성 장면' }],
     transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', device: 'cuda', workers: 1,
-      recognitionRevision: 3, complete: true, processingComplete: true, duration: 12, processedUntil: 12,
+      recognitionRevision: 4, complete: true, processingComplete: true, duration: 12, processedUntil: 12,
       audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false }, warnings: [] },
     subtitleError: 'Synthetic old translation was interrupted',
     analysisMetrics: { totalMs: 1234, stages: [{ stageKey: 'transcription', elapsedMs: 1000 }] },
     analysisProvenance: { schemaVersion: 1, analysis: { clientVersion: '1.6.6', serverVersion: '1.6.5', recordedAt: analyzedAt,
-      recognition: { recognitionRevision: 3, model: 'large-v3', profile: 'accurate', device: 'cuda', workers: 1 } } },
+      recognition: { recognitionRevision: 4, model: 'large-v3', profile: 'accurate', device: 'cuda', workers: 1 } } },
     ...(knownSource ? { sourceFile } : {}), ...seed };
   await fs.mkdir(path.join(dataDir, 'results'), { recursive: true });
   await fs.mkdir(path.join(dataDir, 'frames', seedId), { recursive: true });
@@ -276,7 +276,7 @@ test('an 1819-cue service repair resumes 160 reviewed v4 cues, fills one short r
   const progress = { version: 1, sourceFingerprint: fingerprint, language: 'ko', totalCues: total, completedCues: 160,
     complete: false, sourceComplete: true, sourceProcessed: true, sourceAuditComplete: true, translationComplete: false };
   const quality = { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', device: 'cuda', workers: 1,
-    recognitionRevision: 3, complete: true, processingComplete: true, duration, processedUntil: duration,
+    recognitionRevision: 4, complete: true, processingComplete: true, duration, processedUntil: duration,
     audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false }, warnings: [] };
   const f = await fixture(t, { seed: { duration, transcript: source, transcriptionQuality: quality,
     subtitleTranslationPartial: prefix, subtitleTranslationProgress: progress,

@@ -2688,8 +2688,11 @@
     if (Number.isFinite(audit.speechSeconds) && Number.isFinite(audit.unresolvedSpeechSeconds)) {
       lines.push(`발화 검출 ${time(audit.speechSeconds)} · 대사와 맞지 않는 발화 ${time(audit.unresolvedSpeechSeconds)} · 구간 수만으로 전체 대사 인식 여부를 판단할 수 없습니다.`);
     }
+    if (Number.isFinite(audit.acousticCandidateSeconds) && Number.isFinite(audit.unresolvedAcousticSeconds)) {
+      lines.push(`별도 음향 후보 ${time(audit.acousticCandidateSeconds)} · 대사와 맞지 않는 음향 ${time(audit.unresolvedAcousticSeconds)} · 음악·효과음이 포함될 수 있습니다.`);
+    }
     if (quality.parallelMemoryFallback) lines.push('GPU 메모리가 부족해 남은 음성 구간은 하나씩 처리했습니다.');
-    if (quality.profile === 'accurate' && quality.recognitionRevision !== 3) lines.push('이전 인식 방식으로 저장한 결과입니다. 긴 영상의 전체 재검수를 적용하려면 정확도 우선으로 복구 / 다시 분석하세요.');
+    if (quality.profile === 'accurate' && quality.recognitionRevision !== 4) lines.push('이전 인식 방식으로 저장한 결과입니다. 음향 누락 재검수를 적용하려면 원문부터 다시 분석하세요.');
     if (quality.processingComplete === true) lines.push('전체 음성 파일 처리는 끝났습니다. 아래 내용은 별도의 누락·신뢰도 검수 결과입니다.');
     const unauditedFast = ['fast', 'turbo'].includes(quality.profile) && quality.complete === true && audit.complete !== true && !unresolved.length;
     lines.push(unauditedFast ? quality.profile === 'turbo'
@@ -2700,7 +2703,7 @@
     if (unresolved.length) lines.push('확인 필요: ' + unresolved.slice(0, 8).map(range => `${time(range.start)}–${time(range.end)}`).join(', '));
     const unresolvedCount = Number.isSafeInteger(audit.unresolvedCount) && audit.unresolvedCount >= unresolved.length ? audit.unresolvedCount : unresolved.length;
     if (unresolvedCount) {
-      const reasons = { possible_missing_speech: '발화 누락 의심', low_confidence: '대사 신뢰도 확인', recovery_alignment_conflict: '대사 정렬 충돌', audit_unavailable: '누락 검사 미완료', boundary_range_limit: '발화 경계 표시 한도', source_audio_damaged: '원본 음성 손상 확인' };
+      const reasons = { possible_missing_speech: '발화 누락 의심', possible_missing_audio: '대사 없는 음향 확인', acoustic_audit_unavailable: '별도 음향 검사 미완료', low_confidence: '대사 신뢰도 확인', recovery_alignment_conflict: '대사 정렬 충돌', audit_unavailable: '누락 검사 미완료', boundary_range_limit: '발화 경계 표시 한도', source_audio_damaged: '원본 음성 손상 확인' };
       const counts = audit.unresolvedByReason && typeof audit.unresolvedByReason === 'object' ? Object.entries(audit.unresolvedByReason)
         .filter(([key, value]) => reasons[key] && Number.isSafeInteger(value) && value > 0 && value <= unresolvedCount)
         .map(([key, value]) => `${reasons[key]} ${value.toLocaleString()}개`) : [];

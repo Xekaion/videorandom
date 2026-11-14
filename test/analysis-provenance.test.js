@@ -7,13 +7,13 @@ const now = '2026-10-16T01:02:03.000Z';
 const originalAt = '2026-10-15T23:00:00.000Z';
 
 test('full analysis records supplied runtime versions and actual recognition settings', () => {
-  const record = { transcriptionQuality: { recognitionRevision: 3, model: 'large-v3', profile: 'accurate', device: 'cuda', workers: 2,
+  const record = { transcriptionQuality: { recognitionRevision: 4, model: 'large-v3', profile: 'accurate', device: 'cuda', workers: 2,
     transcript: 'private speech', modelDirectory: 'C:/private/models', warnings: ['private warning'] },
     analysisProvenance: { schemaVersion: 1, analysis: { clientVersion: '0.1.0' }, translation: { clientVersion: '0.2.0' } } };
   assert.equal(stampAnalysisProvenance(record, { clientVersion: '1.8.0', serverVersion: '1.7.1', operation: 'analysis', now }), record);
   assert.deepEqual(record.analysisProvenance, { schemaVersion: 1, analysis: {
     clientVersion: '1.8.0', serverVersion: '1.7.1', recordedAt: now,
-    recognition: { recognitionRevision: 3, model: 'large-v3', profile: 'accurate', device: 'cuda', workers: 2 } } });
+    recognition: { recognitionRevision: 4, model: 'large-v3', profile: 'accurate', device: 'cuda', workers: 2 } } });
   assert.equal(record.transcriptionQuality.transcript, 'private speech', 'provenance collection leaves recognition data untouched');
 });
 
@@ -29,7 +29,7 @@ test('translation-only repair preserves original analysis version and adds a sep
 
 test('legacy translation repair never fabricates an original analysis version from timestamps or recognition revision', () => {
   const record = { analyzedAt: originalAt, savedAt: originalAt,
-    transcriptionQuality: { recognitionRevision: 3, model: 'large-v3', profile: 'accurate' } };
+    transcriptionQuality: { recognitionRevision: 4, model: 'large-v3', profile: 'accurate' } };
   stampAnalysisProvenance(record, { clientVersion: '1.8.0', operation: 'translation-only', now });
   assert.deepEqual(record.analysisProvenance, { schemaVersion: 1, translation: { clientVersion: '1.8.0', recordedAt: now } });
   assert.equal(Object.hasOwn(record.analysisProvenance, 'analysis'), false);
@@ -51,7 +51,7 @@ test('sanitizer bounds version fields and removes paths, secrets, unknown schema
   assert.deepEqual(clean, { schemaVersion: 1, analysis: { clientVersion: '1.8.0' },
     translation: { clientVersion: '1.8.0-rc.1+build.20', recordedAt: now } });
   for (const invalid of [null, [], {}, { schemaVersion: 2, analysis: { clientVersion: '1.8.0' } },
-    { schemaVersion: 1, analysis: { recordedAt: now, recognition: { recognitionRevision: 3 } } }]) {
+    { schemaVersion: 1, analysis: { recordedAt: now, recognition: { recognitionRevision: 4 } } }]) {
     assert.equal(sanitizeAnalysisProvenance(invalid), undefined);
   }
 });
@@ -71,12 +71,12 @@ test('invalid client and server versions cannot create provenance; valid server-
 test('catalog summaries round trip safe version metadata without mutating full records or exposing model paths', () => {
   const record = { id: 'a'.repeat(32), name: 'synthetic.mp4', status: 'partial', transcript: [], frames: [],
     analysisProvenance: { schemaVersion: 1, analysis: { clientVersion: '1.8.0', serverVersion: '1.7.1', recordedAt: originalAt,
-      recognition: { model: 'C:/private/model', profile: 'fast', device: 'cuda', workers: 1, recognitionRevision: 3 } },
+      recognition: { model: 'C:/private/model', profile: 'fast', device: 'cuda', workers: 1, recognitionRevision: 4 } },
       translation: { clientVersion: '1.8.0', recordedAt: now }, secret: 'SECRET' } };
   const before = JSON.stringify(record);
   const compact = JSON.parse(JSON.stringify(catalogRecord(record)));
   assert.deepEqual(compact.analysisProvenance, { schemaVersion: 1, analysis: { clientVersion: '1.8.0', serverVersion: '1.7.1', recordedAt: originalAt,
-    recognition: { recognitionRevision: 3, profile: 'fast', device: 'cuda', workers: 1 } }, translation: { clientVersion: '1.8.0', recordedAt: now } });
+    recognition: { recognitionRevision: 4, profile: 'fast', device: 'cuda', workers: 1 } }, translation: { clientVersion: '1.8.0', recordedAt: now } });
   assert.equal(JSON.stringify(record), before);
   assert.equal(JSON.stringify(compact).includes('private'), false);
   assert.equal(JSON.stringify(compact).includes('SECRET'), false);

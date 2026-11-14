@@ -101,7 +101,7 @@ for (const profile of ['accurate', 'fast', 'turbo']) test(`local ${profile} prep
         speechCalls++;
         assert.equal(args[args.indexOf('--model') + 1], MODEL[profile]);
         assert.equal(args[args.indexOf('--profile') + 1], profile);
-        const quality = { version: 1, recognitionRevision: 3, source: 'audio', profile, model: MODEL[profile], complete: true,
+        const quality = { version: 1, recognitionRevision: 4, source: 'audio', profile, model: MODEL[profile], complete: true,
           processingComplete: true, duration: 30, processedUntil: 30, audit: { complete: true, unresolved: [], speechSeconds: 2, uncoveredSpeechSeconds: 0 } };
         for (const event of [{ type: 'info', language: 'ko', duration: 30, model: MODEL[profile], profile },
           { type: 'transcript', segments: SOURCE }, { type: 'complete', segments: SOURCE.length, quality }]) child.stdout.write(JSON.stringify(event) + '\n');

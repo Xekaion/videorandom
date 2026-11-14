@@ -2,6 +2,12 @@
 title Video Roulette Loader
 cd /d "%~dp0"
 
+:: Prefer the packaged app so managed updates can replace and restart it.
+if exist "%~dp0videorandom.exe" (
+    "%~dp0videorandom.exe"
+    exit /b
+)
+
 echo ===================================================
 echo   Video Roulette - premium Random Video Picker
 echo ===================================================

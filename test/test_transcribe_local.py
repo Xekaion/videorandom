@@ -460,7 +460,7 @@ class TranscriptionTests(unittest.TestCase):
         lines = [json.dumps(event, ensure_ascii=False, allow_nan=False) for event in events]
         decoded = [json.loads(line) for line in lines]
         self.assertEqual(decoded[-1]['quality'], quality)
-        self.assertEqual(decoded[-1]['quality']['recognitionRevision'], 3)
+        self.assertEqual(decoded[-1]['quality']['recognitionRevision'], 4)
         self.assertEqual(decoded[-3]['segments'], cues)
         self.assertEqual(decoded[-2]['phase'], 'completed')
         percentages = [event['percent'] for event in events if event['type'] == 'progress']

@@ -16,7 +16,7 @@ import unicodedata
 SAMPLE_RATE = 16000
 MAX_UNRESOLVED = 200
 MAX_BOUNDARY_RANGES = 10000
-RECOGNITION_REVISION = 3
+RECOGNITION_REVISION = 4
 DLL_DIRECTORY_HANDLES = []
 DLL_DIRECTORY_PATHS = set()
 DLL_LIBRARY_HANDLES = []
@@ -318,6 +318,44 @@ def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def acoustic_activity(audio, sample_rate):
+    """Independent acoustic candidates, not a claim that sound is dialogue.
+
+    Use bounded numpy blocks instead of Python loops over hours of samples.
+    A relative noise floor rejects stationary backgrounds; the absolute floor
+    retains quiet modulated audio. The source waveform is never normalized or
+    changed. ASR and confidence checks still decide whether any words exist.
+    """
+    import numpy as np
+    waveform = np.asarray(audio)
+    if waveform.ndim != 1 or sample_rate <= 0:
+        raise ValueError('Invalid acoustic audit waveform.')
+    frame = max(1, round(sample_rate * 0.02))
+    block = frame * max(1, round(30 * sample_rate / frame))
+    intervals = []
+    for offset in range(0, len(waveform), block):
+        chunk = waveform[offset:offset + block]
+        if not np.isfinite(chunk).all():
+            raise ValueError('Non-finite acoustic samples.')
+        count = math.ceil(len(chunk) / frame)
+        padded = np.zeros(count * frame, dtype=np.float32)
+        padded[:len(chunk)] = chunk
+        frames = padded.reshape(count, frame)
+        rms = np.sqrt(np.einsum('ij,ij->i', frames, frames) / frame)
+        peak = np.max(np.abs(frames), axis=1)
+        floor = max(1e-4, float(np.percentile(rms, 20)) * 2.5)
+        active = np.flatnonzero((rms >= floor) & (peak >= 4e-4))
+        if not len(active):
+            continue
+        cuts = np.flatnonzero(np.diff(active) > 4) + 1
+        for run in np.split(active, cuts):
+            start = (offset + int(run[0]) * frame) / sample_rate
+            end = min(len(waveform), offset + (int(run[-1]) + 1) * frame) / sample_rate
+            if end - start >= 0.06 - 1e-9:
+                intervals.append((start, end))
+    return merge_intervals(intervals, len(waveform) / sample_rate)
+
+
 def field(value, name, default=None):
     return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
 
@@ -364,14 +402,14 @@ def uncovered_intervals(speech, covered, duration, minimum=0.0):
     return result
 
 
-def coverage_for(cues, duration):
+def coverage_for(cues, duration, padding=0.25):
     intervals = []
     for cue in cues:
         words = cue.get('words') or []
         intervals.extend((word['start'], word['end']) for word in words)
         if not words:
             intervals.append((cue['start'], cue['end']))
-    return merge_intervals(intervals, duration, padding=0.25)
+    return merge_intervals(intervals, duration, padding=padding)
 
 
 def audit_gaps(speech, covered, duration):
@@ -480,7 +518,7 @@ def needs_alignment_review(cue):
     return not cue.get('words')
 
 
-def very_quiet_stationary_noise(audio, start, end, sample_rate):
+def _very_quiet_stationary_noise_linear(audio, start, end, sample_rate):
     """Recognize only near-silent stationary noise, not merely VAD-missed audio."""
     left = max(0, int((start - 0.08) * sample_rate))
     right = min(len(audio), int((end + 0.08) * sample_rate))
@@ -533,6 +571,66 @@ def very_quiet_stationary_noise(audio, start, end, sample_rate):
     stationary = high / max(low, 1e-12) <= 1.8
     noise_like = crossed / max(1, count - 1) >= 0.3 and abs(product / squares) <= 0.15
     return stationary and noise_like
+
+
+def very_quiet_stationary_noise(audio, start, end, sample_rate):
+    # Real decoded arrays can reduce tens of thousands of Python sample
+    # operations at once. Legacy/custom sequences retain their exact path.
+    if not hasattr(audio, 'dtype'):
+        return _very_quiet_stationary_noise_linear(audio, start, end, sample_rate)
+    import numpy as np
+    if not isinstance(audio, np.ndarray) or audio.ndim != 1 or audio.dtype.kind not in 'fiu':
+        return _very_quiet_stationary_noise_linear(audio, start, end, sample_rate)
+    left = max(0, int((start - 0.08) * sample_rate))
+    right = min(len(audio), int((end + 0.08) * sample_rate))
+    count = right - left
+    if count < max(1, int(sample_rate * 0.12)):
+        return False
+    # Keep the established immediate rejection for ordinary audible speech.
+    limit = 10 ** (-55 / 20)
+    for raw in audio[left:min(right, left + 512)]:
+        value = float(raw)
+        if not math.isfinite(value) or abs(value) > limit:
+            return False
+    # Bound temporary memory for abnormally long native cues.
+    if count > sample_rate * 120:
+        return _very_quiet_stationary_noise_linear(audio, start, end, sample_rate)
+    values = np.asarray(audio[left:right], dtype=np.float64)
+    if not np.isfinite(values).all():
+        return False
+    peak = float(np.max(np.abs(values)))
+    squares = float(np.sum(values * values))
+    rms = math.sqrt(squares / count)
+    if abs(rms - 10 ** (-70 / 20)) <= 1e-12:
+        return _very_quiet_stationary_noise_linear(audio, start, end, sample_rate)
+    if rms > 10 ** (-70 / 20) or peak > limit:
+        return False
+    if peak <= 1e-7:
+        return True
+    frame_size = max(1, int(sample_rate * 0.02))
+    frame_count = count // frame_size
+    if frame_count < 4 or squares <= 0:
+        return False
+    frames = values[:frame_count * frame_size].reshape(frame_count, frame_size)
+    energies = np.sqrt(np.sum(frames * frames, axis=1) / frame_size)
+    pairs = values[1:] * values[:-1]
+    crossed = int(np.count_nonzero(pairs < 0))
+    nonzero_count = int(np.count_nonzero(values))
+    if abs(rms - 10 ** (-90 / 20)) <= 1e-12:
+        return _very_quiet_stationary_noise_linear(audio, start, end, sample_rate)
+    if (rms <= 10 ** (-90 / 20) and peak <= 10 ** (-65 / 20)
+            and np.count_nonzero(energies == 0) / frame_count >= 0.8
+            and crossed / max(1, nonzero_count - 1) <= 0.005):
+        return True
+    ordered = np.sort(energies)
+    low, high = float(ordered[int((frame_count - 1) * 0.1)]), float(ordered[int((frame_count - 1) * 0.9)])
+    ratio = high / max(low, 1e-12)
+    correlation = abs(float(np.sum(pairs)) / squares)
+    # Pairwise SIMD sums can differ at the last bits. Near decision boundaries
+    # use the original accumulation rather than changing a retained cue.
+    if abs(ratio - 1.8) <= 1e-10 or abs(correlation - 0.15) <= 1e-10:
+        return _very_quiet_stationary_noise_linear(audio, start, end, sample_rate)
+    return ratio <= 1.8 and crossed / max(1, count - 1) >= 0.3 and correlation <= 0.15
 
 
 class SpeechOverlapIndex:
@@ -769,6 +867,15 @@ def recovery_plan(targets, duration, maximum=30.0, context=3.0):
             plan.append((max(0.0, cursor - context), min(duration, core_end + context), cursor, core_end))
             cursor = core_end
     return plan
+
+
+def recovery_input_windows(targets, duration, sample_rate):
+    windows = []
+    for start, end, core_start, core_end in recovery_plan(targets, duration):
+        left = round(start * sample_rate)
+        right = round(end * sample_rate)
+        windows.append((left / sample_rate, right / sample_rate, core_start, core_end))
+    return windows
 
 
 def rebuild_word_cues(words, templates, duration):
@@ -1282,7 +1389,7 @@ def choose_language(model, audio, duration, language, sample_rate, speech=None):
 def transcribe_audio(model, audio, *, profile='accurate', model_name=None, language='auto',
                      device='cpu', compute_type='int8', sample_rate=SAMPLE_RATE,
                      speech_detector=None, emitter=emit, workers=1, parallel_memory_fallback=False,
-                     turbo_pipeline_factory=None):
+                     turbo_pipeline_factory=None, acoustic_detector=None):
     if profile == 'turbo':
         return transcribe_turbo_audio(model, audio, model_name=model_name or 'turbo', language=language,
             device=device, compute_type=compute_type, sample_rate=sample_rate, emitter=emitter,
@@ -1340,6 +1447,9 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name=None, langu
                  'totalSeconds': duration, 'percent': 80.0 * processed / duration, 'workers': state['workers']})
     cues = reconcile_window_boundaries(cues)
     unresolved, rechecked, budget = [], 0.0, 0.0
+    acoustic, acoustic_available = [], acoustic_detector is None
+    acoustic_gaps = []
+    opening_end = 0.0
     raw_gaps = []
     unresolved_gaps, boundary_ranges = [], []
     boundary_diagnostics = {}
@@ -1347,17 +1457,34 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name=None, langu
     if profile == 'accurate':
         emitter({'type': 'progress', 'phase': 'audit', 'completedSeconds': duration, 'totalSeconds': duration, 'percent': 82.0,
                  'workers': state['workers']})
+        if acoustic_detector is not None:
+            try:
+                acoustic = merge_intervals(acoustic_detector(audio, sample_rate), duration)
+                acoustic_available = True
+            except Exception as error:
+                warning = '별도 음향 누락 검사를 완료하지 못했습니다. 대사 완전성 확인이 필요합니다. ' + str(error)[:200]
+                warnings.append(warning)
+                emitter({'type': 'warning', 'message': warning})
         if audit_available:
             cues, removed = prune_non_speech_artifacts(cues, audio, speech, sample_rate)
             removed_non_speech.extend(removed)
         raw_gaps, gaps = audit_gaps(speech, coverage_for(cues, duration), duration)
         uncertain = [(cue['start'], cue['end']) for cue in cues if needs_review(cue) or needs_alignment_review(cue)]
-        targets = merge_intervals(gaps + uncertain, duration)
+        original_targets = RecoveryTargetIndex(merge_intervals(gaps + uncertain, duration))
+        acoustic_gaps = uncovered_intervals(acoustic, coverage_for(cues, duration, padding=0.08), duration, minimum=0.06)
+        # An opening missed by BOTH ASR and VAD used to receive no review at
+        # all. Probe that leading gap even when the acoustic classifier misses
+        # quiet speech over a steady background. Never skip the regular pass.
+        if acoustic_detector is not None:
+            leading = min((cue['start'] for cue in cues), default=duration)
+            if leading >= 2:
+                opening_end = min(90.0, leading, duration)
+        opening = [(0.0, opening_end)] if opening_end else []
+        targets = merge_intervals(gaps + uncertain + acoustic_gaps + opening, duration)
         # All cores are examined, with context across internal cuts rather than
         # truncated phonemes. Thirty-second cores plus three seconds per side
-        # cost at most 1.2 audio-durations. Count the actual decoded samples.
-        windows = [(round(start * sample_rate) / sample_rate, round(end * sample_rate) / sample_rate, core_start, core_end)
-                   for start, end, core_start, core_end in recovery_plan(targets, duration)]
+        # cost at most 1.2 audio-durations. Count actual decoded samples.
+        windows = recovery_input_windows(targets, duration, sample_rate)
         budget = sum(end - start for start, end, _, _ in windows)
         recovery_cues = []
         target_index = RecoveryTargetIndex(targets)
@@ -1369,12 +1496,20 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name=None, langu
                      'windowIndex': window, 'windowCount': len(windows), 'workers': state['workers'], 'heartbeat': True})
 
         retry_options = {**options, 'vad_filter': False, 'no_speech_threshold': 0.8}
+        if acoustic_detector is not None:
+            # The original skip heuristics must not discard the same suspect
+            # audio again. Novel acoustic-only words need strong alignment and
+            # confidence below; an empty recheck remains empty.
+            retry_options.update(no_speech_threshold=None, hallucination_silence_threshold=None)
         for window, (start, end, core_start, core_end), segments in decode_windows(
                 model, audio, windows, retry_options, sample_rate, state, emitter, recovery_waiting):
             candidates = []
             for segment in segments:
-                candidates.extend(recovery_candidates_for_targets(cues_from_segment(
-                    segment, start, duration, (core_start, core_end)), target_index, duration))
+                selected = recovery_candidates_for_targets(cues_from_segment(
+                    segment, start, duration, (core_start, core_end)), target_index, duration)
+                candidates.extend(cue for cue in selected if acoustic_detector is None
+                    or original_targets.overlaps(cue['start'], cue['end'])
+                    or cue.get('words') and high_confidence(cue))
             recovery_cues.extend({**cue, '_window': window, '_boundary': core_start} for cue in candidates)
             rechecked += end - start
             emitter({'type': 'progress', 'phase': 'recovery', 'completedSeconds': duration,
@@ -1390,6 +1525,12 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name=None, langu
         unresolved_gaps, boundary_ranges = separate_boundary_uncertainty(raw_gaps, speech, cues, duration, boundary_diagnostics)
         unresolved = [{'start': start, 'end': end, 'reason': 'possible_missing_speech'}
                       for start, end in review_gaps(unresolved_gaps)]
+        acoustic_gaps = uncovered_intervals(acoustic,
+            coverage_for(cues, duration, padding=0.08) + speech, duration, minimum=0.06)
+        unresolved.extend({'start': start, 'end': end, 'reason': 'possible_missing_audio'}
+                          for start, end in acoustic_gaps)
+        if not acoustic_available:
+            unresolved.append({'start': 0.0, 'end': duration, 'reason': 'acoustic_audit_unavailable'})
         unresolved.extend({'start': cue['start'], 'end': cue['end'], 'reason': 'low_confidence'}
                           for cue in cues if needs_review(cue))
         unresolved.extend({'start': cue['start'], 'end': cue['end'], 'reason': 'recovery_alignment_conflict'}
@@ -1423,7 +1564,10 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name=None, langu
     unresolved_by_reason = {}
     for item in unresolved:
         unresolved_by_reason[item['reason']] = unresolved_by_reason.get(item['reason'], 0) + 1
-    audit = {'complete': audit_available and not unresolved, 'speechSeconds': sum(end - start for start, end in speech),
+    audit = {'complete': audit_available and acoustic_available and not unresolved, 'speechSeconds': sum(end - start for start, end in speech),
+             'acousticCandidateSeconds': sum(end - start for start, end in acoustic),
+             'unresolvedAcousticSeconds': sum(end - start for start, end in acoustic_gaps),
+             'openingRecheckedSeconds': opening_end,
              'uncoveredSpeechSeconds': sum(end - start for start, end in raw_gaps),
              'unresolvedSpeechSeconds': sum(end - start for start, end in unresolved_gaps),
              'boundaryUncertaintySeconds': sum(item['end'] - item['start'] for item in boundary_ranges),
@@ -1704,7 +1848,7 @@ def main():
         cpu_threads=args.cpu_threads, workers='1' if args.profile == 'turbo' else args.workers)
 
     def speech_detector(waveform, rate):
-        options = VadOptions(threshold=0.2, min_speech_duration_ms=200,
+        options = VadOptions(threshold=0.2, min_speech_duration_ms=64,
                              min_silence_duration_ms=500, speech_pad_ms=0)
         return [(item['start'] / rate, item['end'] / rate)
                 for item in get_speech_timestamps(waveform, options, sampling_rate=rate)]
@@ -1713,7 +1857,7 @@ def main():
                      device=device, compute_type=compute_type, speech_detector=speech_detector,
                      workers=getattr(model, '_videorandom_workers', 1),
                      parallel_memory_fallback=getattr(model, '_videorandom_parallel_memory_fallback', False),
-                     turbo_pipeline_factory=turbo_factory)
+                     turbo_pipeline_factory=turbo_factory, acoustic_detector=acoustic_activity)
 
 
 if __name__ == '__main__':

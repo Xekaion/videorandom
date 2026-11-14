@@ -15,7 +15,7 @@ async function fixture(t, onReview, { deadline = 500, controller = new AbortCont
   const transcript = [{ id: 'owned-1', start: 1.25, end: 9.75, text: '合成の列車が到着します。安全のためにホームの内側で待ち、案内と出発時間を確認してください。' }];
   const record = { id: 'owned-execution', name: 'owned-synthetic-train.mp4', status: 'partial', hasAudio: true,
     summary: '합성 열차 안내', duration: 20, frames: [], warnings: [], transcript, transcriptLanguage: 'ja',
-    transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: { version: 1, recognitionRevision: 3,
+    transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: { version: 1, recognitionRevision: 4,
       source: 'audio', profile: 'accurate', model: 'large-v3', language: 'ja', complete: true, processingComplete: true,
       duration: 20, processedUntil: 20, wordTimestamps: true,
       audit: { complete: true, unresolved: [], unresolvedCount: 0, speechSeconds: 8, uncoveredSpeechSeconds: 0 }, warnings: [] } };

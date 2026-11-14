@@ -92,14 +92,14 @@ test('saved Japanese cues repair Korean subtitles through service, engine, LAN, 
       dialogueSummary: '기차 안내', labels: ['열차', '안내'], warnings: [],
       sourceFile: { sizeBytes: stat.size, mtimeMs: stat.mtimeMs }, transcriptSource: 'audio:faster-whisper large-v3',
       transcriptLanguage: 'ja', transcript: structuredClone(transcript), frames: [{ timestamp: 10, filename: 'frame-01.jpg', caption: '저장된 합성 장면' }],
-      transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+      transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3',
         language: 'ja', device: 'cuda', workers: 1, complete: true, processingComplete: true, duration: 20, processedUntil: 20,
         wordTimestamps: true, audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false,
           speechSeconds: 10, uncoveredSpeechSeconds: 0 }, warnings: [] },
       subtitleError: 'Synthetic earlier translation interrupted',
       analysisMetrics: { totalMs: 12345, stages: [{ stageKey: 'transcription', durationMs: 10000, label: '음성 인식' }] },
       analysisProvenance: { schemaVersion: 1, analysis: { clientVersion: '1.6.6', serverVersion: '1.6.5',
-        recordedAt: '2026-10-10T01:02:03.000Z', recognition: { recognitionRevision: 3, model: 'large-v3', profile: 'accurate', device: 'cuda', workers: 1 } } } };
+        recordedAt: '2026-10-10T01:02:03.000Z', recognition: { recognitionRevision: 4, model: 'large-v3', profile: 'accurate', device: 'cuda', workers: 1 } } } };
     assert.equal(isVerifiedFullTranscription(original, 'accurate'), true);
     const originalBytes = JSON.stringify(original);
     await fs.writeFile(path.join(dataDir, 'results', seedId + '.json'), originalBytes);
@@ -202,7 +202,7 @@ test('failed remote translation repairs keep the newly reviewed prefix and resum
       summary: '합성 장편 열차 안내의 보관된 요약입니다.', plot: '안내자가 기차 정보를 순서대로 읽는다.', dialogueSummary: '합성 열차 안내',
       labels: ['열차'], warnings: [], frames: [], sourceFile: { sizeBytes: stat.size, mtimeMs: stat.mtimeMs },
       transcript: source, transcriptSource: 'audio:faster-whisper large-v3', transcriptLanguage: 'ja',
-      transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+      transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3',
         language: 'ja', device: 'cuda', complete: true, processingComplete: true, duration: 2100, processedUntil: 2100,
         audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false, speechSeconds: 563.5, uncoveredSpeechSeconds: 0 }, warnings: [] },
       subtitleError: 'Synthetic earlier translation interrupted' };

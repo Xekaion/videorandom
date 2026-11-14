@@ -19,7 +19,7 @@ const { httpJsonFixture } = require('./http-json-fixture');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const sourceId = 'a'.repeat(32), attemptId = 'b'.repeat(32);
-const quality = (changes = {}) => ({ version: 1, recognitionRevision: 3, source: 'audio', profile: 'turbo', model: 'turbo',
+const quality = (changes = {}) => ({ version: 1, recognitionRevision: 4, source: 'audio', profile: 'turbo', model: 'turbo',
     complete: true, processingComplete: true, language: 'ja', duration: 60, processedUntil: 60,
     wordTimestamps: false, batchSize: 4, device: 'cuda', workers: 1, computeType: 'float16',
     audit: { complete: false, unresolved: [] }, warnings: [], ...changes });
@@ -85,7 +85,7 @@ test('safe provenance and compact catalog retain the actual turbo profile and ba
     const saved = record({ transcriptionQuality: { ...quality(), path: 'C:/PRIVATE', connectionCode: 'PRIVATE', transcript: 'PRIVATE' } });
     stampAnalysisProvenance(saved, { operation: 'analysis', clientVersion: '1.9.11', now: '2026-10-19T10:00:00.000Z' });
     const provenance = sanitizeAnalysisProvenance(saved.analysisProvenance);
-    assert.deepEqual(provenance.analysis.recognition, { recognitionRevision: 3, model: 'turbo', profile: 'turbo', device: 'cuda', workers: 1, batchSize: 4 });
+    assert.deepEqual(provenance.analysis.recognition, { recognitionRevision: 4, model: 'turbo', profile: 'turbo', device: 'cuda', workers: 1, batchSize: 4 });
     const compact = catalogRecord(saved);
     assert.deepEqual(compact.analysisProvenance, provenance);
     assert.equal(JSON.stringify(provenance).includes('PRIVATE'), false);

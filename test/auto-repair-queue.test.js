@@ -26,7 +26,7 @@ function result(file) {
   return { ...file, duration: 12, status: 'completed', summary: '합성 기차역 안내입니다.', plot: '', dialogueSummary: '',
     analysisMode: 'codex', analysisProvider: 'codex-chatgpt', labels: [], warnings: [], frames: [], error: null, summaryError: null, subtitleError: null,
     transcript, transcriptSource: 'audio:faster-whisper large-v3', transcriptLanguage: 'ja',
-    transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', recognitionRevision: 3,
+    transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', recognitionRevision: 4,
       complete: true, processingComplete: true, duration: 12, processedUntil: 12,
       audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false }, warnings: [] },
     subtitleLanguage: 'ko', subtitleTranslation: translation, subtitleTranslationProgress: {

@@ -18,7 +18,7 @@ const partial = (indexes = [0, 3, 5], version = 2) => ({ id: 'a'.repeat(32), nam
     status: 'partial', operation: 'translation-only', subtitleRepairStatus: 'partial', duration: 360, ext: 'MP4',
     summary: '보관된 합성 열차 안내', warnings: [], labels: [], frames: [], hasAudio: true,
     transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper turbo', transcript: structuredClone(source),
-    transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'turbo', model: 'turbo',
+    transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'turbo', model: 'turbo',
         complete: true, processingComplete: true, duration: 360, processedUntil: 360, wordTimestamps: false,
         audit: { complete: false, unresolved: [] }, warnings: [] },
     subtitleTranslationPartial: indexes.map(index => ({ id: source[index].id, start: source[index].start, end: source[index].end, text: `검수한 합성 안내 ${index + 1}` })),

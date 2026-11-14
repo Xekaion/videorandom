@@ -284,7 +284,7 @@ test('an interrupted source audit with no shared failure remains partial and doe
     const record = incomplete(file); record.subtitleError = null;
     record.subtitleDiagnostic = { code: 'SOURCE_REVIEW_REQUIRED', event: 'partial', level: 'warning', stage: 'transcription' };
     record.transcriptSource = 'audio:faster-whisper large-v3';
-    record.transcriptionQuality = { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', recognitionRevision: 3,
+    record.transcriptionQuality = { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', recognitionRevision: 4,
       complete: false, processingComplete: false, duration: 12, processedUntil: 4,
       audit: { complete: false, unresolved: [{ start: 4, end: 5, reason: 'low_confidence' }], unresolvedCount: 1 }, warnings: [] };
     record.subtitleTranslationProgress.sourceComplete = false; return record;

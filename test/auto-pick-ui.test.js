@@ -1320,7 +1320,7 @@ test('an unfinished translated prefix shows counts without claiming all speech o
 });
 
 test('quality details separate completed file processing and translation review from remaining source checks with exact truncated totals', async () => {
-  const record = { ...partialTimedRecord(), transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', recognitionRevision: 3,
+  const record = { ...partialTimedRecord(), transcriptionQuality: { version: 1, source: 'audio', profile: 'accurate', recognitionRevision: 4,
     model: 'large-v3', processingComplete: true, complete: false, duration: 600, processedUntil: 600,
     audit: { complete: false, unresolvedCount: 303, unresolvedTruncated: true,
       unresolvedByReason: { low_confidence: 300, possible_missing_speech: 3, unrecognized_reason: 17 },

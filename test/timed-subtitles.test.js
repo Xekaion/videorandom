@@ -372,7 +372,7 @@ test('a full analysis clears an older failed repair marker before returning a ne
   const { dataDir, record } = await fixture(t, { duration: 15, transcriptSource: 'audio:faster-whisper large-v3',
     subtitleRepairStatus: 'failed', subtitleError: 'owned previous attempt failure',
     subtitleDiagnostic: { code: 'PROVIDER_UNAVAILABLE', event: 'error', level: 'error' },
-    transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+    transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3',
       complete: true, duration: 15, processedUntil: 15, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
       audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } });
   const mocked = mockedProvider(call => {

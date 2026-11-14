@@ -8,7 +8,7 @@ const { reuseCachedExtraction } = require('../lib/cached-extraction');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
 const sourceId = 'a'.repeat(32), attemptId = 'b'.repeat(32);
-const completeAccurate = () => ({ version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, processingComplete: true,
+const completeAccurate = () => ({ version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, processingComplete: true,
   language: 'ja', duration: 60, processedUntil: 60, wordTimestamps: true,
   audit: { complete: true, speechSeconds: 4, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] });
 
@@ -160,7 +160,7 @@ test('cancelled cached repair propagates abort without re-extraction or modifyin
 test('accurate Korean repair refuses sidecars, small-model and incomplete cached recognition', async t => {
   const variations = [{}, { transcriptionQuality: { ...completeAccurate(), model: 'small' } },
     { transcriptionQuality: { ...completeAccurate(), recognitionRevision: undefined } }, { transcriptionQuality: { ...completeAccurate(), recognitionRevision: 1 } },
-    { transcriptionQuality: { ...completeAccurate(), recognitionRevision: 2 } }, { transcriptionQuality: { ...completeAccurate(), processingComplete: false } },
+    { transcriptionQuality: { ...completeAccurate(), recognitionRevision: 2 } }, { transcriptionQuality: { ...completeAccurate(), recognitionRevision: 3 } }, { transcriptionQuality: { ...completeAccurate(), processingComplete: false } },
     { transcriptionQuality: { ...completeAccurate(), profile: 'fast' } }, { transcriptionQuality: { ...completeAccurate(), complete: false } },
     { transcriptionQuality: { ...completeAccurate(), processedUntil: 20 } },
     { transcriptionQuality: completeAccurate(), transcriptSource: 'sidecar:neutral.ja.srt' },
@@ -226,7 +226,7 @@ test('legacy v2 recognition is decoded again for accurate repair while its saved
     });
     const result = await engine.analyzeVideo(f.file, { ...f.options, mode, subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
     assert.equal(result.summary, '최신 검수 재인식');
-    assert.equal(result.transcriptionQuality.recognitionRevision, 3);
+    assert.equal(result.transcriptionQuality.recognitionRevision, 4);
     assert.equal(result.extractionReusedFrom, undefined);
     assert.deepEqual(calls, { extraction: 1, tools: 1, audio: mode === 'remote' ? 1 : 0, analysis: 1 });
     assert.equal(JSON.stringify(f.saved), before);
@@ -245,7 +245,7 @@ test('verified accurate cache retains word confidence and proof and avoids speec
     const result = await f.engine.analyzeVideo(f.file, { ...f.options, mode, subtitleQuality: 'accurate' }, { dataDir: f.dataDir });
     assert.equal(result.extractionReusedFrom, sourceId);
     assert.equal(result.transcriptionQuality.profile, 'accurate');
-    assert.equal(result.transcriptionQuality.recognitionRevision, 3);
+    assert.equal(result.transcriptionQuality.recognitionRevision, 4);
     assert.equal(result.transcriptionQuality.processingComplete, true);
     assert.equal(result.transcript[0].words[0].probability, 0.95);
     assert.equal(f.calls.extraction, 0);

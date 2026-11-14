@@ -30,7 +30,7 @@ async function fixture(t, { count = 640, pipeline = true, handler } = {}) {
     const duration = count * 4 + 1;
     const record = { id: 'owned-pipeline-resume-v1917', name: 'owned-synthetic-train.mp4', summary: '보관한 합성 열차 안내',
         transcript, duration, warnings: [], frames: [], transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
-        transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+        transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3',
             complete: true, duration, processedUntil: duration, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
     const calls = [], commits = [], diagnostics = [], controller = new AbortController();

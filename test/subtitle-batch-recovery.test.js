@@ -60,7 +60,7 @@ async function fixture(t, { count = 80, respond, afterResponse } = {}) {
   const duration = count * 13 + 5;
   const record = { id: 'owned-batch-film', name: '합성 열차 안내.mp4', path: 'owned-synthetic-video-not-opened.mp4', duration, hasAudio: true,
     status: 'completed', summary: '보관된 합성 열차 안내', plot: '합성 열차의 출발 안내입니다.', frames: [], warnings: [], transcript: source,
-    transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: { version: 1, recognitionRevision: 3,
+    transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3', transcriptionQuality: { version: 1, recognitionRevision: 4,
       source: 'audio', profile: 'accurate', model: 'large-v3', complete: true, duration, processedUntil: duration, wordTimestamps: true,
       language: 'ja', languageProbability: 0.99, audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
   const requests = [];

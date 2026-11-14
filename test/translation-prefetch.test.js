@@ -20,7 +20,7 @@ async function fixture(t, { count = 480, environment = {}, handler, onCheckpoint
         end: index * 6 + 4.75, text: originalText }));
     const record = { id: 'synthetic-translation', name: 'synthetic.mp4', transcript, duration: count * 6 + 5, warnings: [], frames: [],
         transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3', summary: '보관된 합성 요약',
-        transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
+        transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', complete: true,
             duration: count * 6 + 5, processedUntil: count * 6 + 5, wordTimestamps: true, language: 'ja', languageProbability: 0.99,
             audit: { complete: true, speechSeconds: 10, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] } };
     const calls = [], commits = [], events = [];

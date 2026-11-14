@@ -89,7 +89,7 @@ test('fully processed content gaps preserve partial subtitle counts and allow ne
 test('fully processed ASR with confidence warnings can continue after every retained source cue was attempted', async t => {
   const f = await fixture(t, { change: record => {
     record.transcriptSource = 'audio:faster-whisper large-v3';
-    record.transcriptionQuality = { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', recognitionRevision: 3,
+    record.transcriptionQuality = { version: 1, source: 'audio', profile: 'accurate', model: 'large-v3', recognitionRevision: 4,
       complete: false, processingComplete: true, duration: 12, processedUntil: 12,
       audit: { complete: false, unresolved: [{ start: 4, end: 5, reason: 'low_confidence' }], unresolvedCount: 1 }, warnings: [] };
     Object.assign(record.subtitleTranslationProgress, { sourceComplete: false, sourceProcessed: true, sourceAuditComplete: false });

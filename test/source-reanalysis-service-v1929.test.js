@@ -29,7 +29,7 @@ function complete(file, count, generation) {
     dialogueSummary: '합성 대사 안내', labels: [], warnings: [], frames: [], transcriptSource: 'audio:faster-whisper small',
     transcriptLanguage: 'ja', transcript, subtitleLanguage: 'ko',
     subtitleTranslation: transcript.map(cue => ({ ...cue, text: '합성 열차 출발 안내입니다.' })),
-    transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'fast', model: 'small',
+    transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'fast', model: 'small',
       complete: true, processingComplete: true, duration: 7200, processedUntil: 7200,
       audit: { complete: true, unresolved: [], unresolvedCount: 0, unresolvedTruncated: false }, warnings: [] },
     subtitleTranslationProgress: { version: 1, language: 'ko', totalCues: count, completedCues: count,

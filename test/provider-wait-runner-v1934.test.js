@@ -17,7 +17,7 @@ async function fixture(t, behavior, options = {}) {
   const record = { id: 'owned-wait', name: 'owned-neutral-train.mp4', duration: transcript.length * 3,
     status: 'partial', hasAudio: true, summary: '합성 열차 안내', frames: [], warnings: [], transcript,
     transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
-    transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3', language: 'ja',
+    transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3', language: 'ja',
       complete: true, processingComplete: true, duration: transcript.length * 3, processedUntil: transcript.length * 3,
       wordTimestamps: true, audit: { complete: true, unresolved: [], unresolvedCount: 0 }, warnings: [] } };
   const calls = [], progress = [], diagnostics = [], checkpoints = [];

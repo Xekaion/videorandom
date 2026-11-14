@@ -16,7 +16,7 @@ const NEW_CUES = [{ start: 1, end: 3, text: 'The neutral train arrives.' },
 const HOST = { ready: true, protocol: 1, capabilities: ['subtitle-quality-v3', 'turbo-subtitles-v1'] };
 
 function fullQuality(profile) {
-  return { version: 1, recognitionRevision: 3, source: 'audio', profile, model: profile === 'accurate' ? 'large-v3' : profile === 'turbo' ? 'turbo' : 'small',
+  return { version: 1, recognitionRevision: 4, source: 'audio', profile, model: profile === 'accurate' ? 'large-v3' : profile === 'turbo' ? 'turbo' : 'small',
     complete: true, processingComplete: true, duration: 3600, processedUntil: 3600,
     audit: { complete: profile !== 'turbo', speechSeconds: 200, uncoveredSpeechSeconds: 0, unresolved: [] }, warnings: [] };
 }

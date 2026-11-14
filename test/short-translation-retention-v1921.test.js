@@ -27,7 +27,7 @@ async function fixture(t, { count = 81, profile = 'accurate', reviewShape = 'com
     const record = { id: 'owned-short-retention-v1921', name: 'owned-synthetic-interchange.mp4', duration,
         transcript, transcriptLanguage: 'ja', transcriptSource: 'audio:faster-whisper large-v3',
         summary: '보관된 합성 환승 안내', frames: [], warnings: [],
-        transcriptionQuality: { version: 1, recognitionRevision: 3, source: 'audio', profile: 'accurate', model: 'large-v3',
+        transcriptionQuality: { version: 1, recognitionRevision: 4, source: 'audio', profile: 'accurate', model: 'large-v3',
             complete: sourceComplete, processingComplete: sourceComplete, duration, processedUntil: duration, wordTimestamps: true,
             language: 'ja', languageProbability: 0.99, audit: { complete: sourceComplete,
                 speechSeconds: 10, uncoveredSpeechSeconds: sourceComplete ? 0 : 1,
