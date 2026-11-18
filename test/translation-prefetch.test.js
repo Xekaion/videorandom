@@ -13,7 +13,7 @@ const response = call => ({ subtitles: call.input.subtitles.map(cue => ({ index:
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
-async function fixture(t, { count = 480, environment = {}, handler, onCheckpoint, onDiagnostic, signal, quality = 'accurate' } = {}) {
+async function fixture(t, { count = 480, environment = {}, handler, onCheckpoint, onDiagnostic, signal, quality = 'accurate', now } = {}) {
     const dataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'videorandom-translation-prefetch-'));
     t.after(() => fs.promises.rm(dataDir, { recursive: true, force: true }));
     const transcript = Array.from({ length: count }, (_, index) => ({ id: `synthetic-${index}`, start: index * 6 + 0.25,
@@ -59,7 +59,7 @@ async function fixture(t, { count = 480, environment = {}, handler, onCheckpoint
         }));
         return child;
     };
-    const instance = createNoKeyProvider({ spawnImpl, environment: { VIDEORANDOM_CODEX: 'owned-synthetic-codex', ...environment }, platform: 'win32' });
+    const instance = createNoKeyProvider({ spawnImpl, environment: { VIDEORANDOM_CODEX: 'owned-synthetic-codex', ...environment }, platform: 'win32', ...(now ? { now } : {}) });
     const run = options => instance.translateKoreanOnly(record, { dataDir, subtitleQuality: quality, signal,
         onCheckpoint: async value => { commits.push(value.subtitleTranslationProgress?.completedCues || 0); if (onCheckpoint) await onCheckpoint(value); },
         onDiagnostic: value => { events.push(value); if (onDiagnostic) onDiagnostic(value); }, ...options });
@@ -70,6 +70,32 @@ async function fixture(t, { count = 480, environment = {}, handler, onCheckpoint
     };
     return { dataDir, record, transcript, calls, commits, events, run, assertDrained, get peak() { return peak; }, get peakReviews() { return peakReviews; } };
 }
+
+test('steady model replies widen only future requests, then a slow review restores small requests', async t => {
+    let clock = 0;
+    let slowStart;
+    const f = await fixture(t, { count: 1000, now: () => clock, handler: call => {
+        call.child.stdout.write('{"type":"turn.started"}\n');
+        if (call.review && call.count === 64 && slowStart === undefined) {
+            slowStart = call.start;
+            clock += 14000;
+        } else clock += 1600;
+        return call.review ? { approvedIndexes: call.input.subtitles.map(cue => cue.index), corrections: [], terms: [] } : response(call);
+    } });
+    const result = await f.run();
+    assert.equal(result.subtitleRepairStatus, 'completed', result.subtitleError);
+    assert.deepEqual(result.subtitleTranslation.map(cue => [cue.id, cue.start, cue.end]), f.transcript.map(cue => [cue.id, cue.start, cue.end]));
+    const draft = f.calls.filter(call => !call.review).map(call => [call.start, call.count]);
+    const review = f.calls.filter(call => call.review).map(call => [call.start, call.count]);
+    assert.deepEqual(review, draft, 'a prefetched request and its review must retain the same exact boundaries');
+    assert.equal(draft[0][1], 32);
+    assert(draft.some(([, count]) => count === 48));
+    assert(Number.isInteger(slowStart));
+    assert(draft.filter(([start]) => start > slowStart).slice(0, 2).some(([, count]) => count === 32));
+    assert(f.calls.length < 2 * Math.ceil(f.transcript.length / 32));
+    assert.equal(f.peak, 2);
+    await f.assertDrained();
+});
 
 test('accurate long translation overlaps one next draft after warmup while every review uses the latest committed context', async t => {
     const f = await fixture(t, { handler: async call => {

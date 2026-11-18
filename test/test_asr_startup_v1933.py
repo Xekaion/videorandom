@@ -15,12 +15,27 @@ SPEC.loader.exec_module(ASR)
 class StartupTests(unittest.TestCase):
     def test_accurate_cli_uses_overlap_and_forwards_the_same_audio_and_quality_inputs(self):
         waveform, events, calls = [0.0, .125, -.125], [], []
+        model_started, vad_started = threading.Event(), threading.Event()
+        detector_threads = []
         model = types.SimpleNamespace(_videorandom_workers=2, _videorandom_parallel_memory_fallback=False)
         decoder = types.SimpleNamespace(decode_audio=lambda *args, **kwargs: waveform)
-        vad = types.SimpleNamespace(VadOptions=lambda **kwargs: kwargs, get_speech_timestamps=lambda *args, **kwargs: [])
+
+        def detect(actual_audio, options, *, sampling_rate):
+            self.assertIs(actual_audio, waveform)
+            self.assertEqual(sampling_rate, ASR.SAMPLE_RATE)
+            self.assertEqual(options, {'threshold': 0.2, 'min_speech_duration_ms': 64,
+                                      'min_silence_duration_ms': 500, 'speech_pad_ms': 0})
+            detector_threads.append(threading.get_ident())
+            vad_started.set()
+            self.assertTrue(model_started.wait(2))
+            return []
+
+        vad = types.SimpleNamespace(VadOptions=lambda **kwargs: kwargs, get_speech_timestamps=detect)
 
         def load(*args, **kwargs):
             calls.append(('model', args, kwargs, threading.get_ident()))
+            model_started.set()
+            self.assertTrue(vad_started.wait(2), 'full VAD starts before model setup finishes')
             return model, 'cuda', 'int8_float16'
 
         def transcribe(actual_model, actual_audio, **kwargs):
@@ -33,6 +48,7 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(kwargs['compute_type'], 'int8_float16')
             self.assertFalse(kwargs['parallel_memory_fallback'])
             self.assertEqual(kwargs['speech_detector'](waveform, ASR.SAMPLE_RATE), [])
+            self.assertTrue(kwargs['overlap_acoustic'])
             calls.append(('transcribe',))
 
         caller = threading.get_ident()
@@ -45,6 +61,8 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(calls[0][1], ('large-v3', 'owned-cache'))
         self.assertEqual(calls[0][2]['workers'], 'auto')
         self.assertEqual(calls[0][3], caller)
+        self.assertEqual(len(detector_threads), 1, 'first recognition consumes the precomputed VAD once')
+        self.assertNotEqual(detector_threads[0], caller)
         self.assertEqual(events[0]['type'], 'loading')
 
     def test_independent_loaders_overlap_with_unchanged_identity_arguments_and_threads(self):

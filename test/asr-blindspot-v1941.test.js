@@ -13,7 +13,7 @@ test('independent acoustic review recovers VAD blind spots without fabricated cu
   if (result.error?.code === 'ENOENT') { t.skip('Python is unavailable.'); return; }
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stderr, /Ran 17 tests/);
+  assert.match(result.stderr, /Ran 18 tests/);
 });
 
 test('acoustic audit metadata survives normalization without certifying unresolved sound', () => {

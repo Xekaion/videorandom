@@ -3,6 +3,7 @@ import importlib.util
 import math
 import random
 import sys
+import threading
 import types
 from pathlib import Path
 import unittest
@@ -110,6 +111,49 @@ class BlindspotTests(unittest.TestCase):
         self.assertFalse(quality['audit']['complete'])
         self.assertIn('acoustic_audit_unavailable', quality['audit']['unresolvedByReason'])
 
+    def test_cuda_overlaps_read_only_acoustic_audit_with_first_decode_with_identical_outputs(self):
+        audio = signal(10, [(1, 1.5)])
+        source = audio.copy()
+        caller = threading.get_ident()
+
+        def run(overlap, failure=None):
+            audit_started, decode_started = threading.Event(), threading.Event()
+            events, detector_threads, decode_calls = [], [], []
+
+            def detector(waveform, rate):
+                self.assertIs(waveform, audio)
+                self.assertEqual(rate, ASR.SAMPLE_RATE)
+                detector_threads.append(threading.get_ident())
+                audit_started.set()
+                if overlap:
+                    self.assertTrue(decode_started.wait(2), 'first decode starts while audit is pending')
+                if failure is not None:
+                    raise failure
+                return ASR.acoustic_activity(waveform, rate)
+
+            class Model:
+                def transcribe(self, chunk, **options):
+                    self_outer.assertEqual(threading.get_ident(), caller)
+                    decode_calls.append((chunk.copy().tobytes(), options))
+                    if len(decode_calls) == 1:
+                        if overlap:
+                            self_outer.assertTrue(audit_started.wait(2), 'audit starts before first decode returns')
+                        decode_started.set()
+                        return iter([]), None
+                    return iter([native(1, 1.5)]), None
+
+            self_outer = self
+            result = ASR.transcribe_audio(Model(), audio, language='ja', device='cuda',
+                speech_detector=lambda *args: [], acoustic_detector=detector,
+                overlap_acoustic=overlap, emitter=events.append)
+            self.assertEqual(len(detector_threads), 1)
+            self.assertEqual(detector_threads[0] == caller, not overlap)
+            return result, decode_calls, events
+
+        self.assertEqual(run(True), run(False))
+        self.assertEqual(run(True, RuntimeError('owned audit failure')), run(False, RuntimeError('owned audit failure')))
+        np.testing.assert_array_equal(audio, source)
+
     def test_fast_mode_does_not_add_an_acoustic_audit(self):
         def forbidden(*args):
             raise AssertionError('must not run')
@@ -175,7 +219,7 @@ class BlindspotTests(unittest.TestCase):
             return original_transcribe(*args, **kwargs, emitter=events.append)
         with patch.dict(sys.modules, {'faster_whisper.audio': audio_module, 'faster_whisper.vad': vad_module}), \
              patch.object(sys, 'argv', ['owned', '--audio', 'owned.flac', '--cache', 'unused', '--profile', 'accurate', '--language', 'ja']), \
-             patch.object(ASR, 'load_model_and_audio', return_value=(Model(), 'cpu', 'int8', signal(10))), \
+             patch.object(ASR, 'load_whisper_model', return_value=(Model(), 'cpu', 'int8')), \
              patch.object(ASR, 'emit', side_effect=events.append), \
              patch.object(ASR, 'transcribe_audio', side_effect=observed_transcribe):
             ASR.main()

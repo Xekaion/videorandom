@@ -2,6 +2,7 @@
 import argparse
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout, wait as wait_futures, FIRST_COMPLETED
+from contextlib import ExitStack
 import gc
 import json
 import math
@@ -1399,7 +1400,7 @@ def choose_language(model, audio, duration, language, sample_rate, speech=None):
 def transcribe_audio(model, audio, *, profile='accurate', model_name=None, language='auto',
                      device='cpu', compute_type='int8', sample_rate=SAMPLE_RATE,
                      speech_detector=None, emitter=emit, workers=1, parallel_memory_fallback=False,
-                     turbo_pipeline_factory=None, acoustic_detector=None):
+                     turbo_pipeline_factory=None, acoustic_detector=None, overlap_acoustic=False):
     if profile == 'turbo':
         return transcribe_turbo_audio(model, audio, model_name=model_name or 'turbo', language=language,
             device=device, compute_type=compute_type, sample_rate=sample_rate, emitter=emitter,
@@ -1444,20 +1445,46 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name=None, langu
                  'windowIndex': window, 'windowCount': len(cores), 'workers': state['workers'], 'heartbeat': True})
 
     initial_windows = [(max(0.0, start - 2.0), min(duration, end + 2.0), start, end) for start, end in cores]
-    for window, (decode_start, decode_end, core_start, core_end), segments in decode_windows(
-            model, audio, initial_windows, options, sample_rate, state, emitter, transcription_waiting):
-        for segment in segments:
-            for cue in cues_from_segment(segment, decode_start, duration, (core_start, core_end),
-                                         word_timestamps_expected=profile == 'accurate'):
-                cues.append({**cue, '_window': window, '_boundary': core_start})
-                emitter({'type': 'segment', **cue})
-        # A consumed empty generator also means the silent tail was examined.
-        processed = core_end
-        emitter({'type': 'progress', 'phase': 'transcription', 'completedSeconds': processed,
-                 'totalSeconds': duration, 'percent': 80.0 * processed / duration, 'workers': state['workers']})
-    cues = reconcile_window_boundaries(cues)
-    unresolved, rechecked, budget = [], 0.0, 0.0
     acoustic, acoustic_available = [], acoustic_detector is None
+    with ExitStack() as audit_workers:
+        acoustic_task = None
+        if profile == 'accurate' and device == 'cuda' and acoustic_detector is not None and overlap_acoustic:
+            # The acoustic detector only reads the waveform. Run this CPU
+            # audit during the CUDA pass, then join before planning rechecks.
+            executor = audit_workers.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix='videorandom-acoustic'))
+            try:
+                acoustic_task = executor.submit(acoustic_detector, audio, sample_rate)
+            except RuntimeError:
+                # If a background worker cannot start, run the same audit
+                # at the original boundary instead of dropping the audit.
+                pass
+            if acoustic_task is not None:
+                audit_workers.callback(acoustic_task.cancel)
+        for window, (decode_start, decode_end, core_start, core_end), segments in decode_windows(
+                model, audio, initial_windows, options, sample_rate, state, emitter, transcription_waiting):
+            for segment in segments:
+                for cue in cues_from_segment(segment, decode_start, duration, (core_start, core_end),
+                                             word_timestamps_expected=profile == 'accurate'):
+                    cues.append({**cue, '_window': window, '_boundary': core_start})
+                    emitter({'type': 'segment', **cue})
+            # A consumed empty generator means the silent tail was examined.
+            processed = core_end
+            emitter({'type': 'progress', 'phase': 'transcription', 'completedSeconds': processed,
+                     'totalSeconds': duration, 'percent': 80.0 * processed / duration, 'workers': state['workers']})
+        cues = reconcile_window_boundaries(cues)
+        if profile == 'accurate':
+            emitter({'type': 'progress', 'phase': 'audit', 'completedSeconds': duration, 'totalSeconds': duration, 'percent': 82.0,
+                     'workers': state['workers']})
+            if acoustic_detector is not None:
+                try:
+                    candidates = acoustic_task.result() if acoustic_task else acoustic_detector(audio, sample_rate)
+                    acoustic = merge_intervals(candidates, duration)
+                    acoustic_available = True
+                except Exception as error:
+                    warning = '별도 음향 누락 검사를 완료하지 못했습니다. 대사 완전성 확인이 필요합니다. ' + str(error)[:200]
+                    warnings.append(warning)
+                    emitter({'type': 'warning', 'message': warning})
+    unresolved, rechecked, budget = [], 0.0, 0.0
     acoustic_gaps = []
     opening_end = 0.0
     raw_gaps = []
@@ -1465,16 +1492,6 @@ def transcribe_audio(model, audio, *, profile='accurate', model_name=None, langu
     boundary_diagnostics = {}
     removed_non_speech = []
     if profile == 'accurate':
-        emitter({'type': 'progress', 'phase': 'audit', 'completedSeconds': duration, 'totalSeconds': duration, 'percent': 82.0,
-                 'workers': state['workers']})
-        if acoustic_detector is not None:
-            try:
-                acoustic = merge_intervals(acoustic_detector(audio, sample_rate), duration)
-                acoustic_available = True
-            except Exception as error:
-                warning = '별도 음향 누락 검사를 완료하지 못했습니다. 대사 완전성 확인이 필요합니다. ' + str(error)[:200]
-                warnings.append(warning)
-                emitter({'type': 'warning', 'message': warning})
         if audit_available:
             cues, removed = prune_non_speech_artifacts(cues, audio, speech, sample_rate)
             removed_non_speech.extend(removed)
@@ -1853,9 +1870,6 @@ def main():
     # Resolve before loading a model so a missing batch API fails actionably.
     turbo_factory = batched_pipeline_class() if args.profile == 'turbo' else None
     emit({'type': 'loading', 'model': model_name, 'profile': args.profile, 'device': args.device, 'computeType': args.compute_type})
-    model, device, compute_type, audio = load_model_and_audio(model_name, args.cache, args.audio,
-        audio_loader=decode_audio, device=args.device, compute_type=args.compute_type,
-        cpu_threads=args.cpu_threads, workers='1' if args.profile == 'turbo' else args.workers)
 
     def speech_detector(waveform, rate):
         options = VadOptions(threshold=0.2, min_speech_duration_ms=64,
@@ -1863,11 +1877,39 @@ def main():
         return [(item['start'] / rate, item['end'] / rate)
                 for item in get_speech_timestamps(waveform, options, sampling_rate=rate)]
 
+    def decode_with_speech(filename, sampling_rate):
+        waveform = decode_audio(filename, sampling_rate=sampling_rate)
+        # The first pass needs the same full VAD boundaries before choosing
+        # language and windows, but not before the model can start loading.
+        if not len(waveform):
+            return waveform, None, None
+        try:
+            return waveform, speech_detector(waveform, sampling_rate), None
+        except Exception as error:
+            # Report VAD availability at the usual audit stage. A model or
+            # audio open failure still has its original precedence.
+            return waveform, None, str(error)[:200]
+
+    accurate = args.profile == 'accurate'
+    model, device, compute_type, decoded = load_model_and_audio(model_name, args.cache, args.audio,
+        audio_loader=decode_with_speech if accurate else decode_audio, device=args.device, compute_type=args.compute_type,
+        cpu_threads=args.cpu_threads, workers='1' if args.profile == 'turbo' else args.workers)
+    if accurate:
+        audio, speech, speech_error = decoded
+
+        def prepared_speech_detector(_waveform, _rate):
+            if speech_error is not None:
+                raise RuntimeError(speech_error)
+            return speech
+    else:
+        audio = decoded
+        prepared_speech_detector = speech_detector
+
     transcribe_audio(model, audio, profile=args.profile, model_name=model_name, language=args.language,
-                     device=device, compute_type=compute_type, speech_detector=speech_detector,
+                     device=device, compute_type=compute_type, speech_detector=prepared_speech_detector,
                      workers=getattr(model, '_videorandom_workers', 1),
                      parallel_memory_fallback=getattr(model, '_videorandom_parallel_memory_fallback', False),
-                     turbo_pipeline_factory=turbo_factory, acoustic_detector=acoustic_activity)
+                     turbo_pipeline_factory=turbo_factory, acoustic_detector=acoustic_activity, overlap_acoustic=accurate)
 
 
 if __name__ == '__main__':
