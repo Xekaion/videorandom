@@ -426,7 +426,11 @@ def review_gaps(raw):
 
 def high_confidence(cue):
     probability = cue_confidence(cue)
-    return (not low_confidence(cue) and probability is not None and probability >= 0.7
+    return _high_confidence_at(cue, probability)
+
+
+def _high_confidence_at(cue, probability):
+    return (not _low_confidence_at(cue, probability) and probability is not None and probability >= 0.7
             and (not finite(cue.get('avgLogprob')) or cue['avgLogprob'] >= -0.5)
             and (not finite(cue.get('noSpeechProbability')) or cue['noSpeechProbability'] <= 0.4))
 
@@ -503,6 +507,12 @@ def cue_confidence(cue):
 
 def low_confidence(cue):
     probability = cue_confidence(cue)
+    return _low_confidence_at(cue, probability)
+
+
+def _low_confidence_at(cue, probability):
+    # A caller may have already scanned the aligned words. Reuse only that
+    # invocation's scalar; do not cache mutable cues across decoding/rechecks.
     return ((probability is not None and probability < 0.45)
             or (finite(cue.get('avgLogprob')) and cue['avgLogprob'] < -1.0)
             or (finite(cue.get('noSpeechProbability')) and cue['noSpeechProbability'] > 0.8))
@@ -1173,11 +1183,11 @@ def transcript_key(text):
 def recheck_improves(old, candidate):
     """A resolved log/silence signal matters even when word scores are equal."""
     old_score, new_score = cue_confidence(old), cue_confidence(candidate)
-    if not needs_review(old) or needs_review(candidate) or old_score is None or new_score is None:
+    if not _low_confidence_at(old, old_score) or _low_confidence_at(candidate, new_score) or old_score is None or new_score is None:
         return False
     if new_score >= old_score + 0.1:
         return True
-    if not high_confidence(candidate):
+    if not _high_confidence_at(candidate, new_score):
         return False
     old_log, new_log = old.get('avgLogprob'), candidate.get('avgLogprob')
     old_silence, new_silence = old.get('noSpeechProbability'), candidate.get('noSpeechProbability')
@@ -1254,7 +1264,7 @@ def concordant_rechecks(original, candidates):
     eligible = []
     for index, cue in enumerate(candidates):
         score = cue_confidence(cue)
-        if cue.get('words') and not needs_review(cue) and score is not None and score >= 0.7:
+        if cue.get('words') and not _low_confidence_at(cue, score) and score is not None and score >= 0.7:
             eligible.append(((cue['start'] + cue['end']) / 2, index, cue))
     eligible.sort(key=lambda entry: (entry[0], entry[1]))
     midpoints = [midpoint for midpoint, _, _ in eligible]

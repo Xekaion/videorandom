@@ -1405,6 +1405,52 @@ test('multi-batch translation retains identical checkpoint bytes while hashing i
     } finally { crypto.createHash = originalCreateHash; }
 });
 
+test('unchanged durable index bytes reuse prior validation while every checkpoint still reaches disk', async t => {
+    const f = await translationGuardFixture(t, { count: 321 });
+    const originalParse = JSON.parse;
+    let indexDecodes = 0, snapshots = 0;
+    JSON.parse = function (value, ...args) {
+        if (typeof value === 'string' && value.includes('"targetLanguage":"ko"') && value.includes('"translationVersion":')) indexDecodes++;
+        return originalParse.call(this, value, ...args);
+    };
+    try {
+        const result = await f.run({ subtitleQuality: 'fast', onCheckpoint: async () => {
+            const directory = path.join(f.dataDir, 'checkpoints');
+            const indexName = (await fs.promises.readdir(directory)).find(name => name.includes('-translation-ko-v'));
+            const [own, indexed] = await Promise.all([
+                fs.promises.readFile(path.join(directory, f.record.id + '-ko.json'), 'utf8'),
+                fs.promises.readFile(path.join(directory, indexName), 'utf8')
+            ]);
+            assert.equal(own, indexed, 'both durable files retain exactly the same bytes');
+            snapshots++;
+        } });
+        assert.equal(result.subtitleRepairStatus, 'completed');
+        assert(snapshots >= 12, 'initial, source-ordered progress and final writes are retained');
+        assert.equal(indexDecodes, 0, 'our exact prior bytes need no repeated JSON or Korean validation');
+    } finally { JSON.parse = originalParse; }
+});
+
+test('a valid conflicting content-index edit is revalidated and preserved instead of trusting stale proof', async t => {
+    const f = await translationGuardFixture(t, { count: 321 });
+    let edited = false, editedBytes, indexPath;
+    const result = await f.run({ subtitleQuality: 'fast', onCheckpoint: async current => {
+        if (edited || current.subtitleTranslationProgress.completedCues !== 32) return;
+        const directory = path.join(f.dataDir, 'checkpoints');
+        const indexName = (await fs.promises.readdir(directory)).find(name => name.includes('-translation-ko-v'));
+        indexPath = path.join(directory, indexName);
+        const saved = JSON.parse(await fs.promises.readFile(indexPath, 'utf8'));
+        saved.subtitles[0].text = '별도로 검수한 합성 열차 안내입니다.';
+        editedBytes = JSON.stringify(saved);
+        await fs.promises.writeFile(indexPath, editedBytes);
+        edited = true;
+    } });
+    assert.equal(result.subtitleRepairStatus, 'completed');
+    assert.equal(edited, true);
+    assert.equal(await fs.promises.readFile(indexPath, 'utf8'), editedBytes, 'different accepted wording remains protected');
+    assert.deepEqual(result.subtitleTranslation.map(cue => cue.id), f.source.map(cue => cue.id));
+    assert.equal(result.subtitleTranslation[0].text.replace(/\s+/g, ' '), faithfulKorean);
+});
+
 test('a short accurate draft reaches source review and only its corrected final translation is committed', async t => {
     const f = await translationGuardFixture(t, { respond: item => ({ subtitles: item.input.subtitles.map(cue => ({ index: cue.index,
         text: item.review ? faithfulKorean : '네.' })), terms: [] }) });
